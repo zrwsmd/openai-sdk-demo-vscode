@@ -1,0 +1,88 @@
+{
+  "name": "plc-agent-vscode",
+  "version": "1.0.0",
+  "description": "基于 @openai/agents 的 PLC 编程助手 VSCode 插件:侧边栏对话 + agent 工具调用 + 流式输出",
+  "main": "./dist/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --target=node18 --outfile=dist/extension.js",
+    "watch": "npm run compile -- --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@openai/agents": "^0.17.0",
+    "openai": "^7.10.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/vscode": "^1.136.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "displayName": "PLC 编程助手 (OpenAI Agents SDK Demo)",
+  "publisher": "zrwsmd",
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "plcAgent",
+          "title": "PLC Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "plcAgent": [
+        {
+          "type": "webview",
+          "id": "plcAgent.chatView",
+          "name": "PLC 编程助手"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "plcAgent.openChat",
+        "title": "打开 PLC 编程助手",
+        "category": "PLC Agent"
+      },
+      {
+        "command": "plcAgent.clearChat",
+        "title": "清空会话",
+        "category": "PLC Agent"
+      }
+    ],
+    "configuration": {
+      "title": "PLC Agent",
+      "properties": {
+        "plcAgent.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI 兼容网关地址(带 /v1),留空则用环境变量 OPENAI_BASE_URL 或官方 API"
+        },
+        "plcAgent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key,留空则用环境变量 OPENAI_API_KEY"
+        },
+        "plcAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "模型名,留空则用环境变量 AGENT_MODEL,再退回 gpt-4o-mini"
+        }
+      }
+    }
+  }
+}
