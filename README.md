@@ -16,19 +16,25 @@ npm install
 
 1. 会弹出"扩展开发宿主"窗口(一个新的 VSCode)
 2. 左侧活动栏出现 **PLC Agent** 图标(机器人对话气泡),点开
-3. 底部输入框输入问题即可对话,工具调用会有 "⚙ 调用工具 get_io_table" 提示
+3. 首次使用:点输入框右下角 ⚙ 齿轮,填 Base URL / API Key / Model 并保存(只需一次)
+4. 底部输入框输入问题即可对话,工具调用会有 "⚙ 调用工具 get_io_table" 提示
 
 试试:`写一个电机星三角启动的 ST 程序,延时 5 秒切换`
 
-## 配置模型(三选一)
+## 配置模型(配置一次,永久生效)
 
-| 方式 | 设置 |
+**推荐:插件内设置面板。** 点击输入框右下角的 ⚙ 齿轮(或点模型徽标),填三项:
+
+| 字段 | 示例 |
 |---|---|
-| VSCode 设置(推荐) | `plcAgent.baseUrl` / `plcAgent.apiKey` / `plcAgent.model` |
-| 环境变量 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `AGENT_MODEL`(和 CLI 版相同) |
-| 什么都不配 | 走官方 api.openai.com + gpt-4o-mini |
+| Base URL | `https://ai.duckduckport.top/v1`(OpenAI Compatible 网关,注意带 `/v1`) |
+| API Key | 网关密钥(留空 = 不修改已保存的 Key) |
+| Model | `gpt-5.6-sol` 等网关上可用的模型名 |
 
-网关地址注意带 `/v1`,例如 `https://ai.duckduckport.top/v1`。
+保存位置:Base URL / Model 存 `globalState`,**API Key 存 VSCode SecretStorage(系统级加密,不进 git、不随设置同步)**。
+存一次后,重开 VSCode、按 F5 弹出的调试窗口都直接生效,不用再配。
+
+兜底优先级:插件内设置 > VSCode 设置(`plcAgent.*`)> 环境变量(`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `AGENT_MODEL`)> 官方 API + gpt-4o-mini。
 
 ## 架构(为长成成熟 agent 而设计)
 
@@ -40,8 +46,10 @@ media/main.js     ← WebView 界面脚本(渲染气泡、输入框)
 media/main.css    ← 界面样式
 ```
 
-消息协议:webview 发 `{type:'send', text}`,host 回 `{type:'delta'|'tool'|'done'|'error'|...}`。
-内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/`。
+消息协议:webview 发 `{type:'send', text}` / `{type:'getSettings'}` / `{type:'saveSettings', ...}`,
+host 回 `{type:'delta'|'tool'|'done'|'error'|'settings'|'settingsSaved'|...}`。
+Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
+内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
 
 ## 下一步路线(成熟化)
 

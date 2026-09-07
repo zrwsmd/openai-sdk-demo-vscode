@@ -116,6 +116,7 @@ body { display: flex; flex-direction: column; }
   margin-top: 6px;
 }
 .composer-bar .left { display: flex; gap: 6px; align-items: center; }
+.composer-bar .right { display: flex; gap: 8px; align-items: center; }
 
 .chip {
   font-size: 11px;
@@ -125,7 +126,14 @@ body { display: flex; flex-direction: column; }
   padding: 2px 8px;
   user-select: none;
 }
-.chip.model { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.model {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip.model:hover { color: var(--fg); border-color: var(--accent); }
 
 .send-btn {
   width: 26px;
@@ -139,3 +147,81 @@ body { display: flex; flex-direction: column; }
   cursor: pointer;
 }
 .send-btn:disabled { opacity: 0.4; cursor: default; }
+
+.gear-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.gear-btn:hover { color: var(--fg); border-color: var(--accent); }
+
+/* ---------- 设置面板 ---------- */
+.settings {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 10;
+}
+.settings.hidden { display: none; }
+
+.settings-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.settings-title { font-weight: 600; margin-bottom: 12px; }
+.settings-sub { font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 6px; }
+
+.settings-card label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.settings-card input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px 8px;
+  background: var(--box);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+.settings-card input:focus { border-color: var(--accent); }
+
+.settings-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 4px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn:hover { filter: brightness(1.15); }
+
+.settings-tip { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.5; }

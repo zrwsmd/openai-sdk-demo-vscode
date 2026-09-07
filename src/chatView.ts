@@ -3,23 +3,24 @@ import { runAgentTurn, validateConfig, type ChatHistory } from './agent';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
+ * 配置持久化:baseUrl/model 存 globalState,apiKey 存 SecretStorage(OS 级加密)。
  * 消息协议:
- *   webview → host: {type:'send', text} / {type:'clear'}
- *   host → webview: {type:'user', text} / {type:'delta', text} / {type:'tool', name}
- *                   {type:'done'} / {type:'error', message} / {type:'busy'} / {type:'idle'}
+ *   webview → host: {type:'send', text} / {type:'clear'} / {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
+ *   host → webview: {type:'user'|'delta'|'tool'|'done'|'error'|'busy'|'idle'|'cleared'}
+ *                   {type:'settings', baseUrl, model, hasKey} / {type:'settingsSaved', model}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private history: ChatHistory = [];
   private busy = false;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(private readonly context: vscode.ExtensionContext) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
     };
     view.webview.html = this.buildHtml(view.webview);
 
@@ -28,6 +29,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.send(msg.text);
       } else if (msg.type === 'clear') {
         this.history = [];
+      } else if (msg.type === 'getSettings') {
+        void this.sendSettingsToWebview();
+      } else if (msg.type === 'saveSettings') {
+        void this.saveSettings(msg);
       }
     });
   }
@@ -41,19 +46,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage(msg);
   }
 
-  /** 配置优先级:VSCode 设置 > 环境变量 > 默认值(与 CLI 版一致) */
-  private config() {
+  /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */
+  async getConfig() {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
+    const saved = this.context.globalState.get<{ baseUrl?: string; model?: string }>('settings') ?? {};
+    const savedKey = (await this.context.secrets.get('apiKey')) ?? '';
     return {
-      baseUrl: (cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim(),
-      apiKey: (cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
-      model: (cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
+      baseUrl: (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim(),
+      apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
+      model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
+      savedInPlugin: !!(saved.baseUrl || saved.model || savedKey),
     };
+  }
+
+  private async sendSettingsToWebview(): Promise<void> {
+    const cfg = await this.getConfig();
+    this.post({
+      type: 'settings',
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      hasKey: !!cfg.apiKey,
+      source: cfg.savedInPlugin ? 'plugin' : 'other',
+    });
+  }
+
+  private async saveSettings(msg: { baseUrl?: string; apiKey?: string; model?: string }): Promise<void> {
+    const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
+    const model = (msg.model ?? '').trim();
+    await this.context.globalState.update('settings', { baseUrl, model });
+    if (msg.apiKey) {
+      await this.context.secrets.store('apiKey', msg.apiKey.trim());
+    }
+    void this.sendSettingsToWebview();
+    this.post({ type: 'settingsSaved', model });
   }
 
   private async send(text: string): Promise<void> {
     if (this.busy) return;
-    const cfg = this.config();
+    const cfg = await this.getConfig();
     const err = validateConfig(cfg);
     if (err) {
       this.post({ type: 'error', message: err });
@@ -82,10 +112,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildHtml(webview: vscode.Webview): string {
-    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'));
-    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.css'));
+    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js'));
+    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css'));
     const nonce = Array.from({ length: 16 }, () => Math.random().toString(36)[2] ?? '0').join('');
-    const model = this.config().model;
 
     return /* html */ `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -99,15 +128,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="messages" aria-live="polite"></div>
 
+  <!-- 设置面板(齿轮打开) -->
+  <div id="settings" class="settings hidden">
+    <div class="settings-card">
+      <div class="settings-title">模型配置 <span class="settings-sub">OpenAI Compatible · 保存后全局生效</span></div>
+      <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
+      <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
+      <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+      <div class="settings-actions">
+        <button id="set-save" class="btn primary">保存</button>
+        <button id="set-cancel" class="btn">取消</button>
+      </div>
+      <div class="settings-tip">Key 保存在系统安全存储(不会进 git / 同步)。配置一次,重开 VSCode 和 F5 调试窗口都生效。</div>
+    </div>
+  </div>
+
   <div class="composer">
     <div class="composer-box">
       <textarea id="input" rows="1" placeholder="请输入需求…(/指令 @文件 后续支持)"></textarea>
       <div class="composer-bar">
         <div class="left">
           <span class="chip" id="mode-chip">Agent ▾</span>
-          <span class="chip model" id="model-chip" title="在设置里改 plcAgent.model">${model}</span>
+          <span class="chip model" id="model-chip" title="点击配置模型">未配置</span>
         </div>
-        <button id="send" class="send-btn" title="发送 (Enter)">↑</button>
+        <div class="right">
+          <button id="gear" class="gear-btn" title="模型设置">⚙</button>
+          <button id="send" class="send-btn" title="发送 (Enter)">↑</button>
+        </div>
       </div>
     </div>
   </div>

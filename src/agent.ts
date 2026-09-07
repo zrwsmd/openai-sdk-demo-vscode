@@ -122,6 +122,6 @@ export async function runAgentTurn(
 }
 
 export function validateConfig(cfg: AgentConfig): string | null {
-  if (!cfg.apiKey) return '未配置 API Key:请在设置里填 plcAgent.apiKey,或设置环境变量 OPENAI_API_KEY';
+  if (!cfg.apiKey) return '尚未配置 API Key:点击输入框右下角的 ⚙ 齿轮,在设置面板里填写 Base URL / API Key / Model(配置一次即可)';
   return null;
 }

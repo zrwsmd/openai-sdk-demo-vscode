@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ChatViewProvider } from './chatView';
 
 export function activate(context: vscode.ExtensionContext) {
-  const provider = new ChatViewProvider(context.extensionUri);
+  const provider = new ChatViewProvider(context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('plcAgent.chatView', provider, {
