@@ -1,4 +1,4 @@
-// 编译产物级验证:加载 esbuild ESM 打包的 agent 内核 + 会话模块,对 mock 网关跑九个场景
+// 编译产物级验证:加载 esbuild ESM 打包的 agent 内核 + 会话模块,对 mock 网关跑十个场景
 // 前置: node scripts/mock_gateway.mjs 8790
 // 运行: node scripts/agent_kernel_test.mjs
 import { promises as fs } from 'node:fs';
@@ -6,11 +6,16 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   runAgentTurn,
+  setAgentLogger,
   JsonFileSession,
   extractChatMessages,
   MaxTurnsExceededError,
   MAX_TURNS,
 } from './agent.testbundle.mjs';
+
+// 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
+const diagLines = [];
+setAgentLogger((line) => diagLines.push(line));
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-test-'));
 const cfg = {
@@ -131,6 +136,20 @@ const collect = () => {
   // 熔断生效:空回复重试被截停在个位数(SDK 原生会一路重试到 maxTurns=10)
   if (r.usage.requests < 2 || r.usage.requests > 6)
     throw new Error(`场景9 熔断未生效或过度截停,模型调用 = ${r.usage.requests}`);
+}
+
+// [10] 只吐 reasoning 不吐正文(套壳推理模型常见坏行为):诊断日志必须记录到 推理>0/正文=0,
+//      熔断照常截停,工具回执照常透出
+{
+  const { events, onEvent } = collect();
+  const before = diagLines.length;
+  const r = await runAgentTurn(cfg, session, '思考导出程序', onEvent, async () => true);
+  const myLines = diagLines.slice(before);
+  const respLine = myLines.find((l) => l.includes('正文=0') && /推理=[1-9]/.test(l));
+  console.log('[10] 只思考不说话:模型文本长度 =', r.output.length, '| tool_result ok =', events.some((e) => e.type === 'tool_result' && e.ok), '| 诊断行:', (respLine ?? myLines.at(-1) ?? '(无)').slice(0, 90));
+  if (r.output.length !== 0) throw new Error('场景10 预期无正文');
+  if (!respLine) throw new Error('场景10 诊断日志未识别出"正文0/推理>0"的响应');
+  if (!events.some((e) => e.type === 'tool_result' && e.ok)) throw new Error('场景10 工具回执丢失');
 }
 
 console.log(`\n全部通过 ✔ (MAX_TURNS=${MAX_TURNS},工作目录 ${dir})`);

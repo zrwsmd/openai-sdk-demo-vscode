@@ -86,6 +86,17 @@ const server = http.createServer((req, res) => {
       sse(res, usageChunk(model, 100, 15));
       res.write('data: [DONE]\n\n');
       res.end();
+    } else if (last.role === 'tool' && userText.includes('思考')) {
+      // 复现套壳推理模型的坏行为:工具结果回喂后只吐 reasoning_content,正文始终为空
+      console.log('[mock] 思考模式:工具结果回喂后只返回 reasoning,无正文');
+      for (const ch of '用户在要求导出,我已经写入文件了,该告诉用户结果…') {
+        sse(res, chunk(model, { reasoning_content: ch }));
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      sse(res, chunk(model, {}, 'stop'));
+      sse(res, usageChunk(model, 45, 0));
+      res.write('data: [DONE]\n\n');
+      res.end();
     } else if (last.role === 'tool' && userText.includes('静默')) {
       // 复现真实网关的一种坏行为:工具结果回喂后,模型返回"空内容"完成(stop 但没有任何 content delta)
       console.log('[mock] 静默模式:工具结果回喂后返回空 completion');

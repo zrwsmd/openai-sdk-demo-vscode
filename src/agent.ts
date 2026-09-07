@@ -229,6 +229,95 @@ class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   }
 }
 
+// ---------- 网关原始报文诊断(写入 "PLC Agent" 输出面板) ----------
+// 排查"模型不返回总结"这类问题:把每次发给网关的消息结构、每次响应 SSE 的解析摘要
+// (正文/推理/工具调用字符数、finish_reason、错误体)全部留痕,复现一次即可定位。
+let agentLog: (line: string) => void = () => {};
+export function setAgentLogger(fn: (line: string) => void): void {
+  agentLog = fn;
+}
+
+function summarizeOutgoing(body: unknown): string {
+  try {
+    const j = (typeof body === 'string' ? JSON.parse(body) : body) as {
+      model?: string;
+      stream?: boolean;
+      messages?: { role: string; content?: unknown; tool_calls?: { function?: { name?: string } }[] }[];
+    };
+    const chain = (j.messages ?? [])
+      .map((m) =>
+        m.role === 'assistant' && m.tool_calls?.length
+          ? `assistant(tool_calls:${m.tool_calls.map((t) => t.function?.name).join('|')})`
+          : `${m.role}(len=${typeof m.content === 'string' ? m.content.length : '-'})`,
+      )
+      .join(' ');
+    return `${j.model} stream=${j.stream} ${chain}`.slice(0, 600);
+  } catch {
+    return '(请求体无法解析)';
+  }
+}
+
+function makeLoggingFetch(): unknown {
+  return async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    const isChat = url.includes('/chat/completions');
+    if (isChat) agentLog(`[req] ${summarizeOutgoing(init?.body)}`);
+    const resp = await fetch(input as never, init as never);
+    if (!isChat || !resp.body) return resp;
+    const [userSide, tap] = resp.body.tee(); // 原样透传给 SDK,旁路只做解析统计
+    void (async () => {
+      let text = '';
+      try {
+        const reader = tap.getReader();
+        for (;;) {
+          const r = await reader.read();
+          if (r.done) break;
+          text += new TextDecoder().decode(r.value, { stream: true });
+        }
+      } catch (e) {
+        agentLog(`[resp] 旁路读取异常: ${e}`);
+        return;
+      }
+      let contentChars = 0;
+      let reasoningChars = 0;
+      let toolCallDeltas = 0;
+      let finish = '-';
+      let errorLine = '';
+      for (const line of text.split('\n')) {
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const payload = s.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const j = JSON.parse(payload) as {
+            error?: unknown;
+            choices?: { finish_reason?: string | null; delta?: Record<string, unknown> }[];
+          };
+          if (j.error) { errorLine = JSON.stringify(j.error).slice(0, 300); continue; }
+          const c = j.choices?.[0];
+          if (c?.finish_reason) finish = c.finish_reason;
+          const d = c?.delta ?? {};
+          if (typeof d.content === 'string') contentChars += d.content.length;
+          const rz = (d.reasoning_content ?? d.reasoning) as string | undefined;
+          if (typeof rz === 'string') reasoningChars += rz.length;
+          if (Array.isArray(d.tool_calls)) toolCallDeltas += d.tool_calls.length;
+        } catch { /* 非 JSON 行忽略 */ }
+      }
+      agentLog(
+        `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}${errorLine ? ' ERROR=' + errorLine : ''}`,
+      );
+      if (contentChars === 0 && reasoningChars === 0 && toolCallDeltas === 0) {
+        agentLog(`[resp] 空完成原文(尾部): ${text.slice(-500).replace(/\n/g, '⏎')}`);
+      }
+    })();
+    return new Response(userSide, {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: resp.headers,
+    });
+  };
+}
+
 const modelCache = new Map<string, GatewayGuardedModel>();
 
 function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
@@ -236,7 +325,7 @@ function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
   const key = `${cfg.baseUrl}|${cfg.apiKey}|${cfg.model}`;
   let m = modelCache.get(key);
   if (!m) {
-    const client = new OpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey });
+    const client = new OpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: makeLoggingFetch() as never });
     m = new GatewayGuardedModel(client, cfg.model);
     modelCache.set(key, m);
   }

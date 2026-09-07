@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
-import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS } from './agent';
+import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS, setAgentLogger } from './agent';
 import { JsonFileSession, extractChatMessages } from './session';
 
 /**
@@ -26,6 +26,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
+    setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
