@@ -49,7 +49,7 @@ media/main.css    ← 界面样式
 ```
 
 消息协议:webview 发 `{type:'send', text}` / `{type:'getSettings'}` / `{type:'saveSettings', ...}`,
-host 回 `{type:'delta'|'tool'|'done'|'error'|'settings'|'settingsSaved'|...}`。
+host 回 `{type:'delta'|'tool'|'toolResult'|'done'|'error'|'busy'|'idle'|'approval'|'history'|'settings'|...}`。
 Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
 
@@ -86,26 +86,26 @@ Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
   内核执行前 SDK 中断 → 界面弹出审批卡片(可展开查看参数)→ 用户"允许"才落盘、
   "拒绝"则该工具被拒。这套中断/恢复循环(`runState.approve/reject` + 带 `state` 续跑)
   是以后 `write_program` 等危险操作的通用安全底座。
+- **工具执行回执(tool_result)**:内核从 `tool_call_output_item` 事件透出每个工具的执行结果,
+  界面显示 `✓ write_file: {"ok":true,"file":"…","bytes":24}`(失败红色 ✗)。即使模型之后
+  一言不发,用户也能看到工具成败——不再出现"点了允许没反应"。
+- **空回复熔断(GatewayGuardedModel)**:部分网关会返回 `finish_reason=stop` 但 content 为空的
+  completion(工具结果回喂后尤其常见),SDK 会把它当"未完成"反复重发直到烧满 maxTurns(实测
+  10 连发仅 84ms,看门狗来不及拦)。包装 `OpenAIChatCompletionsModel.getStreamedResponse`,
+  在模型层同步归因:单次响应无正文/无 tool_calls 记 1 次,连续 2 次抛 `EmptyGatewayResponseError`
+  截停,按"本轮无文本"结束并给出明确提示。
+- **运行日志**:视图 → 输出(OUTPUT) → 选 "PLC Agent",记录每轮消息、审批决定、工具回执、
+  token 汇总与错误,网关行为异常时先看这里。
 
 ## 开发验证脚本
 
 ```bash
-node scripts/mock_gateway.mjs 8790                 # 起模拟网关(问候/星三角/导出审批/死循环 四模式)
+node scripts/mock_gateway.mjs 8790                 # 模拟网关五模式:问候/星三角工具链/导出审批/死循环/静默(工具后空回复)
 npx esbuild scripts/test_entry.ts --bundle --platform=node --format=esm --external:vscode \
   --target=node18 --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
-  --outfile=scripts/agent.testbundle.mjs           # 打包内核+会话为 ESM 供测试 import
-node scripts/agent_kernel_test.mjs                 # 产物级 8 场景:回放/持久化/工具链/审批允许+拒绝/maxTurns/clear
+  --outfile=scripts/agent.testbundle.mjs           # 打包内核+会话+工具为 ESM 供测试 import
+node scripts/agent_kernel_test.mjs                 # 产物级 9 场景:回放/持久化/工具链/审批允许+拒绝/maxTurns/clear/静默熔断
 node scripts/workspace_tools_test.mjs              # 文件工具层 6 单测:列表/读取分段/写入/搜索/越界拦截/命令退出码
-```
-
-## 开发验证脚本
-
-```bash
-node scripts/mock_gateway.mjs 8790                 # 起模拟网关(流式/工具/usage/死循环四模式)
-npx esbuild src/agent.ts --bundle --platform=node --format=esm --external:vscode \
-  --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
-  --outfile=scripts/agent.testbundle.mjs           # 打包内核为 ESM 供测试 import
-node scripts/agent_kernel_test.mjs                 # 产物级三场景:问候 / 工具链 usage 累加 / maxTurns 触发
 ```
 
 ## 下一步路线(成熟化)

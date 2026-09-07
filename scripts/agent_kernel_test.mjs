@@ -1,4 +1,4 @@
-// 编译产物级验证:加载 esbuild ESM 打包的 agent 内核 + 会话模块,对 mock 网关跑六个场景
+// 编译产物级验证:加载 esbuild ESM 打包的 agent 内核 + 会话模块,对 mock 网关跑九个场景
 // 前置: node scripts/mock_gateway.mjs 8790
 // 运行: node scripts/agent_kernel_test.mjs
 import { promises as fs } from 'node:fs';
@@ -112,6 +112,25 @@ const collect = () => {
   const chat = extractChatMessages(await session.getItems());
   console.log('[8] clearSession:条目 =', raw.items.length, '| 回放消息 =', chat.length);
   if (raw.items.length !== 0) throw new Error('场景8 clearSession 未清空');
+}
+
+// [9] 复现"批准后无反馈"场景:批准后模型在工具结果回喂后返回空 completion(真实网关坏行为)。
+//     内核仍必须透出 tool_result 事件(带文件路径),UI 才有"✓ 成功"可显示;模型文本为空但不算出错
+{
+  const { events, onEvent } = collect();
+  const r = await runAgentTurn(cfg, session, '静默导出程序', onEvent, async () => true);
+  const results = events.filter((e) => e.type === 'tool_result');
+  console.log(
+    '[9] 工具后模型沉默:模型文本长度 =', r.output.length,
+    '| tool_result =', JSON.stringify(results.map((e) => ({ n: e.name, ok: e.ok }))),
+    '| 模型调用 =', r.usage.requests,
+  );
+  if (r.output.length !== 0) throw new Error('场景9 预期模型无文本输出');
+  const okResult = results.find((e) => e.name === 'export_st_program' && e.ok);
+  if (!okResult || !okResult.summary.includes('StarDelta.st')) throw new Error('场景9 未透出成功的工具回执');
+  // 熔断生效:空回复重试被截停在个位数(SDK 原生会一路重试到 maxTurns=10)
+  if (r.usage.requests < 2 || r.usage.requests > 6)
+    throw new Error(`场景9 熔断未生效或过度截停,模型调用 = ${r.usage.requests}`);
 }
 
 console.log(`\n全部通过 ✔ (MAX_TURNS=${MAX_TURNS},工作目录 ${dir})`);

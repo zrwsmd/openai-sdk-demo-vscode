@@ -10,19 +10,22 @@ import { JsonFileSession, extractChatMessages } from './session';
  * 消息协议:
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'approvalResponse', approve}
  *                   {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
- *   host → webview: {type:'user'|'delta'|'tool'|'done'|'error'|'busy'|'idle'|'cleared'}
+ *   host → webview: {type:'user'|'delta'|'tool'|'toolResult'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, hasKey} / {type:'settingsSaved', model}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private readonly session: JsonFileSession;
+  private readonly log: vscode.OutputChannel;
   private busy = false;
   private pendingApproval?: (ok: boolean) => void;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     const storage = vscode.Uri.file(this.context.globalStorageUri.fsPath);
     this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
+    // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
+    this.log = vscode.window.createOutputChannel('PLC Agent');
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -39,6 +42,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === 'clear') {
         void this.clear();
       } else if (msg.type === 'approvalResponse') {
+        this.log.appendLine(`[approval] 用户${msg.approve === true ? '允许' : '拒绝'}了工具调用`);
         this.pendingApproval?.(msg.approve === true);
         this.pendingApproval = undefined;
       } else if (msg.type === 'getSettings') {
@@ -118,10 +122,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.busy = true;
     this.post({ type: 'busy' });
     this.post({ type: 'user', text });
+    this.log.appendLine(`[turn] 用户: ${text.slice(0, 120)}`);
 
     // 审批桥:内核遇到 needsApproval 工具时挂起,发审批卡片给界面,等用户点"允许/拒绝"
     const requestApproval = (name: string, args: string) =>
       new Promise<boolean>((resolve) => {
+        this.log.appendLine(`[approval] 等待用户决定: ${name} ${args.slice(0, 200)}`);
         this.pendingApproval = resolve;
         this.post({ type: 'approval', name, args });
       });
@@ -130,7 +136,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const result = await runAgentTurn(cfg, this.session, text, (ev) => {
         if (ev.type === 'delta') this.post({ type: 'delta', text: ev.text });
         else if (ev.type === 'tool') this.post({ type: 'tool', name: ev.name });
+        else if (ev.type === 'tool_result') {
+          this.log.appendLine(`[tool] ${ev.name} → ${ev.ok ? 'ok' : 'fail'}: ${ev.summary.slice(0, 300)}`);
+          this.post({ type: 'toolResult', name: ev.name, ok: ev.ok, summary: ev.summary });
+        }
       }, requestApproval);
+      this.log.appendLine(
+        `[turn] 完成: 文本 ${result.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
+      );
       this.post({ type: 'done', usage: result.usage });
     } catch (e) {
       let message: string;
@@ -139,6 +152,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else {
         message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       }
+      this.log.appendLine(`[turn] 出错: ${message}`);
       this.post({ type: 'error', message });
     } finally {
       this.busy = false;

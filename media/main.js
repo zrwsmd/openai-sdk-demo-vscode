@@ -190,6 +190,7 @@ function addApprovalCard(name, args) {
 
 let agentBubble = null;
 let agentText = '';
+let hadToolThisTurn = false;
 
 window.addEventListener('message', (event) => {
   const msg = event.data;
@@ -199,6 +200,7 @@ window.addEventListener('message', (event) => {
       if (hint) hint.remove();
       addMessage('user', msg.text);
       agentText = '';
+      hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
       agentBubble.classList.add('streaming');
       break;
@@ -212,12 +214,33 @@ window.addEventListener('message', (event) => {
       break;
     case 'tool':
       addNote('tool-note', `调用工具 ${msg.name}`);
+      hadToolThisTurn = true;
       break;
-    case 'done':
-      if (agentBubble) agentBubble.classList.remove('streaming');
+    case 'toolResult':
+      // 工具执行回执:即使网关在工具后返回空文本,用户也能看到成败
+      addNote(
+        msg.ok ? 'tool-note ok-note' : 'error-note',
+        `${msg.ok ? '✓' : '✗'} ${msg.name}: ${msg.summary}`,
+      );
+      break;
+    case 'done': {
+      const empty = !agentText;
+      if (agentBubble) {
+        agentBubble.classList.remove('streaming');
+        if (empty) agentBubble.remove(); // 空气泡看起来像卡死,换成明确说明
+      }
+      if (empty) {
+        addNote(
+          'tool-note',
+          hadToolThisTurn
+            ? '模型本轮没有追加文字总结(见上方工具执行回执)。若经常如此,是网关在工具结果回喂后返回了空回复。'
+            : '模型本轮没有返回文本(网关返回了空内容),可直接重试。',
+        );
+      }
       agentBubble = null;
       showUsage(msg.usage);
       break;
+    }
     case 'error':
       if (agentBubble) {
         agentBubble.classList.remove('streaming');

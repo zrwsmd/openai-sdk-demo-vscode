@@ -41,10 +41,12 @@ export interface AgentConfig {
   workspaceRoot: string;
 }
 
-/** UI 关心的事件:正文增量 / 工具调用提示 */
+/** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
 export type AgentEvent =
   | { type: 'delta'; text: string }
-  | { type: 'tool'; name: string };
+  | { type: 'tool'; name: string }
+  /** 工具真正执行完(或被拒绝)的回执。UI 必须渲染它:部分网关在工具结果回喂后模型返回空文本 */
+  | { type: 'tool_result'; name: string; ok: boolean; summary: string };
 
 /**
  * 需要用户批准的工具被调用时,内核通过它向 UI 请求决定(宿主实现:发审批卡片,等点击)。
@@ -177,19 +179,65 @@ const SYSTEM_PROMPT =
   '当用户明确要求"导出/保存为文件"时，调用 export_st_program。' +
   '你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、' +
   'search_files 搜索代码、write_file 写文件、run_command 执行命令' +
-  '（write_file 和 run_command 会先征求用户批准）。回答要简洁，用中文。';
+  '（write_file 和 run_command 会先征求用户批准）。' +
+  '任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，' +
+  '不允许调用完工具不给结论就结束。回答要简洁，用中文。';
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
-const modelCache = new Map<string, OpenAIChatCompletionsModel>();
+/** 网关连续返回空 completion(无任何内容/工具)时抛出,用于截停 SDK 的无限重试 */
+export class EmptyGatewayResponseError extends Error {
+  constructor() {
+    super('模型连续返回空响应:网关在收到工具结果(或首次请求)后返回了"空内容完成"。已自动停止重试。');
+    this.name = 'EmptyGatewayResponseError';
+  }
+}
 
-function buildModel(cfg: AgentConfig): string | OpenAIChatCompletionsModel {
+/**
+ * 带"空回复熔断"的 chat_completions 模型。
+ *
+ * 背景:部分 OpenAI 兼容网关(尤其套壳推理模型)会返回 `finish_reason=stop` 但 content 为空的
+ * completion;SDK 把这种响应当作"未完成"而反复重发同一请求,直到烧满 maxTurns。时间轴上的
+ * 看门狗追不上响应飞快的网关(实测 10 连发仅 84ms),所以在模型层同步归因:
+ * 一次响应若既无内容增量、最终 output 也为空 → 记 1 次空回复;连续 2 次即抛错截停。
+ */
+class GatewayGuardedModel extends OpenAIChatCompletionsModel {
+  private emptyStreak = 0;
+
+  /** 每轮用户消息开始时清零,避免跨轮误伤 */
+  resetEmptyStreak(): void {
+    this.emptyStreak = 0;
+  }
+
+  async *getStreamedResponse(request: any): AsyncGenerator<any> {
+    let sawOutput = false;
+    for await (const ev of super.getStreamedResponse(request) as AsyncIterable<any>) {
+      // chat_completions 下 SDK 只透出 response_started/model/output_text_delta,没有终结的
+      // model_response 事件,所以直接看原始 chunk 的 delta:有正文或 tool_calls 就不算空回复
+      if (ev?.type === 'output_text_delta') sawOutput = true;
+      const delta = ev?.event?.choices?.[0]?.delta ?? ev?.providerData?.choices?.[0]?.delta;
+      if (delta && (delta.content || delta.tool_calls)) sawOutput = true;
+      const out = ev?.response?.output;
+      if (Array.isArray(out) && out.length > 0) sawOutput = true;
+      yield ev;
+    }
+    this.emptyStreak = sawOutput ? 0 : this.emptyStreak + 1;
+    if (this.emptyStreak >= 2) {
+      this.emptyStreak = 0;
+      throw new EmptyGatewayResponseError();
+    }
+  }
+}
+
+const modelCache = new Map<string, GatewayGuardedModel>();
+
+function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
   if (!cfg.baseUrl) return cfg.model; // 无网关:走官方默认(Responses API)
   const key = `${cfg.baseUrl}|${cfg.apiKey}|${cfg.model}`;
   let m = modelCache.get(key);
   if (!m) {
     const client = new OpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey });
-    m = new OpenAIChatCompletionsModel(client, cfg.model);
+    m = new GatewayGuardedModel(client, cfg.model);
     modelCache.set(key, m);
   }
   return m;
@@ -220,9 +268,11 @@ export async function runAgentTurn(
   onEvent: (ev: AgentEvent) => void,
   requestApproval: ApprovalRequester,
 ): Promise<{ output: string; usage: TurnUsage }> {
+  const model = buildModel(cfg);
+  if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   const agent = new Agent({
     name: 'PLC 编程助手',
-    model: buildModel(cfg),
+    model,
     instructions: SYSTEM_PROMPT,
     tools: buildTools(cfg),
   });
@@ -231,35 +281,74 @@ export async function runAgentTurn(
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = '';
 
-  const pump = async (stream: StreamedRunResult<any, any>): Promise<void> => {
-    for await (const event of stream) {
-      if (event.type === 'raw_model_stream_event') {
-        if (event.data.type === 'output_text_delta') {
-          const delta = event.data.delta ?? '';
-          if (delta) {
-            output += delta;
-            onEvent({ type: 'delta', text: delta });
+  // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
+  const toolNameByCallId = new Map<string, string>();
+
+  const summarizeToolOutput = (out: unknown): { ok: boolean; summary: string } => {
+    const flat = Array.isArray(out)
+      ? out.map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? '')).join('')
+      : typeof out === 'string'
+        ? out
+        : JSON.stringify(out ?? '');
+    let ok = true;
+    try {
+      const parsed = JSON.parse(flat) as { ok?: boolean; error?: unknown } | unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const obj = parsed as { ok?: boolean; error?: unknown };
+        ok = obj.ok !== false && obj.error === undefined;
+      }
+    } catch {
+      // 非 JSON(如 SDK 的拒绝文案 "user rejected tool call")
+      ok = !/reject|denied/i.test(flat);
+    }
+    const summary = flat.length > 200 ? flat.slice(0, 200) + '…' : flat;
+    return { ok, summary };
+  };
+
+  const pump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
+    let bailed = false;
+    try {
+      for await (const event of stream) {
+        if (event.type === 'raw_model_stream_event') {
+          if (event.data.type === 'output_text_delta') {
+            const delta = event.data.delta ?? '';
+            if (delta) {
+              output += delta;
+              onEvent({ type: 'delta', text: delta });
+            }
+          }
+        } else if (event.type === 'run_item_stream_event') {
+          if (event.item.type === 'tool_call_item') {
+            const raw = event.item.rawItem as { name?: string; callId?: string } | undefined;
+            if (raw?.callId && raw.name) toolNameByCallId.set(raw.callId, raw.name);
+            onEvent({ type: 'tool', name: raw?.name ?? 'tool' });
+          } else if (event.item.type === 'tool_call_output_item') {
+            // 工具已执行完(或审批被拒),把回执透出给 UI —— 即使随后模型不再返回文本,用户也能看到成败
+            const raw = event.item.rawItem as { name?: string; callId?: string } | undefined;
+            const name = raw?.name || toolNameByCallId.get(raw?.callId ?? '') || 'tool';
+            const { ok, summary } = summarizeToolOutput((event.item as { output?: unknown }).output);
+            onEvent({ type: 'tool_result', name, ok, summary });
           }
         }
-      } else if (event.type === 'run_item_stream_event') {
-        if (event.item.type === 'tool_call_item') {
-          const raw = event.item.rawItem as { name?: string } | undefined;
-          onEvent({ type: 'tool', name: raw?.name ?? 'tool' });
-        }
       }
+    } catch (e) {
+      // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
+      if (!(e instanceof EmptyGatewayResponseError)) throw e;
+      bailed = true;
     }
     for (const resp of stream.rawResponses ?? []) {
       usage.requests += 1;
       usage.inputTokens += resp.usage?.inputTokens ?? 0;
       usage.outputTokens += resp.usage?.outputTokens ?? 0;
     }
+    return bailed ? 'empty-bailed' : 'done';
   };
 
   let stream = await runner.run(agent, userText, { stream: true, maxTurns: MAX_TURNS, session });
-  await pump(stream);
+  let outcome = await pump(stream);
 
   // 审批中断循环:可能有多个待批工具,逐个问;全部处理完后带 state 续跑,直到没有新中断
-  let pending: RunToolApprovalItem[] = stream.interruptions ?? [];
+  let pending: RunToolApprovalItem[] = outcome === 'empty-bailed' ? [] : stream.interruptions ?? [];
   let guard = 0;
   while (pending.length && guard++ < MAX_TURNS) {
     for (const item of pending) {
@@ -269,7 +358,8 @@ export async function runAgentTurn(
       else stream.state.reject(item);
     }
     stream = await runner.run(agent, stream.state, { stream: true, maxTurns: MAX_TURNS, session });
-    await pump(stream);
+    outcome = await pump(stream);
+    if (outcome === 'empty-bailed') break;
     pending = stream.interruptions ?? [];
   }
 

@@ -72,6 +72,12 @@ body { display: flex; flex-direction: column; }
 }
 .tool-note::before { content: '⚙ '; }
 
+/* 工具执行回执(成功):绿色,不带 ⚙ 前缀(文案自带 ✓) */
+.ok-note {
+  color: var(--vscode-testing-iconPassed, #4caf7d);
+}
+.ok-note::before { content: none; }
+
 .usage-note {
   text-align: right;
   color: var(--muted);

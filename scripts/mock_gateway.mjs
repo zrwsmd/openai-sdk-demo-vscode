@@ -86,6 +86,13 @@ const server = http.createServer((req, res) => {
       sse(res, usageChunk(model, 100, 15));
       res.write('data: [DONE]\n\n');
       res.end();
+    } else if (last.role === 'tool' && userText.includes('静默')) {
+      // 复现真实网关的一种坏行为:工具结果回喂后,模型返回"空内容"完成(stop 但没有任何 content delta)
+      console.log('[mock] 静默模式:工具结果回喂后返回空 completion');
+      sse(res, chunk(model, {}, 'stop'));
+      sse(res, usageChunk(model, 40, 0));
+      res.write('data: [DONE]\n\n');
+      res.end();
     } else if (last.role === 'tool' && userText.includes('导出')) {
       await streamText(res, model, '好的,已按你的要求导出为 .st 文件。');
     } else if (last.role === 'tool') {
