@@ -103,7 +103,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async send(text: string): Promise<void> {
     if (this.busy) return;
-    const cfg = { ...(await this.getConfig()), exportDir: path.join(this.context.globalStorageUri.fsPath, 'exports') };
+    const cfg = {
+      ...(await this.getConfig()),
+      exportDir: path.join(this.context.globalStorageUri.fsPath, 'exports'),
+      // 每次发消息时重新解析:用户可能后打开/切换工作区
+      workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+    };
     const err = validateConfig(cfg);
     if (err) {
       this.post({ type: 'error', message: err });

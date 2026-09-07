@@ -39,8 +39,9 @@ npm install
 ## 架构(为长成成熟 agent 而设计)
 
 ```
-src/agent.ts      ← agent 内核:工具(含审批工具)、提示词、流式循环、中断/恢复(纯 Node,可单测)
-src/session.ts    ← JSON 文件版 Session(SDK 会话持久化接口实现)
+src/agent.ts          ← agent 内核:工具(含审批工具)、提示词、流式循环、中断/恢复(纯 Node,可单测)
+src/workspaceTools.ts ← 通用文件/命令工具的纯函数实现(路径越界拦截、目录跳过、输出截断)
+src/session.ts        ← JSON 文件版 Session(SDK 会话持久化接口实现)
 src/chatView.ts   ← WebView 宿主:消息协议桥接、配置读写、审批桥(界面 ↔ 内核)
 src/extension.ts  ← 激活入口:注册视图和命令
 media/main.js     ← WebView 界面脚本(气泡/审批卡片/历史回放/输入框)
@@ -51,6 +52,25 @@ media/main.css    ← 界面样式
 host 回 `{type:'delta'|'tool'|'done'|'error'|'settings'|'settingsSaved'|...}`。
 Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
+
+## 工具集(当前 8 个)
+
+| 工具 | 作用 | 审批 |
+|---|---|---|
+| get_io_table | 查 I/O 变量表(演示假实现) | 免 |
+| validate_st_code | ST 语法校验(演示假实现) | 免 |
+| list_files / read_file / search_files | 读工作区:目录 / 文件(可分段)/ 文本搜索(glob+正则) | 免 |
+| write_file | 写工作区文件(覆盖) | **需批准** |
+| run_command | 工作区执行命令(60s 超时/输出截断) | **需批准** |
+| export_st_program | ST 程序导出 .st 文件 | **需批准** |
+
+安全边界:文件类工具的路径强制解析在当前工作区根内(`../` 与区外绝对路径直接拒绝),
+遍历自动跳过 node_modules/.git/dist 等目录;纯函数实现在 `src/workspaceTools.ts`
+(不依赖 SDK/VSCode,可单测),审批由工具层 `needsApproval` 统一拦截。
+
+> SDK 自带工具说明:`web_search/file_search/code_interpreter` 等是 OpenAI Responses API
+> 的**宿主工具**(模型服务端执行),我们的 chat_completions 网关用不了;
+> `shellTool/applyPatchTool` 只有协议接口,具体执行要宿主自己注入。所以通用工具集自建。
 
 ## SDK 能力(已实现)
 
@@ -75,6 +95,7 @@ npx esbuild scripts/test_entry.ts --bundle --platform=node --format=esm --extern
   --target=node18 --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
   --outfile=scripts/agent.testbundle.mjs           # 打包内核+会话为 ESM 供测试 import
 node scripts/agent_kernel_test.mjs                 # 产物级 8 场景:回放/持久化/工具链/审批允许+拒绝/maxTurns/clear
+node scripts/workspace_tools_test.mjs              # 文件工具层 6 单测:列表/读取分段/写入/搜索/越界拦截/命令退出码
 ```
 
 ## 开发验证脚本

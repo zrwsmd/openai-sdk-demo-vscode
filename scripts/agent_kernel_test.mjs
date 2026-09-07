@@ -18,6 +18,7 @@ const cfg = {
   apiKey: 'mock-key',
   model: 'mock-model',
   exportDir: path.join(dir, 'exports'),
+  workspaceRoot: dir,
 };
 const session = new JsonFileSession(path.join(dir, 'session.json'));
 const noApproval = async (name) => {

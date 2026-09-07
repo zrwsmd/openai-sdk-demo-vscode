@@ -21,6 +21,7 @@ import { z } from 'zod';
 import OpenAI from 'openai';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { listFiles, readFileRange, writeFileText, searchText, runCommand } from './workspaceTools';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -36,6 +37,8 @@ export interface AgentConfig {
   model: string;
   /** export_st_program 工具的落盘目录 */
   exportDir: string;
+  /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
+  workspaceRoot: string;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 */
@@ -101,7 +104,69 @@ function buildTools(cfg: AgentConfig) {
     },
   });
 
-  return [getIoTable, validateStCode, exportStProgram];
+  // ---- 通用工作区文件工具(作用域锁定在当前工作区根目录) ----
+  const guard = (fn: () => Promise<string>): Promise<string> =>
+    fn().catch((e: unknown) =>
+      JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }),
+    );
+
+  const listFilesTool = tool({
+    name: 'list_files',
+    description: '列出当前工作区内的文件(相对根目录,自动跳过 node_modules/.git/dist 等)。参数 dir 为相对子目录,默认根目录。',
+    parameters: z.object({ dir: z.string().optional().describe('相对子目录,留空表示工作区根') }),
+    execute: ({ dir }) =>
+      guard(async () => JSON.stringify({ ok: true, files: await listFiles(cfg.workspaceRoot, dir ?? '.') })),
+  });
+
+  const readFileTool = tool({
+    name: 'read_file',
+    description: '读取工作区内一个文本文件的内容。可用 startLine/endLine 分段读大文件(缺省读前 4000 行)。',
+    parameters: z.object({
+      path: z.string().describe('相对工作区的文件路径'),
+      startLine: z.number().optional().describe('起始行(1 起)'),
+      endLine: z.number().optional().describe('结束行(含)'),
+    }),
+    execute: ({ path: p, startLine, endLine }) =>
+      guard(async () => {
+        const r = await readFileRange(cfg.workspaceRoot, p, startLine, endLine);
+        return JSON.stringify({ ok: true, totalLines: r.totalLines, content: r.text });
+      }),
+  });
+
+  const searchFilesTool = tool({
+    name: 'search_files',
+    description: '在工作区文件里做文本搜索,返回 "相对路径:行号: 内容"。支持 glob 文件名过滤(如 *.st)与 isRegex 正则。',
+    parameters: z.object({
+      text: z.string().describe('要搜索的字面量或正则'),
+      glob: z.string().optional().describe('按文件名过滤,如 *.st'),
+      isRegex: z.boolean().optional().describe('是否按正则解析 text'),
+    }),
+    execute: ({ text, glob, isRegex }) =>
+      guard(async () => JSON.stringify({ ok: true, matches: await searchText(cfg.workspaceRoot, text, { glob, isRegex }) })),
+  });
+
+  const writeFileTool = tool({
+    name: 'write_file',
+    description: '把文本内容写入工作区内的文件(会覆盖)。属于写操作,执行前需要用户在界面批准。',
+    parameters: z.object({
+      path: z.string().describe('相对工作区的文件路径'),
+      content: z.string().describe('要写入的完整文本内容'),
+    }),
+    needsApproval: true,
+    execute: ({ path: p, content }) =>
+      guard(async () => JSON.stringify({ ok: true, ...(await writeFileText(cfg.workspaceRoot, p, content)) })),
+  });
+
+  const runCommandTool = tool({
+    name: 'run_command',
+    description: '在工作区根目录执行一条 shell 命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。',
+    parameters: z.object({ command: z.string().describe('要执行的命令行') }),
+    needsApproval: true,
+    execute: ({ command }) =>
+      guard(async () => JSON.stringify({ ok: true, ...(await runCommand(cfg.workspaceRoot, command)) })),
+  });
+
+  return [getIoTable, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
 }
 
 const SYSTEM_PROMPT =
@@ -109,7 +174,10 @@ const SYSTEM_PROMPT =
   '编写程序前先调用 get_io_table 查询变量表，只使用表中已有的变量名。' +
   '生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，' +
   '直到通过为止，最后把通过校验的代码展示给用户。' +
-  '当用户明确要求"导出/保存为文件"时，调用 export_st_program。用中文回答。';
+  '当用户明确要求"导出/保存为文件"时，调用 export_st_program。' +
+  '你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、' +
+  'search_files 搜索代码、write_file 写文件、run_command 执行命令' +
+  '（write_file 和 run_command 会先征求用户批准）。回答要简洁，用中文。';
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
