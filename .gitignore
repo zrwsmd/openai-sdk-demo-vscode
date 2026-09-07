@@ -2,3 +2,4 @@ node_modules/
 dist/
 *.vsix
 .env
+scripts/agent.testbundle.mjs

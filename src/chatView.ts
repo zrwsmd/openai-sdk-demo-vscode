@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runAgentTurn, validateConfig, type ChatHistory } from './agent';
+import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS, type ChatHistory } from './agent';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
@@ -101,9 +101,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         else if (ev.type === 'tool') this.post({ type: 'tool', name: ev.name });
       });
       this.history = result.history;
-      this.post({ type: 'done' });
+      this.post({ type: 'done', usage: result.usage });
     } catch (e) {
-      const message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      let message: string;
+      if (e instanceof MaxTurnsExceededError) {
+        message = `本轮模型往返超过 ${MAX_TURNS} 次上限,已自动停止(通常是模型反复调用工具)。请换个说法或把需求拆细。`;
+      } else {
+        message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      }
       this.post({ type: 'error', message });
     } finally {
       this.busy = false;

@@ -72,6 +72,14 @@ body { display: flex; flex-direction: column; }
 }
 .tool-note::before { content: '⚙ '; }
 
+.usage-note {
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 4px 4px 6px 0;
+  opacity: 0.85;
+}
+
 .error-note {
   color: var(--vscode-errorForeground, #f66);
   font-size: 12px;

@@ -5,7 +5,17 @@
  * 做成熟 agent 时主要演进这个文件:换真工具、加护栏、加多代理等。
  */
 
-import { Agent, Runner, tool, setTracingDisabled, OpenAIChatCompletionsModel } from '@openai/agents';
+import {
+  Agent,
+  Runner,
+  tool,
+  setTracingDisabled,
+  OpenAIChatCompletionsModel,
+  MaxTurnsExceededError,
+} from '@openai/agents';
+
+// 超轮次异常透传给 UI 层做友好提示
+export { MaxTurnsExceededError };
 import { z } from 'zod';
 import OpenAI from 'openai';
 
@@ -85,11 +95,21 @@ function buildModel(cfg: AgentConfig): string | OpenAIChatCompletionsModel {
 
 // ---------- 一轮对话:流式执行,通过 onEvent 回调吐增量 ----------
 
+/** 本轮 token 用量(从模型响应的 usage 汇总;网关不返回 usage 字段时全为 0) */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  requests: number; // 本轮调用模型的次数(含工具调用往返)
+}
+
+/** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
+export const MAX_TURNS = 10;
+
 export async function runAgentTurn(
   cfg: AgentConfig,
   history: ChatHistory,
   onEvent: (ev: AgentEvent) => void,
-): Promise<{ history: ChatHistory; output: string }> {
+): Promise<{ history: ChatHistory; output: string; usage: TurnUsage }> {
   const agent = new Agent({
     name: 'PLC 编程助手',
     model: buildModel(cfg),
@@ -98,7 +118,7 @@ export async function runAgentTurn(
   });
 
   const runner = new Runner();
-  const stream = await runner.run(agent, history as never, { stream: true });
+  const stream = await runner.run(agent, history as never, { stream: true, maxTurns: MAX_TURNS });
 
   let output = '';
   for await (const event of stream) {
@@ -118,7 +138,15 @@ export async function runAgentTurn(
     }
   }
 
-  return { history: stream.history as ChatHistory, output };
+  // 流结束后从各次模型响应里汇总 usage
+  const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
+  for (const resp of stream.rawResponses ?? []) {
+    usage.requests += 1;
+    usage.inputTokens += resp.usage?.inputTokens ?? 0;
+    usage.outputTokens += resp.usage?.outputTokens ?? 0;
+  }
+
+  return { history: stream.history as ChatHistory, output, usage };
 }
 
 export function validateConfig(cfg: AgentConfig): string | null {

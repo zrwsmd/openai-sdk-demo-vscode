@@ -51,6 +51,24 @@ host 回 `{type:'delta'|'tool'|'done'|'error'|'settings'|'settingsSaved'|...}`�
 Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
 
+## 安全与用量(已实现)
+
+- **maxTurns 上限**:单次提问最多 `MAX_TURNS=10` 次模型往返,防止工具死循环把额度跑光。
+  超限抛 `MaxTurnsExceededError`,界面给出"超过上限已停止,换个说法"的友好提示而非崩溃。
+- **每轮 token 用量**:流结束后从 `stream.rawResponses` 汇总 `inputTokens/outputTokens/requests`,
+  回答下方右对齐显示一行 `📊 本轮 tokens:输入 X / 输出 Y,模型调用 N 次`。
+  按额度付费的网关可据此估算消费;若网关流式不回 `usage` 字段则该行自动隐藏。
+
+## 开发验证脚本
+
+```bash
+node scripts/mock_gateway.mjs 8790                 # 起模拟网关(流式/工具/usage/死循环四模式)
+npx esbuild src/agent.ts --bundle --platform=node --format=esm --external:vscode \
+  --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+  --outfile=scripts/agent.testbundle.mjs           # 打包内核为 ESM 供测试 import
+node scripts/agent_kernel_test.mjs                 # 产物级三场景:问候 / 工具链 usage 累加 / maxTurns 触发
+```
+
 ## 下一步路线(成熟化)
 
 1. 真实工具:变量表读文件、ST 代码落盘、接真实编译器

@@ -38,6 +38,17 @@ function addNote(className, text) {
   return el;
 }
 
+// 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
+function showUsage(usage) {
+  if (!usage) return;
+  const total = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+  if (!total) return;
+  addNote(
+    'usage-note',
+    `📊 本轮 tokens:输入 ${usage.inputTokens} / 输出 ${usage.outputTokens},模型调用 ${usage.requests} 次`,
+  );
+}
+
 // 极简 markdown:围栏代码块,其余按纯文本(成熟化时换 marked/highlight.js)
 function renderRich(bubble, text) {
   bubble.textContent = '';
@@ -144,6 +155,7 @@ window.addEventListener('message', (event) => {
     case 'done':
       if (agentBubble) agentBubble.classList.remove('streaming');
       agentBubble = null;
+      showUsage(msg.usage);
       break;
     case 'error':
       if (agentBubble) {
