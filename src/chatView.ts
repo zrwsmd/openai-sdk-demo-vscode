@@ -1,14 +1,17 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
-import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS, setAgentLogger } from './agent';
-import { JsonFileSession, extractChatMessages } from './session';
+import { setAgentLogger } from './agent';
+import { JsonFileSession } from './session';
+import { JsonRunStore, type DurableRunConfig } from './runStore';
+import { RunCoordinator, type RuntimeEvent } from './runCoordinator';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
  * 配置持久化:baseUrl/model 存 globalState,apiKey 存 SecretStorage(OS 级加密)。
- * 会话持久化:对话历史存 globalStorage/session.json(SDK Session 接口),面板重开自动回放。
+ * 会话持久化:对话历史存 workspace storage/session.json(SDK Session 接口),无工作区回退 globalStorage。
  * 消息协议:
- *   webview → host: {type:'send', text} / {type:'clear'} / {type:'approvalResponse', approve}
+ *   webview → host: {type:'send', text} / {type:'clear'} / {type:'stop'} / {type:'retry'}
+ *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
  *   host → webview: {type:'user'|'delta'|'tool'|'toolResult'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
@@ -17,16 +20,24 @@ import { JsonFileSession, extractChatMessages } from './session';
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private readonly session: JsonFileSession;
+  private readonly coordinator: RunCoordinator;
   private readonly log: vscode.OutputChannel;
-  private busy = false;
-  private pendingApproval?: (ok: boolean) => void;
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    const storage = vscode.Uri.file(this.context.globalStorageUri.fsPath);
+    // Keep run/session/effect state isolated per workspace. A no-folder chat
+    // falls back to extension-global storage so it remains usable standalone.
+    const storage = this.context.storageUri ?? this.context.globalStorageUri;
     this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
+    const runStore = new JsonRunStore(path.join(storage.fsPath, 'runs.json'));
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
+    this.coordinator = new RunCoordinator({
+      session: this.session,
+      store: runStore,
+      emit: (event) => this.post(event),
+      log: (line) => this.log.appendLine(line),
+    });
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -43,9 +54,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === 'clear') {
         void this.clear();
       } else if (msg.type === 'approvalResponse') {
-        this.log.appendLine(`[approval] 用户${msg.approve === true ? '允许' : '拒绝'}了工具调用`);
-        this.pendingApproval?.(msg.approve === true);
-        this.pendingApproval = undefined;
+        void this.resolveApproval(msg);
+      } else if (msg.type === 'stop') {
+        void this.stop();
+      } else if (msg.type === 'retry') {
+        void this.retry();
       } else if (msg.type === 'getSettings') {
         void this.sendSettingsToWebview();
       } else if (msg.type === 'saveSettings') {
@@ -53,21 +66,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    // 面板(重)打开:回放持久化的历史,让用户接着上文继续
-    void this.replayHistory();
-  }
-
-  private async replayHistory(): Promise<void> {
-    const items = await this.session.getItems();
-    this.post({ type: 'history', messages: extractChatMessages(items) });
+    void this.coordinator.initialize()
+      .catch((error) => {
+        const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        this.log.appendLine(`[recovery] ${message}`);
+        this.post({ type: 'error', message });
+      });
   }
 
   async clear(): Promise<void> {
-    await this.session.clearSession();
-    this.post({ type: 'cleared' });
+    await this.coordinator.clear();
   }
 
-  private post(msg: Record<string, unknown>): void {
+  private post(msg: RuntimeEvent | Record<string, unknown>): void {
     void this.view?.webview.postMessage(msg);
   }
 
@@ -107,58 +118,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async send(text: string): Promise<void> {
-    if (this.busy) return;
-    const cfg = {
-      ...(await this.getConfig()),
-      exportDir: path.join(this.context.globalStorageUri.fsPath, 'exports'),
-      // 每次发消息时重新解析:用户可能后打开/切换工作区
+    const live = await this.getConfig();
+    const config: DurableRunConfig = {
+      baseUrl: live.baseUrl,
+      model: live.model,
+      exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
       workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
     };
-    const err = validateConfig(cfg);
-    if (err) {
-      this.post({ type: 'error', message: err });
-      return;
-    }
+    await this.coordinator.start(text, config, live.apiKey);
+  }
 
-    this.busy = true;
-    this.post({ type: 'busy' });
-    this.post({ type: 'user', text });
-    this.log.appendLine(`[turn] 用户: ${text.slice(0, 120)}`);
+  private async resolveApproval(msg: { runId?: string; approvalId?: string; approve?: boolean }): Promise<void> {
+    const live = await this.getConfig();
+    await this.coordinator.approve(msg.runId ?? '', msg.approvalId ?? '', msg.approve === true, live.apiKey);
+  }
 
-    // 审批桥:内核遇到 needsApproval 工具时挂起,发审批卡片给界面,等用户点"允许/拒绝"
-    const requestApproval = (name: string, args: string) =>
-      new Promise<boolean>((resolve) => {
-        this.log.appendLine(`[approval] 等待用户决定: ${name} ${args.slice(0, 200)}`);
-        this.pendingApproval = resolve;
-        this.post({ type: 'approval', name, args });
-      });
+  private async stop(): Promise<void> {
+    await this.coordinator.stop();
+  }
 
-    try {
-      const result = await runAgentTurn(cfg, this.session, text, (ev) => {
-        if (ev.type === 'delta') this.post({ type: 'delta', text: ev.text });
-        else if (ev.type === 'tool') this.post({ type: 'tool', name: ev.name });
-        else if (ev.type === 'tool_result') {
-          this.log.appendLine(`[tool] ${ev.name} → ${ev.ok ? 'ok' : 'fail'}: ${ev.summary.slice(0, 300)}`);
-          this.post({ type: 'toolResult', name: ev.name, ok: ev.ok, summary: ev.summary });
-        }
-      }, requestApproval);
-      this.log.appendLine(
-        `[turn] 完成: 文本 ${result.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
-      );
-      this.post({ type: 'done', usage: result.usage });
-    } catch (e) {
-      let message: string;
-      if (e instanceof MaxTurnsExceededError) {
-        message = `本轮模型往返超过 ${MAX_TURNS} 次上限,已自动停止(通常是模型反复调用工具)。请换个说法或把需求拆细。`;
-      } else {
-        message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      }
-      this.log.appendLine(`[turn] 出错: ${message}`);
-      this.post({ type: 'error', message });
-    } finally {
-      this.busy = false;
-      this.post({ type: 'idle' });
-    }
+  private async retry(): Promise<void> {
+    const live = await this.getConfig();
+    await this.coordinator.retry(live.apiKey);
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -204,6 +185,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="right">
           <button id="gear" class="gear-btn" title="模型设置">⚙</button>
+          <button id="retry" class="tool-btn" title="重试上一轮" disabled>↻</button>
+          <button id="stop" class="tool-btn danger hidden" title="停止本轮">■</button>
           <button id="send" class="send-btn" title="发送 (Enter)">↑</button>
         </div>
       </div>

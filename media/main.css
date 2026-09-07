@@ -131,6 +131,7 @@ body { display: flex; flex-direction: column; }
 }
 .composer-bar .left { display: flex; gap: 6px; align-items: center; }
 .composer-bar .right { display: flex; gap: 8px; align-items: center; }
+.hidden { display: none !important; }
 
 .chip {
   font-size: 11px;
@@ -204,6 +205,21 @@ body { display: flex; flex-direction: column; }
   cursor: pointer;
 }
 .gear-btn:hover { color: var(--fg); border-color: var(--accent); }
+
+.tool-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tool-btn:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
+.tool-btn.danger { color: var(--vscode-errorForeground, #f66); }
+.tool-btn:disabled { opacity: 0.35; cursor: default; }
 
 /* ---------- 设置面板 ---------- */
 .settings {

@@ -25,13 +25,22 @@ export class JsonFileSession implements Session {
     if (this.loaded) return;
     try {
       const data = JSON.parse(await fs.readFile(this.filePath, 'utf8')) as {
+        schemaVersion?: number;
         sessionId?: string;
         items?: unknown;
       };
-      this.sessionId = data.sessionId ?? randomUUID();
-      this.items = Array.isArray(data.items) ? (data.items as AgentInputItem[]) : [];
-    } catch {
-      // 文件不存在/损坏:当作新会话
+      if (!data || typeof data !== 'object' || (data.schemaVersion !== undefined && data.schemaVersion !== 1)) {
+        throw new Error('unsupported session schema');
+      }
+      if (!Array.isArray(data.items)) throw new Error('invalid session items');
+      this.sessionId = typeof data.sessionId === 'string' ? data.sessionId : randomUUID();
+      this.items = data.items as AgentInputItem[];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(
+          `会话存储损坏，已停止恢复以避免混入错误上下文: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       this.sessionId = randomUUID();
       this.items = [];
     }
@@ -42,7 +51,13 @@ export class JsonFileSession implements Session {
   private persist(): Promise<void> {
     this.saveChain = this.saveChain.then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.writeFile(this.filePath, JSON.stringify({ sessionId: this.sessionId, items: this.items }), 'utf8');
+      const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
+      await fs.writeFile(
+        temp,
+        JSON.stringify({ schemaVersion: 1, sessionId: this.sessionId, items: this.items }),
+        'utf8',
+      );
+      await fs.rename(temp, this.filePath);
     });
     return this.saveChain;
   }
@@ -74,6 +89,14 @@ export class JsonFileSession implements Session {
     this.items = [];
     this.sessionId = randomUUID();
     this.loaded = true;
+    await this.persist();
+  }
+
+  /** Restore the session to a turn boundary before retrying a failed/cancelled run. */
+  async truncate(length: number): Promise<void> {
+    await this.ensureLoaded();
+    const safeLength = Math.max(0, Math.min(this.items.length, Math.floor(length)));
+    this.items = this.items.slice(0, safeLength);
     await this.persist();
   }
 }

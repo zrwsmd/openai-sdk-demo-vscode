@@ -141,26 +141,75 @@ export async function runCommand(
   root: string,
   command: string,
   timeoutMs = 60_000,
+  signal?: AbortSignal,
 ): Promise<{ exitCode: number | null; output: string }> {
   if (!root) throw new ToolError('未打开工作区文件夹,无法执行命令');
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, { cwd: root, shell: true, windowsHide: true });
+    const isWindows = process.platform === 'win32';
+    const child = spawn(command, {
+      cwd: root,
+      shell: true,
+      windowsHide: true,
+      detached: !isWindows,
+    });
     let out = '';
     let killed = false;
-    const timer = setTimeout(() => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const terminateTree = () => {
+      if (!child.pid) return;
+      if (isWindows) {
+        const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        });
+        killer.once('error', () => child.kill('SIGKILL'));
+        return;
+      }
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    };
+    const onAbort = () => {
+      if (settled) return;
       killed = true;
-      child.kill('SIGKILL');
+      terminateTree();
+      settled = true;
+      cleanup();
+      reject(signal?.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      killed = true;
+      terminateTree();
+      settled = true;
+      cleanup();
+      const text = out.length > 20_000 ? out.slice(0, 20_000) + '\n…(输出截断)' : out;
+      resolve({ exitCode: null, output: `命令超时(${timeoutMs}ms)被终止:\n${text}` });
     }, timeoutMs);
     child.stdout?.on('data', (d) => (out += d));
     child.stderr?.on('data', (d) => (out += d));
     child.on('error', (e) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(new ToolError(`命令启动失败:${e.message}`));
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       const text = out.length > 20_000 ? out.slice(0, 20_000) + '\n…(输出截断)' : out;
-      resolve({ exitCode: killed ? null : code, output: killed ? `命令超时(${timeoutMs}ms)被终止:\n${text}` : text });
+      resolve({ exitCode: killed ? null : code, output: text });
     });
+    // Close the race between the initial throwIfAborted() and listener setup.
+    if (signal?.aborted) onAbort();
   });
 }

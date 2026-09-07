@@ -13,6 +13,7 @@ import {
   setTracingDisabled,
   OpenAIChatCompletionsModel,
   MaxTurnsExceededError,
+  RunState,
   type RunToolApprovalItem,
   type Session,
   type StreamedRunResult,
@@ -22,6 +23,7 @@ import OpenAI from 'openai';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { listFiles, readFileRange, writeFileText, searchText, runCommand } from './workspaceTools';
+import { EffectRecoveryRequiredError } from './errors';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -39,6 +41,8 @@ export interface AgentConfig {
   exportDir: string;
   /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
   workspaceRoot: string;
+  /** Host-owned effect journal. It may return a previously committed result. */
+  executeEffect?: <T>(toolName: string, input: unknown, execute: () => Promise<T>) => Promise<T>;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
@@ -53,9 +57,48 @@ export type AgentEvent =
  */
 export type ApprovalRequester = (toolName: string, args: string) => Promise<boolean>;
 
+/** Stable, UI-safe description of a pending approval checkpoint. */
+export interface ApprovalRequest {
+  id: string;
+  name: string;
+  args: string;
+}
+
+export type AgentRunStatus = 'completed' | 'awaiting_approval' | 'cancelled';
+
+export interface AgentRunCheckpoint {
+  state: string;
+  approvals: ApprovalRequest[];
+  output: string;
+  usage: TurnUsage;
+}
+
+export interface AgentRunOptions {
+  /** Resume a serialized SDK RunState instead of starting from userText. */
+  initialState?: string;
+  /** Decisions keyed by ApprovalRequest.id, used when resuming a checkpoint. */
+  decisions?: Record<string, boolean>;
+  /** Cancels model streaming and cooperative tool execution. */
+  signal?: AbortSignal;
+  /** Omit for a durable external approval flow; provide for the legacy inline flow. */
+  requestApproval?: ApprovalRequester;
+  /** Called whenever a resumable state is available or changes. */
+  onCheckpoint?: (checkpoint: AgentRunCheckpoint) => Promise<void> | void;
+}
+
+export interface AgentRunResult {
+  output: string;
+  usage: TurnUsage;
+  status: AgentRunStatus;
+  state?: string;
+  approvals?: ApprovalRequest[];
+}
+
 // ---------- 工具(演示用假实现,成熟化时替换内脏即可,接口不变) ----------
 
 function buildTools(cfg: AgentConfig) {
+  const withEffect = <T>(toolName: string, input: unknown, execute: () => Promise<T>) =>
+    cfg.executeEffect ? cfg.executeEffect(toolName, input, execute) : execute();
   const getIoTable = tool({
     name: 'get_io_table',
     description: '查询当前 PLC 项目的 I/O 变量表。',
@@ -96,21 +139,22 @@ function buildTools(cfg: AgentConfig) {
       code: z.string().describe('完整 ST 源码(PROGRAM ... END_PROGRAM)'),
     }),
     needsApproval: true,
-    execute: async ({ code }) => {
+    execute: ({ code }) => withEffect('export_st_program', { code }, async () => {
       const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
       const name = m?.[1] ?? `program_${Date.now()}`;
       await fs.mkdir(cfg.exportDir, { recursive: true });
       const file = path.join(cfg.exportDir, `${name}.st`);
       await fs.writeFile(file, code, 'utf8');
       return JSON.stringify({ ok: true, file });
-    },
+    }),
   });
 
   // ---- 通用工作区文件工具(作用域锁定在当前工作区根目录) ----
   const guard = (fn: () => Promise<string>): Promise<string> =>
-    fn().catch((e: unknown) =>
-      JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }),
-    );
+    fn().catch((e: unknown) => {
+      if (e instanceof EffectRecoveryRequiredError) throw e;
+      return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    });
 
   const listFilesTool = tool({
     name: 'list_files',
@@ -155,8 +199,11 @@ function buildTools(cfg: AgentConfig) {
       content: z.string().describe('要写入的完整文本内容'),
     }),
     needsApproval: true,
-    execute: ({ path: p, content }) =>
-      guard(async () => JSON.stringify({ ok: true, ...(await writeFileText(cfg.workspaceRoot, p, content)) })),
+    execute: ({ path: p, content }) => guard(() =>
+      withEffect('write_file', { path: p, content }, async () =>
+        JSON.stringify({ ok: true, ...(await writeFileText(cfg.workspaceRoot, p, content)) }),
+      ),
+    ),
   });
 
   const runCommandTool = tool({
@@ -164,8 +211,11 @@ function buildTools(cfg: AgentConfig) {
     description: '在工作区根目录执行一条 shell 命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。',
     parameters: z.object({ command: z.string().describe('要执行的命令行') }),
     needsApproval: true,
-    execute: ({ command }) =>
-      guard(async () => JSON.stringify({ ok: true, ...(await runCommand(cfg.workspaceRoot, command)) })),
+    execute: ({ command }, _context, details) => guard(() =>
+      withEffect('run_command', { command }, async () =>
+        JSON.stringify({ ok: true, ...(await runCommand(cfg.workspaceRoot, command, 60_000, details?.signal)) }),
+      ),
+    ),
   });
 
   return [getIoTable, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
@@ -357,6 +407,25 @@ export async function runAgentTurn(
   onEvent: (ev: AgentEvent) => void,
   requestApproval: ApprovalRequester,
 ): Promise<{ output: string; usage: TurnUsage }> {
+  const result = await runAgent(cfg, session, userText, onEvent, {
+    requestApproval,
+  });
+  return { output: result.output, usage: result.usage };
+}
+
+/**
+ * Product-facing execution entry point. The returned `state` is an SDK-native
+ * RunState snapshot and is safe to persist with the host's run store. A state
+ * is only returned for a pending approval; completed and cancelled runs cannot
+ * be resumed as if they were still active.
+ */
+export async function runAgent(
+  cfg: AgentConfig,
+  session: Session,
+  userText: string,
+  onEvent: (ev: AgentEvent) => void,
+  options: AgentRunOptions = {},
+): Promise<AgentRunResult> {
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   const agent = new Agent({
@@ -425,34 +494,103 @@ export async function runAgentTurn(
       if (!(e instanceof EmptyGatewayResponseError)) throw e;
       bailed = true;
     }
-    for (const resp of stream.rawResponses ?? []) {
-      usage.requests += 1;
-      usage.inputTokens += resp.usage?.inputTokens ?? 0;
-      usage.outputTokens += resp.usage?.outputTokens ?? 0;
-    }
+    // RunState owns aggregate usage and survives serialization. Reading it here
+    // avoids double-counting raw responses after a durable resume.
+    usage.requests = stream.state.usage.requests;
+    usage.inputTokens = stream.state.usage.inputTokens;
+    usage.outputTokens = stream.state.usage.outputTokens;
     return bailed ? 'empty-bailed' : 'done';
   };
 
-  let stream = await runner.run(agent, userText, { stream: true, maxTurns: MAX_TURNS, session });
-  let outcome = await pump(stream);
+  const checkpoint = async (state: RunState<any, any>, approvals: ApprovalRequest[]) => {
+    await options.onCheckpoint?.({
+      state: state.toString(),
+      approvals,
+      output,
+      usage: { ...usage },
+    });
+  };
 
-  // 审批中断循环:可能有多个待批工具,逐个问;全部处理完后带 state 续跑,直到没有新中断
-  let pending: RunToolApprovalItem[] = outcome === 'empty-bailed' ? [] : stream.interruptions ?? [];
-  let guard = 0;
-  while (pending.length && guard++ < MAX_TURNS) {
-    for (const item of pending) {
+  const approvalId = (item: RunToolApprovalItem, index: number) => {
+    const raw = item.rawItem as { name?: string; callId?: string };
+    return raw.callId ?? `${raw.name ?? 'tool'}:${index}`;
+  };
+
+  const decisions = new Map(Object.entries(options.decisions ?? {}));
+  const resolveApprovals = async (
+    state: RunState<any, any>,
+    pending: RunToolApprovalItem[],
+  ): Promise<ApprovalRequest[]> => {
+    const requests = pending.map((item, index) => {
       const raw = item.rawItem as { name?: string; arguments?: string };
-      const ok = await requestApproval(raw?.name ?? 'tool', raw?.arguments ?? '');
-      if (ok) stream.state.approve(item);
-      else stream.state.reject(item);
+      return {
+        id: approvalId(item, index),
+        name: raw.name ?? 'tool',
+        args: raw.arguments ?? '',
+      };
+    });
+    const unresolved: ApprovalRequest[] = [];
+    for (let index = 0; index < pending.length; index++) {
+      const item = pending[index];
+      const request = requests[index];
+      let decision = decisions.get(request.id);
+      if (decision !== undefined) decisions.delete(request.id);
+      if (decision === undefined && options.requestApproval) {
+        decision = await options.requestApproval(request.name, request.args);
+      }
+      if (decision === undefined) {
+        unresolved.push(request);
+      } else if (decision) {
+        state.approve(item);
+      } else {
+        state.reject(item, { message: '用户拒绝了该工具调用。' });
+      }
     }
-    stream = await runner.run(agent, stream.state, { stream: true, maxTurns: MAX_TURNS, session });
-    outcome = await pump(stream);
-    if (outcome === 'empty-bailed') break;
-    pending = stream.interruptions ?? [];
+    return unresolved;
+  };
+
+  let state: RunState<any, any> | undefined;
+  if (options.initialState) {
+    state = await RunState.fromString(agent, options.initialState);
+    state.clearTrace();
+    usage.requests = state.usage.requests;
+    usage.inputTokens = state.usage.inputTokens;
+    usage.outputTokens = state.usage.outputTokens;
   }
 
-  return { output, usage };
+  // Approval checkpoints are first-class results. Inline callers can still
+  // provide requestApproval for backwards compatibility, while the product
+  // host normally persists this checkpoint and resumes later with decisions.
+  let approvalRounds = 0;
+  while (true) {
+    if (approvalRounds++ >= MAX_TURNS) throw new MaxTurnsExceededError('审批恢复次数超过上限');
+    if (state) {
+      const pending = state.getInterruptions();
+      if (pending.length) {
+        const unresolved = await resolveApprovals(state, pending);
+        if (unresolved.length) {
+          await checkpoint(state, unresolved);
+          return { output, usage, status: 'awaiting_approval', state: state.toString(), approvals: unresolved };
+        }
+      }
+    }
+
+    const stream = await runner.run(agent, state ?? userText, {
+      stream: true,
+      maxTurns: MAX_TURNS,
+      session,
+      signal: options.signal,
+    });
+    const outcome = await pump(stream);
+    state = stream.state;
+
+    if (options.signal?.aborted || stream.cancelled) {
+      return { output, usage, status: 'cancelled' };
+    }
+    if (outcome === 'empty-bailed' || !state.getInterruptions().length) {
+      return { output, usage, status: 'completed' };
+    }
+  }
 }
 
 export function validateConfig(cfg: AgentConfig): string | null {

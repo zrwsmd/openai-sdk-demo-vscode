@@ -4,6 +4,8 @@ const vscode = acquireVsCodeApi();
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const stopBtn = document.getElementById('stop');
+const retryBtn = document.getElementById('retry');
 const gearBtn = document.getElementById('gear');
 const modelChip = document.getElementById('model-chip');
 const settingsEl = document.getElementById('settings');
@@ -14,6 +16,19 @@ const setSaveEl = document.getElementById('set-save');
 const setCancelEl = document.getElementById('set-cancel');
 
 let hasSavedKey = false;
+let runtimeMode = 'idle';
+let currentRunId = null;
+let canRetry = false;
+
+function setRuntimeMode(mode) {
+  runtimeMode = mode;
+  const running = mode === 'running' || mode === 'stopping';
+  const awaiting = mode === 'awaiting';
+  sendBtn.disabled = running || awaiting;
+  stopBtn.classList.toggle('hidden', !(running || awaiting));
+  stopBtn.disabled = mode === 'stopping';
+  retryBtn.disabled = !canRetry || running || awaiting;
+}
 
 // ---------- 消息渲染 ----------
 
@@ -71,6 +86,7 @@ function scrollBottom() {
 // ---------- 发送 ----------
 
 function send() {
+  if (runtimeMode !== 'idle') return;
   const text = inputEl.value.trim();
   if (!text) return;
   inputEl.value = '';
@@ -79,6 +95,15 @@ function send() {
 }
 
 sendBtn.addEventListener('click', send);
+stopBtn.addEventListener('click', () => {
+  if (runtimeMode !== 'running' && runtimeMode !== 'awaiting') return;
+  setRuntimeMode('stopping');
+  vscode.postMessage({ type: 'stop' });
+});
+retryBtn.addEventListener('click', () => {
+  if (runtimeMode !== 'idle' || !canRetry) return;
+  vscode.postMessage({ type: 'retry' });
+});
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -143,9 +168,12 @@ function showWelcomeHint() {
 
 // ---------- 审批卡片 ----------
 
-function addApprovalCard(name, args) {
+function addApprovalCard(runId, approval) {
+  const { id, name, args } = approval;
+  if (messagesEl.querySelector(`[data-approval-id="${CSS.escape(id)}"]`)) return;
   const card = document.createElement('div');
   card.className = 'approval-card';
+  card.dataset.approvalId = id;
 
   const title = document.createElement('div');
   title.className = 'approval-title';
@@ -174,7 +202,7 @@ function addApprovalCard(name, args) {
   const finish = (approve) => {
     okBtn.disabled = noBtn.disabled = true;
     card.classList.add(approve ? 'approved' : 'rejected');
-    vscode.postMessage({ type: 'approvalResponse', approve });
+    vscode.postMessage({ type: 'approvalResponse', runId, approvalId: id, approve });
   };
   okBtn.addEventListener('click', () => finish(true));
   noBtn.addEventListener('click', () => finish(false));
@@ -184,6 +212,24 @@ function addApprovalCard(name, args) {
 
   messagesEl.appendChild(card);
   scrollBottom();
+}
+
+function showApprovals(runId, approvals) {
+  if (agentBubble) {
+    agentBubble.classList.remove('streaming');
+    if (!agentText) agentBubble.remove();
+    agentBubble = null;
+  }
+  currentRunId = runId;
+  for (const approval of approvals || []) addApprovalCard(runId, approval);
+  setRuntimeMode('awaiting');
+}
+
+function finishApprovalCards(className) {
+  for (const card of messagesEl.querySelectorAll('.approval-card:not(.approved):not(.rejected)')) {
+    card.classList.add(className);
+    for (const button of card.querySelectorAll('button')) button.disabled = true;
+  }
 }
 
 // ---------- host 消息 ----------
@@ -199,6 +245,7 @@ window.addEventListener('message', (event) => {
       const hint = messagesEl.querySelector('.hint');
       if (hint) hint.remove();
       addMessage('user', msg.text);
+      currentRunId = msg.runId || null;
       agentText = '';
       hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
@@ -239,6 +286,9 @@ window.addEventListener('message', (event) => {
       }
       agentBubble = null;
       showUsage(msg.usage);
+      canRetry = msg.canRetry === true;
+      currentRunId = null;
+      setRuntimeMode('idle');
       break;
     }
     case 'error':
@@ -248,21 +298,32 @@ window.addEventListener('message', (event) => {
       }
       agentBubble = null;
       addNote('error-note', msg.message);
+      if (msg.canRetry === true) canRetry = true;
+      currentRunId = null;
+      setRuntimeMode('idle');
       break;
     case 'busy':
-      sendBtn.disabled = true;
+      currentRunId = msg.runId || currentRunId;
+      setRuntimeMode('running');
       break;
     case 'idle':
-      sendBtn.disabled = false;
+      if (runtimeMode !== 'awaiting') setRuntimeMode('idle');
       inputEl.focus();
       break;
     case 'cleared':
       messagesEl.textContent = '';
+      agentBubble = null;
+      agentText = '';
+      currentRunId = null;
+      canRetry = false;
+      setRuntimeMode('idle');
       showWelcomeHint();
       break;
     case 'history': {
       // 面板重开:host 回放持久化历史
       messagesEl.textContent = '';
+      agentBubble = null;
+      agentText = '';
       for (const m of msg.messages || []) {
         if (m.role === 'user') addMessage('user', m.text);
         else {
@@ -273,8 +334,58 @@ window.addEventListener('message', (event) => {
       if (!(msg.messages || []).length) showWelcomeHint();
       break;
     }
-    case 'approval':
-      addApprovalCard(msg.name, msg.args);
+    case 'awaitingApproval':
+      showApprovals(msg.runId, msg.approvals);
+      break;
+    case 'runRestored':
+      addNote('tool-note', '已恢复上次未完成的审批，请决定后继续运行');
+      showApprovals(msg.runId, msg.approvals);
+      break;
+    case 'runAttached': {
+      const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
+      const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
+      if (lastUser !== msg.userText) addMessage('user', msg.userText);
+      currentRunId = msg.runId;
+      agentText = msg.partialOutput || '';
+      hadToolThisTurn = false;
+      agentBubble = addMessage('agent', '');
+      renderRich(agentBubble, agentText);
+      agentBubble.classList.add('streaming');
+      setRuntimeMode('running');
+      break;
+    }
+    case 'resumeStarted':
+      if (!agentBubble) {
+        agentText = '';
+        hadToolThisTurn = false;
+        agentBubble = addMessage('agent', '');
+        agentBubble.classList.add('streaming');
+      }
+      setRuntimeMode('running');
+      break;
+    case 'stopping':
+      setRuntimeMode('stopping');
+      break;
+    case 'cancelled':
+      if (agentBubble) {
+        agentBubble.classList.remove('streaming');
+        if (!agentText) agentBubble.remove();
+      }
+      agentBubble = null;
+      finishApprovalCards('rejected');
+      addNote('tool-note', '本轮已停止，可以安全重试');
+      canRetry = msg.canRetry === true;
+      currentRunId = null;
+      setRuntimeMode('idle');
+      break;
+    case 'runRecovered':
+      addNote('error-note', msg.message);
+      canRetry = msg.canRetry === true;
+      setRuntimeMode('idle');
+      break;
+    case 'retryState':
+      canRetry = msg.canRetry === true;
+      setRuntimeMode(runtimeMode);
       break;
     case 'settings':
       hasSavedKey = !!msg.hasKey;

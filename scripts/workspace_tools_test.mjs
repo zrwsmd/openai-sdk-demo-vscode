@@ -76,4 +76,28 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
   if (!ok.output.includes('hello-from-tool') || ok.exitCode !== 0 || bad.exitCode !== 7) throw new Error('命令执行结果不符合预期');
 }
 
+// [7] run_command:AbortSignal 会终止 shell 及其子进程树
+{
+  const controller = new AbortController();
+  const marker = path.join(ws, 'cancel-marker.txt').replaceAll('\\', '/');
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 50);
+  let aborted = false;
+  try {
+    await runCommand(
+      ws,
+      `node -e "setTimeout(()=>require('fs').writeFileSync('${marker}','alive'),3000)"`,
+      10_000,
+      controller.signal,
+    );
+  } catch (error) {
+    aborted = error?.name === 'AbortError';
+  }
+  const elapsed = Date.now() - startedAt;
+  await new Promise((resolve) => setTimeout(resolve, 3500));
+  const childSurvived = await fs.access(marker).then(() => true, () => false);
+  console.log('[7] run_command: 取消 =', aborted, '| 耗时 =', elapsed, 'ms | 子进程存活 =', childSurvived);
+  if (!aborted || elapsed > 3000 || childSurvived) throw new Error('命令取消未终止进程树');
+}
+
 console.log(`\n工作区工具层 全部通过 ✔ (工作区 ${ws})`);

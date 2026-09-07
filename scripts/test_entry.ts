@@ -2,3 +2,6 @@
 export * from '../src/agent';
 export * from '../src/session';
 export * from '../src/workspaceTools';
+export * from '../src/runStore';
+export * from '../src/runCoordinator';
+export * from '../src/errors';

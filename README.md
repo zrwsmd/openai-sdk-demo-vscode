@@ -39,19 +39,22 @@ npm install
 ## 架构(为长成成熟 agent 而设计)
 
 ```
-src/agent.ts          ← agent 内核:工具(含审批工具)、提示词、流式循环、中断/恢复(纯 Node,可单测)
-src/workspaceTools.ts ← 通用文件/命令工具的纯函数实现(路径越界拦截、目录跳过、输出截断)
-src/session.ts        ← JSON 文件版 Session(SDK 会话持久化接口实现)
-src/chatView.ts   ← WebView 宿主:消息协议桥接、配置读写、审批桥(界面 ↔ 内核)
-src/extension.ts  ← 激活入口:注册视图和命令
-media/main.js     ← WebView 界面脚本(气泡/审批卡片/历史回放/输入框)
-media/main.css    ← 界面样式
+src/agent.ts          ← SDK 适配层:agent/工具注册、流式事件、RunState 中断与恢复
+src/runCoordinator.ts ← 纯 Node 应用层:运行状态机、取消/重试、崩溃恢复(可复用于 CLI/边缘服务)
+src/runStore.ts       ← JSON 持久化层:原子写、活动运行锁、副作用执行账本
+src/workspaceTools.ts ← 工具实现层:文件边界、命令进程树、输出截断
+src/session.ts        ← SDK Session 持久化与轮次边界回滚
+src/chatView.ts       ← VS Code 适配层:WebView 消息和配置/SecretStorage
+src/extension.ts      ← 激活入口:注册视图和命令
+media/main.js         ← WebView 界面脚本(运行控制/审批/历史回放)
+media/main.css        ← 界面样式
 ```
 
 消息协议:webview 发 `{type:'send', text}` / `{type:'getSettings'}` / `{type:'saveSettings', ...}`,
 host 回 `{type:'delta'|'tool'|'toolResult'|'done'|'error'|'busy'|'idle'|'approval'|'history'|'settings'|...}`。
 Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
-内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
+内核、运行生命周期、存储和界面分层：换工具/加护栏改 SDK 层；换存储实现 `RunStore`；
+换 UI 只需要消费 `RunCoordinator` 事件，不把 VS Code API 带进核心运行时。
 
 ## 工具集(当前 8 个)
 
@@ -76,16 +79,22 @@ Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 
 - **maxTurns 上限**:单次提问最多 `MAX_TURNS=10` 次模型往返,防止工具死循环把额度跑光。
   超限抛 `MaxTurnsExceededError`,界面给出友好提示而非无声刷屏。
-- **每轮 token 用量**:流结束后从 `stream.rawResponses` 汇总 `inputTokens/outputTokens/requests`,
+- **每轮 token 用量**:从 SDK `RunState.usage` 读取聚合的 `inputTokens/outputTokens/requests`,
   回答下方右对齐显示 `📊 本轮 tokens:输入 X / 输出 Y,模型调用 N 次`(网关不回 usage 时自动隐藏)。
 - **会话持久化(Session)**:对话历史由 SDK 的 `Session` 接口自动读写,落到扩展
-  `globalStorage/session.json`。面板重开、F5 调试、重开 VSCode 都会自动回放历史;
+  `storage/session.json`（无工作区时回退 `globalStorage`）。面板重开、F5 调试、重开 VSCode 都会自动回放历史;
   输入框左下"＋ 新会话"清空当前会话。自研 `JsonFileSession` 而非官方 sqlite 版,
   避免原生模块在插件里分发/重编的麻烦(见 `src/session.ts` 注释)。
-- **工具审批(needsApproval)**:`export_st_program`(写文件)标记 `needsApproval:true`。
-  内核执行前 SDK 中断 → 界面弹出审批卡片(可展开查看参数)→ 用户"允许"才落盘、
-  "拒绝"则该工具被拒。这套中断/恢复循环(`runState.approve/reject` + 带 `state` 续跑)
-  是以后 `write_program` 等危险操作的通用安全底座。
+- **可恢复 RunState**:SDK 在 `needsApproval` 前产生的 `RunState` 会写入
+  工作区 `storage/runs.json`（无工作区时回退 `globalStorage`）；扩展宿主或 VS Code 重启后仍会恢复同一个审批卡片。
+  用户决定先写回状态，再用 `runState.approve/reject` 续跑，不依赖内存 Promise。
+- **取消与重试**:运行中可停止模型流和工具 `AbortSignal`；Windows 命令会终止整个子进程树。
+  取消/异常会把 Session 回滚到本轮开始边界。重试生成新的 run id，但继承同一个
+  operation id，避免把失败轮次重复写进对话历史。
+- **副作用账本**:`write_file` / `run_command` / `export_st_program` 执行前先原子登记。
+  整轮重试会按调用序号复用已完成结果；若进程在外部执行完成与本地确认之间崩溃，状态记为
+  uncertain 并阻止自动重放，避免向 PLC/设备重复下发无法确认的动作。
+- **单活动运行约束**:持久化层原子拒绝第二个活动任务，并防止旧异步回调重新激活终态任务。
 - **工具执行回执(tool_result)**:内核从 `tool_call_output_item` 事件透出每个工具的执行结果,
   界面显示 `✓ write_file: {"ok":true,"file":"…","bytes":24}`(失败红色 ✗)。即使模型之后
   一言不发,用户也能看到工具成败——不再出现"点了允许没反应"。
@@ -100,20 +109,19 @@ Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 ## 开发验证脚本
 
 ```bash
-node scripts/mock_gateway.mjs 8790                 # 模拟网关五模式:问候/星三角工具链/导出审批/死循环/静默(工具后空回复)
-npx esbuild scripts/test_entry.ts --bundle --platform=node --format=esm --external:vscode \
-  --target=node18 --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
-  --outfile=scripts/agent.testbundle.mjs           # 打包内核+会话+工具为 ESM 供测试 import
-node scripts/agent_kernel_test.mjs                 # 产物级 9 场景:回放/持久化/工具链/审批允许+拒绝/maxTurns/clear/静默熔断
-node scripts/workspace_tools_test.mjs              # 文件工具层 6 单测:列表/读取分段/写入/搜索/越界拦截/命令退出码
+npm run compile      # VS Code 扩展产物
+npm run test:batch   # store/coordinator/session/workspace tools（含命令取消）
+node scripts/mock_gateway.mjs 8790
+npm run test:agent   # SDK 工具链、审批、RunState 跨实例恢复、流取消
 ```
 
 ## 下一步路线(成熟化)
 
-1. 真实工具:变量表读文件、ST 代码落盘、接真实编译器
-2. 工作区集成:@文件 引用当前文件、选中代码作为上下文
-3. 安全护栏:SDK guardrails、危险操作确认(tool approval)
-4. 会话持久化、停止/重试按钮、markdown 完整渲染
+1. 定义工控 Tool Contract：风险等级、资源锁、超时、补偿/查询接口、审计字段
+2. 把变量表、ST 编译器和 PLC 通信做成独立适配器，不直接耦合 Agent
+3. 加 SDK guardrails、设备级权限与审批策略（读/写/运行分级）
+4. 建立 SQLite/PostgreSQL `RunStore` 和可查询的审计日志，JSON 实现保留给单机开发
+5. 工作区上下文、Markdown 渲染、多 Agent 编排与离线评测
 
 ## 打包发布(可选)
 
