@@ -39,10 +39,11 @@ npm install
 ## 架构(为长成成熟 agent 而设计)
 
 ```
-src/agent.ts      ← agent 内核:工具、提示词、流式循环(纯 Node,不依赖 VSCode,可单测)
-src/chatView.ts   ← WebView 宿主:消息协议桥接(界面 ↔ 内核)
+src/agent.ts      ← agent 内核:工具(含审批工具)、提示词、流式循环、中断/恢复(纯 Node,可单测)
+src/session.ts    ← JSON 文件版 Session(SDK 会话持久化接口实现)
+src/chatView.ts   ← WebView 宿主:消息协议桥接、配置读写、审批桥(界面 ↔ 内核)
 src/extension.ts  ← 激活入口:注册视图和命令
-media/main.js     ← WebView 界面脚本(渲染气泡、输入框)
+media/main.js     ← WebView 界面脚本(气泡/审批卡片/历史回放/输入框)
 media/main.css    ← 界面样式
 ```
 
@@ -51,13 +52,30 @@ host 回 `{type:'delta'|'tool'|'done'|'error'|'settings'|'settingsSaved'|...}`�
 Webview 永远拿不到明文 Key(host 只回 `hasKey` 布尔值)。
 内核与界面完全解耦——换工具、加护栏、做多代理只改 `agent.ts`;换 UI 只改 `media/` + `chatView.ts`。
 
-## 安全与用量(已实现)
+## SDK 能力(已实现)
 
 - **maxTurns 上限**:单次提问最多 `MAX_TURNS=10` 次模型往返,防止工具死循环把额度跑光。
-  超限抛 `MaxTurnsExceededError`,界面给出"超过上限已停止,换个说法"的友好提示而非崩溃。
+  超限抛 `MaxTurnsExceededError`,界面给出友好提示而非无声刷屏。
 - **每轮 token 用量**:流结束后从 `stream.rawResponses` 汇总 `inputTokens/outputTokens/requests`,
-  回答下方右对齐显示一行 `📊 本轮 tokens:输入 X / 输出 Y,模型调用 N 次`。
-  按额度付费的网关可据此估算消费;若网关流式不回 `usage` 字段则该行自动隐藏。
+  回答下方右对齐显示 `📊 本轮 tokens:输入 X / 输出 Y,模型调用 N 次`(网关不回 usage 时自动隐藏)。
+- **会话持久化(Session)**:对话历史由 SDK 的 `Session` 接口自动读写,落到扩展
+  `globalStorage/session.json`。面板重开、F5 调试、重开 VSCode 都会自动回放历史;
+  输入框左下"＋ 新会话"清空当前会话。自研 `JsonFileSession` 而非官方 sqlite 版,
+  避免原生模块在插件里分发/重编的麻烦(见 `src/session.ts` 注释)。
+- **工具审批(needsApproval)**:`export_st_program`(写文件)标记 `needsApproval:true`。
+  内核执行前 SDK 中断 → 界面弹出审批卡片(可展开查看参数)→ 用户"允许"才落盘、
+  "拒绝"则该工具被拒。这套中断/恢复循环(`runState.approve/reject` + 带 `state` 续跑)
+  是以后 `write_program` 等危险操作的通用安全底座。
+
+## 开发验证脚本
+
+```bash
+node scripts/mock_gateway.mjs 8790                 # 起模拟网关(问候/星三角/导出审批/死循环 四模式)
+npx esbuild scripts/test_entry.ts --bundle --platform=node --format=esm --external:vscode \
+  --target=node18 --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+  --outfile=scripts/agent.testbundle.mjs           # 打包内核+会话为 ESM 供测试 import
+node scripts/agent_kernel_test.mjs                 # 产物级 8 场景:回放/持久化/工具链/审批允许+拒绝/maxTurns/clear
+```
 
 ## 开发验证脚本
 

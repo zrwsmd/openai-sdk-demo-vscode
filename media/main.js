@@ -128,6 +128,64 @@ function updateModelChip(model) {
   modelChip.textContent = model || '未配置';
 }
 
+// ---------- 新会话 ----------
+
+const newchatEl = document.getElementById('newchat');
+newchatEl.addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
+
+function showWelcomeHint() {
+  if (messagesEl.querySelector('.hint')) return;
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent = '试试:"写一个电机星三角启动的 ST 程序,延时 5 秒切换" / "把上面的程序导出为文件"';
+  messagesEl.appendChild(hint);
+}
+
+// ---------- 审批卡片 ----------
+
+function addApprovalCard(name, args) {
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+
+  const title = document.createElement('div');
+  title.className = 'approval-title';
+  title.textContent = `⚠ Agent 请求执行工具:${name}`;
+  card.appendChild(title);
+
+  if (args) {
+    const detail = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = '查看参数';
+    const pre = document.createElement('pre');
+    pre.textContent = args.length > 2000 ? args.slice(0, 2000) + '…' : args;
+    detail.appendChild(summary);
+    detail.appendChild(pre);
+    card.appendChild(detail);
+  }
+
+  const bar = document.createElement('div');
+  bar.className = 'approval-actions';
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn primary';
+  okBtn.textContent = '允许';
+  const noBtn = document.createElement('button');
+  noBtn.className = 'btn';
+  noBtn.textContent = '拒绝';
+  const finish = (approve) => {
+    okBtn.disabled = noBtn.disabled = true;
+    card.classList.add(approve ? 'approved' : 'rejected');
+    vscode.postMessage({ type: 'approvalResponse', approve });
+  };
+  okBtn.addEventListener('click', () => finish(true));
+  noBtn.addEventListener('click', () => finish(false));
+  bar.appendChild(okBtn);
+  bar.appendChild(noBtn);
+  card.appendChild(bar);
+
+  messagesEl.appendChild(card);
+  scrollBottom();
+}
+
 // ---------- host 消息 ----------
 
 let agentBubble = null;
@@ -136,12 +194,15 @@ let agentText = '';
 window.addEventListener('message', (event) => {
   const msg = event.data;
   switch (msg.type) {
-    case 'user':
+    case 'user': {
+      const hint = messagesEl.querySelector('.hint');
+      if (hint) hint.remove();
       addMessage('user', msg.text);
       agentText = '';
       agentBubble = addMessage('agent', '');
       agentBubble.classList.add('streaming');
       break;
+    }
     case 'delta':
       if (agentBubble) {
         agentText += msg.text;
@@ -174,6 +235,23 @@ window.addEventListener('message', (event) => {
       break;
     case 'cleared':
       messagesEl.textContent = '';
+      showWelcomeHint();
+      break;
+    case 'history': {
+      // 面板重开:host 回放持久化历史
+      messagesEl.textContent = '';
+      for (const m of msg.messages || []) {
+        if (m.role === 'user') addMessage('user', m.text);
+        else {
+          const b = addMessage('agent', '');
+          renderRich(b, m.text);
+        }
+      }
+      if (!(msg.messages || []).length) showWelcomeHint();
+      break;
+    }
+    case 'approval':
+      addApprovalCard(msg.name, msg.args);
       break;
     case 'settings':
       hasSavedKey = !!msg.hasKey;
@@ -191,13 +269,7 @@ window.addEventListener('message', (event) => {
   }
 });
 
-// 启动时拉一次配置,让模型标签显示真实值
+// 启动时拉一次配置让模型标签显示真实值;先给个欢迎提示,
+// 随后 host 会随 'history' 消息回放持久化历史(有历史时欢迎提示被替换)
 vscode.postMessage({ type: 'getSettings' });
-
-// 初始欢迎提示
-if (!messagesEl.childElementCount) {
-  const hint = document.createElement('div');
-  hint.className = 'hint';
-  hint.textContent = '试试:"写一个电机星三角启动的 ST 程序,延时 5 秒切换"';
-  messagesEl.appendChild(hint);
-}
+showWelcomeHint();

@@ -1,20 +1,29 @@
 import * as vscode from 'vscode';
-import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS, type ChatHistory } from './agent';
+import path from 'node:path';
+import { runAgentTurn, validateConfig, MaxTurnsExceededError, MAX_TURNS } from './agent';
+import { JsonFileSession, extractChatMessages } from './session';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
  * 配置持久化:baseUrl/model 存 globalState,apiKey 存 SecretStorage(OS 级加密)。
+ * 会话持久化:对话历史存 globalStorage/session.json(SDK Session 接口),面板重开自动回放。
  * 消息协议:
- *   webview → host: {type:'send', text} / {type:'clear'} / {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
+ *   webview → host: {type:'send', text} / {type:'clear'} / {type:'approvalResponse', approve}
+ *                   {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
  *   host → webview: {type:'user'|'delta'|'tool'|'done'|'error'|'busy'|'idle'|'cleared'}
+ *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, hasKey} / {type:'settingsSaved', model}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private history: ChatHistory = [];
+  private readonly session: JsonFileSession;
   private busy = false;
+  private pendingApproval?: (ok: boolean) => void;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    const storage = vscode.Uri.file(this.context.globalStorageUri.fsPath);
+    this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -28,17 +37,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (msg.type === 'send' && typeof msg.text === 'string') {
         void this.send(msg.text);
       } else if (msg.type === 'clear') {
-        this.history = [];
+        void this.clear();
+      } else if (msg.type === 'approvalResponse') {
+        this.pendingApproval?.(msg.approve === true);
+        this.pendingApproval = undefined;
       } else if (msg.type === 'getSettings') {
         void this.sendSettingsToWebview();
       } else if (msg.type === 'saveSettings') {
         void this.saveSettings(msg);
       }
     });
+
+    // 面板(重)打开:回放持久化的历史,让用户接着上文继续
+    void this.replayHistory();
   }
 
-  clear(): void {
-    this.history = [];
+  private async replayHistory(): Promise<void> {
+    const items = await this.session.getItems();
+    this.post({ type: 'history', messages: extractChatMessages(items) });
+  }
+
+  async clear(): Promise<void> {
+    await this.session.clearSession();
     this.post({ type: 'cleared' });
   }
 
@@ -83,7 +103,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async send(text: string): Promise<void> {
     if (this.busy) return;
-    const cfg = await this.getConfig();
+    const cfg = { ...(await this.getConfig()), exportDir: path.join(this.context.globalStorageUri.fsPath, 'exports') };
     const err = validateConfig(cfg);
     if (err) {
       this.post({ type: 'error', message: err });
@@ -93,14 +113,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.busy = true;
     this.post({ type: 'busy' });
     this.post({ type: 'user', text });
-    this.history = [...this.history, { role: 'user', content: text }];
+
+    // 审批桥:内核遇到 needsApproval 工具时挂起,发审批卡片给界面,等用户点"允许/拒绝"
+    const requestApproval = (name: string, args: string) =>
+      new Promise<boolean>((resolve) => {
+        this.pendingApproval = resolve;
+        this.post({ type: 'approval', name, args });
+      });
 
     try {
-      const result = await runAgentTurn(cfg, this.history, (ev) => {
+      const result = await runAgentTurn(cfg, this.session, text, (ev) => {
         if (ev.type === 'delta') this.post({ type: 'delta', text: ev.text });
         else if (ev.type === 'tool') this.post({ type: 'tool', name: ev.name });
-      });
-      this.history = result.history;
+      }, requestApproval);
       this.post({ type: 'done', usage: result.usage });
     } catch (e) {
       let message: string;
@@ -155,6 +180,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <div class="left">
           <span class="chip" id="mode-chip">Agent ▾</span>
           <span class="chip model" id="model-chip" title="点击配置模型">未配置</span>
+          <span class="chip action" id="newchat" title="清空当前会话,开始新对话">＋ 新会话</span>
         </div>
         <div class="right">
           <button id="gear" class="gear-btn" title="模型设置">⚙</button>

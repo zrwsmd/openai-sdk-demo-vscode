@@ -143,6 +143,36 @@ body { display: flex; flex-direction: column; }
 }
 .chip.model:hover { color: var(--fg); border-color: var(--accent); }
 
+.chip.action { cursor: pointer; }
+.chip.action:hover { color: var(--fg); border-color: var(--accent); }
+
+/* ---------- 审批卡片 ---------- */
+.approval-card {
+  margin: 8px 0;
+  border: 1px solid var(--vscode-inputWarningBorder, #d89614);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--vscode-inputValidation-warningBackground, rgba(216, 150, 20, 0.08));
+}
+.approval-card.approved { border-color: var(--vscode-inputValidationInfoBorder, #4f8cff); background: transparent; opacity: 0.75; }
+.approval-card.rejected { border-color: var(--vscode-errorForeground, #f66); background: transparent; opacity: 0.75; }
+.approval-title { font-size: 12px; margin-bottom: 6px; }
+.approval-card details { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.approval-card pre {
+  margin: 4px 0 0;
+  padding: 6px;
+  background: #1a1a1a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.approval-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.approval-actions .btn:disabled { opacity: 0.45; cursor: default; }
+
 .send-btn {
   width: 26px;
   height: 26px;
