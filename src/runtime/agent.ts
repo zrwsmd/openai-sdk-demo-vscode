@@ -31,6 +31,7 @@ import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from '.
 import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
 import type { AuditEvent } from '../observability/audit';
 import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
+import { parseToolResult, type ApprovalRequest as ProtocolApprovalRequest, type UsageSummary } from '../protocol/results';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -71,11 +72,8 @@ export type AgentEvent =
 export type ApprovalRequester = (toolName: string, args: string) => Promise<boolean>;
 
 /** Stable, UI-safe description of a pending approval checkpoint. */
-export interface ApprovalRequest {
-  id: string;
-  name: string;
-  args: string;
-}
+/** Backward-compatible alias; the protocol owns the serialized shape. */
+export type ApprovalRequest = ProtocolApprovalRequest;
 
 export type AgentRunStatus = 'completed' | 'awaiting_approval' | 'cancelled';
 
@@ -144,11 +142,13 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
       const name = (toolCall as { name?: string }).name ?? 'tool';
       const text = typeof result === 'string' ? result : JSON.stringify(result);
       try {
-        const parsed = JSON.parse(text) as { ok?: unknown; effect?: unknown; risk?: unknown };
-        if (typeof parsed.ok !== 'boolean' || typeof parsed.effect !== 'string' || typeof parsed.risk !== 'string') {
-          throw new Error('tool result contract missing fields');
-        }
-        audit(cfg, { type: 'tool_completed', toolName: name, risk: parsed.risk as ToolRisk, ok: parsed.ok });
+        const parsed = parseToolResult(JSON.parse(text));
+        audit(cfg, {
+          type: 'tool_completed',
+          toolName: name,
+          risk: String(parsed.risk),
+          ok: parsed.ok === true,
+        });
         return ToolGuardrailFunctionOutputFactory.allow();
       } catch {
         audit(cfg, { type: 'tool_completed', toolName: name, decision: 'deny', ok: false, summary: '非结构化工具结果' });
@@ -486,11 +486,8 @@ function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
 // ---------- 一轮对话:流式执行 + 会话持久化 + 审批中断/恢复 ----------
 
 /** 本轮 token 用量(从模型响应的 usage 汇总;网关不返回 usage 字段时全为 0) */
-export interface TurnUsage {
-  inputTokens: number;
-  outputTokens: number;
-  requests: number; // 本轮调用模型的次数(含工具调用往返与审批恢复后的往返)
-}
+/** Backward-compatible protocol alias used by runtime/run store. */
+export type TurnUsage = UsageSummary;
 
 /** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
 export const MAX_TURNS = 10;

@@ -1,15 +1,9 @@
 import { createHash } from 'node:crypto';
+import { createToolResult, type ToolResultInput, type ToolRisk } from '../protocol/results';
 
-export type ToolRisk = 'read' | 'plan' | 'write' | 'execute';
-
-export interface ToolResult<T = unknown> {
-  ok: boolean;
-  data?: T;
-  diagnostics?: string[];
-  error?: string;
-  effect: 'none' | 'filesystem' | 'process' | 'device';
-  risk: ToolRisk;
-}
+// Keep the historical toolContract exports stable while making the protocol
+// module the single source of truth for tool result shapes and risk/effect enums.
+export type { ToolEffect, ToolResult, ToolResultInput, ToolRisk } from '../protocol/results';
 
 export interface ToolPolicyContext {
   workspaceRoot: string;
@@ -77,13 +71,12 @@ export class DefaultToolPolicy implements ToolPolicy {
 }
 
 export function toolResult<T>(
-  result: Omit<ToolResult<T>, 'risk'> & { risk?: ToolRisk },
+  result: Omit<ToolResultInput<T>, 'risk'> & { risk?: ToolRisk },
   fallbackRisk: ToolRisk = 'read',
 ): string {
-  return JSON.stringify({ ...result, risk: result.risk ?? fallbackRisk });
+  return JSON.stringify(createToolResult({ ...result, risk: result.risk ?? fallbackRisk }));
 }
 
 export function toolFingerprint(toolName: string, input: unknown): string {
   return createHash('sha256').update(toolName).update(JSON.stringify(input)).digest('hex').slice(0, 16);
 }
-

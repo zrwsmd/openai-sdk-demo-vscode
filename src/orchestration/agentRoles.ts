@@ -1,5 +1,6 @@
 import { Agent, type Model, type Tool } from '@openai/agents';
 import { z } from 'zod';
+import { toolResult } from '../tools/toolContract';
 
 export type IndustrialAgentMode = 'single' | 'team';
 
@@ -31,7 +32,7 @@ export function createIndustrialAgentTeam(model: string | Model, tools: Tool[]) 
     toolName: 'review_plc_plan',
     toolDescription: '对 PLC 程序或控制方案做只读安全审查，返回结构化风险和必改项。',
     customOutputExtractor: async ({ finalOutput }) =>
-      JSON.stringify({ ok: true, data: finalOutput, diagnostics: [], effect: 'none', risk: 'plan' }),
+      toolResult({ ok: true, data: finalOutput, effect: 'none', risk: 'plan' }),
   });
   const executor = new Agent({
     name: 'PLC Controlled Executor',

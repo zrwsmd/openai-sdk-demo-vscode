@@ -34,7 +34,14 @@ assert.equal(
 );
 
 const result = JSON.parse(toolResult({ ok: true, data: { value: 1 }, effect: 'none', risk: 'read' }));
-assert.deepEqual(result, { ok: true, data: { value: 1 }, effect: 'none', risk: 'read' });
+assert.deepEqual(result, {
+  protocolVersion: 1,
+  ok: true,
+  data: { value: 1 },
+  diagnostics: [],
+  effect: 'none',
+  risk: 'read',
+});
 
 const plc = new MockPlcAdapter();
 const table = await plc.getIoTable();

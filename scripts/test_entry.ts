@@ -9,3 +9,4 @@ export * from '../src/tools/toolContract';
 export * from '../src/plc/plcAdapter';
 export * from '../src/observability/audit';
 export * from '../src/orchestration/agentRoles';
+export * from '../src/protocol';
