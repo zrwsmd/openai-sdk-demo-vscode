@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
-import { setAgentLogger } from './agent';
-import { JsonFileSession } from './session';
-import { JsonRunStore, type DurableRunConfig } from './runStore';
-import { RunCoordinator, type RuntimeEvent } from './runCoordinator';
-import { JsonAuditSink } from './audit';
+import { setAgentLogger } from '../runtime/agent';
+import { JsonFileSession } from '../runtime/session';
+import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
+import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
+import { JsonAuditSink } from '../observability/audit';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。

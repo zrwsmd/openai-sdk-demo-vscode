@@ -25,12 +25,12 @@ import { z } from 'zod';
 import OpenAI from 'openai';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { listFiles, readFileRange, writeFileText, searchText, runCommand } from './workspaceTools';
+import { listFiles, readFileRange, writeFileText, searchText, runCommand } from '../tools/workspaceTools';
 import { EffectRecoveryRequiredError } from './errors';
-import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from './toolContract';
-import { MockPlcAdapter, type PlcAdapter } from './plcAdapter';
-import type { AuditEvent } from './audit';
-import { createIndustrialAgentTeam, type IndustrialAgentMode } from './agentRoles';
+import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from '../tools/toolContract';
+import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
+import type { AuditEvent } from '../observability/audit';
+import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。

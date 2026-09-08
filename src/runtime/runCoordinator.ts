@@ -9,7 +9,7 @@ import {
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
-import type { AuditEventType, AuditSink } from './audit';
+import type { AuditEventType, AuditSink } from '../observability/audit';
 
 export type RuntimeEvent =
   | ({ type: AgentEvent['type']; runId: string } & Record<string, unknown>)
