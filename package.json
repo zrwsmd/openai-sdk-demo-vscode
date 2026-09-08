@@ -8,7 +8,7 @@
     "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --target=node18 --outfile=dist/extension.js",
     "watch": "npm run compile -- --watch",
     "test:generate": "node scripts/build_test_bundle.mjs",
-    "test:batch": "npm run test:generate && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/workspace_tools_test.mjs",
+    "test:batch": "npm run test:generate && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/workspace_tools_test.mjs && node scripts/sdk_foundation_test.mjs",
     "test:agent": "npm run test:generate && node scripts/agent_kernel_test.mjs && node scripts/agent_resume_test.mjs"
   },
   "keywords": [],
@@ -84,6 +84,12 @@
           "type": "string",
           "default": "",
           "description": "模型名,留空则用环境变量 AGENT_MODEL,再退回 gpt-4o-mini"
+        },
+        "plcAgent.orchestration": {
+          "type": "string",
+          "enum": ["single", "team"],
+          "default": "single",
+          "description": "Agent 编排模式:single 保持单角色，team 启用规划/安全审查/受控执行三角色"
         }
       }
     }

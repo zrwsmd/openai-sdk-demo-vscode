@@ -9,6 +9,7 @@ import {
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
+import type { AuditEventType, AuditSink } from './audit';
 
 export type RuntimeEvent =
   | ({ type: AgentEvent['type']; runId: string } & Record<string, unknown>)
@@ -20,6 +21,7 @@ export interface RunCoordinatorDependencies {
   emit: (event: RuntimeEvent) => void;
   log?: (line: string) => void;
   executeAgent?: typeof runAgent;
+  audit?: AuditSink;
 }
 
 export interface RecoverableSession extends Session {
@@ -41,6 +43,7 @@ export class RunCoordinator {
   private readonly emitEvent: (event: RuntimeEvent) => void;
   private readonly writeLog: (line: string) => void;
   private readonly executeAgent: typeof runAgent;
+  private readonly auditSink?: AuditSink;
   private busy = false;
   private transitioning = false;
   private controller?: AbortController;
@@ -55,6 +58,7 @@ export class RunCoordinator {
     this.emitEvent = dependencies.emit;
     this.writeLog = dependencies.log ?? (() => {});
     this.executeAgent = dependencies.executeAgent ?? runAgent;
+    this.auditSink = dependencies.audit;
   }
 
   async initialize(): Promise<void> {
@@ -105,6 +109,7 @@ export class RunCoordinator {
         return;
       }
       const run = await this.store.begin(userText, config, (await this.session.getItems()).length);
+      await this.audit('run_started', run, { model: config.model });
       this.emit({ type: 'user', text: userText, runId: run.id });
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       if (this.stopRequested) {
@@ -129,8 +134,10 @@ export class RunCoordinator {
       if (!run.approvals.some((approval) => approval.id === approvalId)) return;
 
       this.writeLog(`[run:${run.id}] 用户${approved ? '允许' : '拒绝'} ${approvalId}`);
+      await this.audit('approval_decided', run, { approvalId, approved });
       run.status = 'running';
       await this.store.update(run);
+      await this.audit('run_resumed', run, { approvalId });
       this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
       if (this.stopRequested) {
         this.stopRequested = false;
@@ -175,6 +182,7 @@ export class RunCoordinator {
     run.state = undefined;
     run.approvals = [];
     await this.store.update(run);
+    await this.audit('run_cancelled', run);
     if (notify) {
       this.emit({ type: 'cancelled', canRetry: true });
       this.emit({ type: 'idle' });
@@ -200,6 +208,7 @@ export class RunCoordinator {
         previous.sessionItemCountBefore,
         previous.operationId,
       );
+      await this.audit('retry_started', run, { previousRunId: previous.id });
       this.emit({ type: 'user', text: run.userText, runId: run.id, retry: true });
       this.writeLog(`[run:${run.id}] 重试 operation=${run.operationId}`);
       await this.execute(run, apiKey);
@@ -251,6 +260,15 @@ export class RunCoordinator {
           apiKey,
           executeEffect: (toolName, input, invoke) =>
             this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
+          audit: async (event) => {
+            if (!this.auditSink) return;
+            await this.auditSink.append({
+              ...event,
+              runId: run.id,
+              operationId: run.operationId,
+              traceId: run.id,
+            });
+          },
         },
         this.session,
         run.userText,
@@ -265,6 +283,7 @@ export class RunCoordinator {
             run.output = baseOutput + checkpoint.output;
             run.usage = checkpoint.usage;
             await this.store.update(run);
+            await this.audit('checkpoint_saved', run, { approvalCount: checkpoint.approvals.length });
           },
         },
       );
@@ -281,12 +300,15 @@ export class RunCoordinator {
       await this.store.update(run);
 
       if (result.status === 'awaiting_approval') {
+        await this.audit('approval_requested', run, { approvals: run.approvals });
         this.writeLog(`[run:${run.id}] 已持久化审批断点 (${run.approvals.length} 项)`);
         this.emit({ type: 'awaitingApproval', runId: run.id, approvals: run.approvals });
       } else if (result.status === 'cancelled') {
+        await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });
       } else {
+        await this.audit('run_completed', run, { usage: result.usage });
         this.writeLog(
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
@@ -301,9 +323,11 @@ export class RunCoordinator {
       run.error = cancelled ? undefined : this.formatError(error);
       await this.store.update(run);
       if (cancelled) {
+        await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });
       } else {
+        await this.audit('run_failed', run, { error: run.error });
         this.writeLog(`[run:${run.id}] 出错: ${run.error}`);
         this.emit({ type: 'error', message: run.error, canRetry: true });
       }
@@ -331,6 +355,21 @@ export class RunCoordinator {
 
   private async replayHistory(): Promise<void> {
     this.emit({ type: 'history', messages: extractChatMessages(await this.session.getItems()) });
+  }
+
+  private async audit(type: AuditEventType, run: DurableRunRecord, metadata?: Record<string, unknown>): Promise<void> {
+    if (!this.auditSink) return;
+    try {
+      await this.auditSink.append({
+        type,
+        runId: run.id,
+        operationId: run.operationId,
+        traceId: run.id,
+        metadata,
+      });
+    } catch (error) {
+      this.writeLog(`[audit] ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private formatError(error: unknown): string {

@@ -5,3 +5,7 @@ export * from '../src/workspaceTools';
 export * from '../src/runStore';
 export * from '../src/runCoordinator';
 export * from '../src/errors';
+export * from '../src/toolContract';
+export * from '../src/plcAdapter';
+export * from '../src/audit';
+export * from '../src/agentRoles';

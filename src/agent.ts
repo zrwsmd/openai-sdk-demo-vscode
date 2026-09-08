@@ -14,6 +14,9 @@ import {
   OpenAIChatCompletionsModel,
   MaxTurnsExceededError,
   RunState,
+  defineToolInputGuardrail,
+  defineToolOutputGuardrail,
+  ToolGuardrailFunctionOutputFactory,
   type RunToolApprovalItem,
   type Session,
   type StreamedRunResult,
@@ -24,6 +27,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { listFiles, readFileRange, writeFileText, searchText, runCommand } from './workspaceTools';
 import { EffectRecoveryRequiredError } from './errors';
+import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from './toolContract';
+import { MockPlcAdapter, type PlcAdapter } from './plcAdapter';
+import type { AuditEvent } from './audit';
+import { createIndustrialAgentTeam, type IndustrialAgentMode } from './agentRoles';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -43,6 +50,12 @@ export interface AgentConfig {
   workspaceRoot: string;
   /** Host-owned effect journal. It may return a previously committed result. */
   executeEffect?: <T>(toolName: string, input: unknown, execute: () => Promise<T>) => Promise<T>;
+  /** Policy is host-owned and must be enforced before side effects. */
+  policy?: ToolPolicy;
+  policyContext?: { allowedCommands?: string[]; allowedDevices?: string[]; dryRun?: boolean };
+  plcAdapter?: PlcAdapter;
+  audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
+  orchestration?: IndustrialAgentMode;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
@@ -94,24 +107,92 @@ export interface AgentRunResult {
   approvals?: ApprovalRequest[];
 }
 
-// ---------- 工具(演示用假实现,成熟化时替换内脏即可,接口不变) ----------
+// ---------- 工具(策略/审计/设备适配器由宿主注入,工具合同保持稳定) ----------
+
+type ToolEffect = 'none' | 'filesystem' | 'process' | 'device';
+
+function toolArguments(raw: string | undefined): unknown {
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+function audit(cfg: AgentConfig, event: Omit<AuditEvent, 'id' | 'timestamp'>): void {
+  void Promise.resolve(cfg.audit?.(event)).catch(() => undefined);
+}
+
+function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
+  const context = { workspaceRoot: cfg.workspaceRoot, ...cfg.policyContext };
+  const input = defineToolInputGuardrail({
+    name: 'industrial-tool-policy',
+    run: async ({ toolCall }) => {
+      const call = toolCall as { name?: string; arguments?: string };
+      const name = call.name ?? 'unknown_tool';
+      const decision = policy.evaluate(name, toolArguments(call.arguments), context);
+      audit(cfg, {
+        type: 'guardrail_evaluated', toolName: name, risk: decision.risk,
+        decision: decision.allowed ? 'allow' : 'deny',
+        metadata: { requiresApproval: decision.requiresApproval, reason: decision.reason },
+      });
+      return decision.allowed
+        ? ToolGuardrailFunctionOutputFactory.allow(decision)
+        : ToolGuardrailFunctionOutputFactory.rejectContent(decision.reason ?? '工具调用被工控安全策略拒绝。', decision);
+    },
+  });
+  const output = defineToolOutputGuardrail({
+    name: 'structured-tool-output',
+    run: async ({ toolCall, output: result }) => {
+      const name = (toolCall as { name?: string }).name ?? 'tool';
+      const text = typeof result === 'string' ? result : JSON.stringify(result);
+      try {
+        const parsed = JSON.parse(text) as { ok?: unknown; effect?: unknown; risk?: unknown };
+        if (typeof parsed.ok !== 'boolean' || typeof parsed.effect !== 'string' || typeof parsed.risk !== 'string') {
+          throw new Error('tool result contract missing fields');
+        }
+        audit(cfg, { type: 'tool_completed', toolName: name, risk: parsed.risk as ToolRisk, ok: parsed.ok });
+        return ToolGuardrailFunctionOutputFactory.allow();
+      } catch {
+        audit(cfg, { type: 'tool_completed', toolName: name, decision: 'deny', ok: false, summary: '非结构化工具结果' });
+        return ToolGuardrailFunctionOutputFactory.rejectContent('工具未返回约定的结构化结果，已拒绝将其用于后续决策。');
+      }
+    },
+  });
+  return { input: [input], output: [output] };
+}
 
 function buildTools(cfg: AgentConfig) {
-  const withEffect = <T>(toolName: string, input: unknown, execute: () => Promise<T>) =>
-    cfg.executeEffect ? cfg.executeEffect(toolName, input, execute) : execute();
+  const policy = cfg.policy ?? new DefaultToolPolicy();
+  const plc = cfg.plcAdapter ?? new MockPlcAdapter();
+  const guardrails = buildToolGuardrails(cfg, policy);
+  const withEffect = <T>(toolName: string, input: unknown, risk: ToolRisk, execute: () => Promise<T>) => {
+    audit(cfg, { type: 'tool_requested', toolName, risk });
+    const run = () => execute();
+    return cfg.executeEffect ? cfg.executeEffect(toolName, input, run) : run();
+  };
+  const contract = <T>(data: T, risk: ToolRisk, effect: ToolEffect = 'none') =>
+    toolResult({ ok: true, data, effect, risk });
+  const failed = (error: unknown, risk: ToolRisk, effect: ToolEffect = 'none') =>
+    toolResult({ ok: false, error: error instanceof Error ? error.message : String(error), effect, risk });
   const getIoTable = tool({
     name: 'get_io_table',
     description: '查询当前 PLC 项目的 I/O 变量表。',
     parameters: z.object({}),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
     execute: async () => {
-      const ioTable = [
-        { name: 'Start_Btn', addr: '%IX0.0', type: 'BOOL', comment: '启动按钮' },
-        { name: 'Stop_Btn', addr: '%IX0.1', type: 'BOOL', comment: '停止按钮' },
-        { name: 'Motor_Main', addr: '%QX0.0', type: 'BOOL', comment: '主接触器' },
-        { name: 'Motor_Star', addr: '%QX0.1', type: 'BOOL', comment: '星形接触器' },
-        { name: 'Motor_Delta', addr: '%QX0.2', type: 'BOOL', comment: '三角形接触器' },
-      ];
-      return JSON.stringify(ioTable, null, 2);
+      try { return contract({ adapter: plc.id, variables: await plc.getIoTable() }, 'read'); }
+      catch (error) { return failed(error, 'read'); }
+    },
+  });
+
+  const readPlcVariables = tool({
+    name: 'read_plc_variables',
+    description: '从已配置的 PLC 适配器读取指定变量的当前值，只读且不改变设备状态。',
+    parameters: z.object({ names: z.array(z.string()).min(1).describe('要读取的 PLC 变量名') }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
+    execute: async ({ names }) => {
+      try { return contract({ adapter: plc.id, variables: await plc.readVariables(names) }, 'read'); }
+      catch (error) { return failed(error, 'read'); }
     },
   });
 
@@ -119,14 +200,16 @@ function buildTools(cfg: AgentConfig) {
     name: 'validate_st_code',
     description: '校验一段 IEC 61131-3 ST 代码，返回校验结果。参数 code 为完整 ST 源码。',
     parameters: z.object({ code: z.string().describe('完整 ST 源码') }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
     execute: async ({ code }) => {
       if (!code.toUpperCase().includes('END_PROGRAM')) {
-        return JSON.stringify({ ok: false, errors: ['缺少 END_PROGRAM 结束标记'] });
+        return toolResult({ ok: false, data: { errors: ['缺少 END_PROGRAM 结束标记'] }, effect: 'none', risk: 'plan' });
       }
       if (code.includes('TON') && !code.includes('T#')) {
-        return JSON.stringify({ ok: false, errors: ['使用了 TON 但未发现时间字面量(如 T#5s)'] });
+        return toolResult({ ok: false, data: { errors: ['使用了 TON 但未发现时间字面量(如 T#5s)'] }, effect: 'none', risk: 'plan' });
       }
-      return JSON.stringify({ ok: true, errors: [] });
+      return contract({ errors: [] }, 'plan');
     },
   });
 
@@ -139,29 +222,33 @@ function buildTools(cfg: AgentConfig) {
       code: z.string().describe('完整 ST 源码(PROGRAM ... END_PROGRAM)'),
     }),
     needsApproval: true,
-    execute: ({ code }) => withEffect('export_st_program', { code }, async () => {
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
+    execute: ({ code }) => withEffect('export_st_program', { code }, 'write', async () => {
       const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
       const name = m?.[1] ?? `program_${Date.now()}`;
       await fs.mkdir(cfg.exportDir, { recursive: true });
       const file = path.join(cfg.exportDir, `${name}.st`);
       await fs.writeFile(file, code, 'utf8');
-      return JSON.stringify({ ok: true, file });
+      return contract({ file }, 'write', 'filesystem');
     }),
   });
 
   // ---- 通用工作区文件工具(作用域锁定在当前工作区根目录) ----
-  const guard = (fn: () => Promise<string>): Promise<string> =>
+  const guard = (fn: () => Promise<string>, risk: ToolRisk, effect: ToolEffect = 'none'): Promise<string> =>
     fn().catch((e: unknown) => {
       if (e instanceof EffectRecoveryRequiredError) throw e;
-      return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      return failed(e, risk, effect);
     });
 
   const listFilesTool = tool({
     name: 'list_files',
     description: '列出当前工作区内的文件(相对根目录,自动跳过 node_modules/.git/dist 等)。参数 dir 为相对子目录,默认根目录。',
     parameters: z.object({ dir: z.string().optional().describe('相对子目录,留空表示工作区根') }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
     execute: ({ dir }) =>
-      guard(async () => JSON.stringify({ ok: true, files: await listFiles(cfg.workspaceRoot, dir ?? '.') })),
+      guard(async () => contract({ files: await listFiles(cfg.workspaceRoot, dir ?? '.') }, 'read'), 'read'),
   });
 
   const readFileTool = tool({
@@ -172,11 +259,13 @@ function buildTools(cfg: AgentConfig) {
       startLine: z.number().optional().describe('起始行(1 起)'),
       endLine: z.number().optional().describe('结束行(含)'),
     }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
     execute: ({ path: p, startLine, endLine }) =>
       guard(async () => {
         const r = await readFileRange(cfg.workspaceRoot, p, startLine, endLine);
-        return JSON.stringify({ ok: true, totalLines: r.totalLines, content: r.text });
-      }),
+        return contract({ totalLines: r.totalLines, content: r.text }, 'read');
+      }, 'read'),
   });
 
   const searchFilesTool = tool({
@@ -187,8 +276,10 @@ function buildTools(cfg: AgentConfig) {
       glob: z.string().optional().describe('按文件名过滤,如 *.st'),
       isRegex: z.boolean().optional().describe('是否按正则解析 text'),
     }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
     execute: ({ text, glob, isRegex }) =>
-      guard(async () => JSON.stringify({ ok: true, matches: await searchText(cfg.workspaceRoot, text, { glob, isRegex }) })),
+      guard(async () => contract({ matches: await searchText(cfg.workspaceRoot, text, { glob, isRegex }) }, 'read'), 'read'),
   });
 
   const writeFileTool = tool({
@@ -199,11 +290,16 @@ function buildTools(cfg: AgentConfig) {
       content: z.string().describe('要写入的完整文本内容'),
     }),
     needsApproval: true,
-    execute: ({ path: p, content }) => guard(() =>
-      withEffect('write_file', { path: p, content }, async () =>
-        JSON.stringify({ ok: true, ...(await writeFileText(cfg.workspaceRoot, p, content)) }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
+    execute: ({ path: p, content }) =>
+      guard(
+        () => withEffect('write_file', { path: p, content }, 'write', async () =>
+          contract(await writeFileText(cfg.workspaceRoot, p, content), 'write', 'filesystem'),
+        ),
+        'write',
+        'filesystem',
       ),
-    ),
   });
 
   const runCommandTool = tool({
@@ -211,14 +307,19 @@ function buildTools(cfg: AgentConfig) {
     description: '在工作区根目录执行一条 shell 命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。',
     parameters: z.object({ command: z.string().describe('要执行的命令行') }),
     needsApproval: true,
-    execute: ({ command }, _context, details) => guard(() =>
-      withEffect('run_command', { command }, async () =>
-        JSON.stringify({ ok: true, ...(await runCommand(cfg.workspaceRoot, command, 60_000, details?.signal)) }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
+    execute: ({ command }, _context, details) =>
+      guard(
+        () => withEffect('run_command', { command }, 'execute', async () =>
+          contract(await runCommand(cfg.workspaceRoot, command, 60_000, details?.signal), 'execute', 'process'),
+        ),
+        'execute',
+        'process',
       ),
-    ),
   });
 
-  return [getIoTable, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
+  return [getIoTable, readPlcVariables, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
 }
 
 const SYSTEM_PROMPT =
@@ -428,12 +529,15 @@ export async function runAgent(
 ): Promise<AgentRunResult> {
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
-  const agent = new Agent({
-    name: 'PLC 编程助手',
-    model,
-    instructions: SYSTEM_PROMPT,
-    tools: buildTools(cfg),
-  });
+  const tools = buildTools(cfg);
+  const agent = cfg.orchestration === 'team'
+    ? createIndustrialAgentTeam(model, tools).planner
+    : new Agent({
+      name: 'PLC 编程助手',
+      model,
+      instructions: SYSTEM_PROMPT,
+      tools,
+    });
 
   const runner = new Runner();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };

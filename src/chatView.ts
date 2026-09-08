@@ -4,6 +4,7 @@ import { setAgentLogger } from './agent';
 import { JsonFileSession } from './session';
 import { JsonRunStore, type DurableRunConfig } from './runStore';
 import { RunCoordinator, type RuntimeEvent } from './runCoordinator';
+import { JsonAuditSink } from './audit';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
@@ -29,6 +30,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const storage = this.context.storageUri ?? this.context.globalStorageUri;
     this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
     const runStore = new JsonRunStore(path.join(storage.fsPath, 'runs.json'));
+    const audit = new JsonAuditSink(path.join(storage.fsPath, 'audit.json'));
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
@@ -37,6 +39,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       store: runStore,
       emit: (event) => this.post(event),
       log: (line) => this.log.appendLine(line),
+      audit,
     });
   }
 
@@ -91,6 +94,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       baseUrl: (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim(),
       apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
       model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
+      orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
       savedInPlugin: !!(saved.baseUrl || saved.model || savedKey),
     };
   }
@@ -124,6 +128,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       model: live.model,
       exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
       workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      orchestration: live.orchestration,
     };
     await this.coordinator.start(text, config, live.apiKey);
   }
