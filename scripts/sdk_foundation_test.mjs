@@ -42,8 +42,11 @@ assert.ok(table.length >= 5);
 assert.deepEqual((await plc.readVariables(['Motor_Main'])).map((item) => item.name), ['Motor_Main']);
 
 const team = createIndustrialAgentTeam('gpt-4o-mini', []);
-assert.equal(team.planner.handoffs.length, 2);
+assert.equal(team.planner.handoffs.length, 1);
+assert.equal(team.planner.tools.length, 1);
+assert.equal(team.planner.tools[0].name, 'review_plc_plan');
 assert.equal(team.reviewer.tools.length, 0);
+assert.equal(team.executor.tools.length, 0);
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-audit-'));
 try {
