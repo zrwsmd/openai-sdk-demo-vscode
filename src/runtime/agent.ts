@@ -15,7 +15,6 @@ import {
   MaxTurnsExceededError,
   RunState,
   defineToolInputGuardrail,
-  defineToolOutputGuardrail,
   ToolGuardrailFunctionOutputFactory,
   type RunToolApprovalItem,
   type Session,
@@ -196,27 +195,10 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
         : ToolGuardrailFunctionOutputFactory.rejectContent(decision.reason ?? '工具调用被工控安全策略拒绝。', decision);
     },
   });
-  const output = defineToolOutputGuardrail({
-    name: 'structured-tool-output',
-    run: async ({ toolCall, output: result }) => {
-      const name = (toolCall as { name?: string }).name ?? 'tool';
-      const text = toolOutputText(result);
-      try {
-        const parsed = parseToolResult(JSON.parse(text));
-        audit(cfg, {
-          type: 'tool_completed',
-          toolName: name,
-          risk: String(parsed.risk),
-          ok: parsed.ok === true,
-        });
-        return ToolGuardrailFunctionOutputFactory.allow();
-      } catch {
-        audit(cfg, { type: 'tool_completed', toolName: name, decision: 'deny', ok: false, summary: '非结构化工具结果' });
-        return ToolGuardrailFunctionOutputFactory.rejectContent('工具未返回约定的结构化结果，已拒绝将其用于后续决策。');
-      }
-    },
-  });
-  return { input: [input], output: [output] };
+  // toolResult() validates and serializes every local result at construction
+  // time. Do not parse it again here after the SDK has normalized it into
+  // provider text parts; that second parse rejects valid SDK output shapes.
+  return { input: [input], output: [] };
 }
 
 function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
