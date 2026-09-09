@@ -307,7 +307,11 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
     execute: ({ path: p, startLine, endLine }) =>
       guard(async () => {
         const target = workspace.resolve(p);
-        const r = await readFileRange(target.root, target.relativePath, startLine, endLine);
+        // 网关可能把数字参数传成字符串或 "None";coerce 会转成 NaN,这里兜底:
+        // startLine 非正整数 → 1;endLine 非正整数 → 读到文件末尾(不限制结束行)
+        const s = typeof startLine === 'number' && Number.isFinite(startLine) && startLine > 0 ? startLine : 1;
+        const e = typeof endLine === 'number' && Number.isFinite(endLine) && endLine > 0 ? endLine : undefined;
+        const r = await readFileRange(target.root, target.relativePath, s, e);
         return contract({ totalLines: r.totalLines, content: r.text }, 'read');
       }, 'read'),
   });
