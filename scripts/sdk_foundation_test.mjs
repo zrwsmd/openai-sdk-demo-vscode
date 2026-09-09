@@ -2,14 +2,16 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { zodTextFormat } from 'openai/helpers/zod';
 import {
   DefaultToolPolicy,
   JsonAuditSink,
   MockPlcAdapter,
   createIndustrialAgentTeam,
+  inferRequiredTool,
   industrialAgentOutputDefinition,
   industrialAgentOutputSchema,
-  getAgentOutputDefinition,
+  verifyWorkspaceWrite,
   toolResult,
 } from './agent.testbundle.mjs';
 
@@ -62,13 +64,42 @@ const structuredValue = industrialAgentOutputSchema.parse({
   message: '程序已校验',
   diagnostics: [],
   artifacts: [],
+  data: null,
 });
 assert.equal(structuredValue.message, '程序已校验');
-assert.equal(getAgentOutputDefinition('text'), undefined);
-assert.equal(getAgentOutputDefinition('structured'), industrialAgentOutputDefinition);
-const structuredTeam = createIndustrialAgentTeam('gpt-4o-mini', [], industrialAgentOutputDefinition);
-const parsedPlannerOutput = structuredTeam.planner.processFinalOutput(JSON.stringify(structuredValue));
+assert.equal(inferRequiredTool('请把你好写入当前项目的 op.txt 文件'), 'write_file');
+assert.equal(inferRequiredTool('write this content to config.json'), 'write_file');
+assert.equal(inferRequiredTool('只解释一下 write_file 的作用，不要执行写入'), undefined);
+assert.equal(inferRequiredTool('请把这段 ST 程序导出保存'), 'export_st_program');
+assert.equal(inferRequiredTool('请运行这个命令检查工程'), 'run_command');
+const outputFormat = zodTextFormat(industrialAgentOutputSchema, 'industrial_agent_output');
+const assertClosedObjects = (value) => {
+  if (!value || typeof value !== 'object') return;
+  if (value.type === 'object') assert.notEqual(value.additionalProperties, true);
+  for (const child of Object.values(value)) assertClosedObjects(child);
+};
+assertClosedObjects(outputFormat.schema);
+const structuredTeam = createIndustrialAgentTeam('gpt-4o-mini', []);
+const parsedPlannerOutput = structuredTeam.planner.outputType.parse(structuredValue);
 assert.equal(parsedPlannerOutput.message, '程序已校验');
+const parsedExecutorOutput = structuredTeam.executor.outputType.parse(structuredValue);
+assert.equal(parsedExecutorOutput.message, '程序已校验');
+assert.equal(structuredTeam.planner.outputType, industrialAgentOutputDefinition.schema);
+assert.equal(structuredTeam.executor.outputType, industrialAgentOutputDefinition.schema);
+
+const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-write-'));
+try {
+  await fs.writeFile(path.join(workspace, 'op.txt'), '你好', 'utf8');
+  const artifact = await verifyWorkspaceWrite(workspace, 'op.txt', '你好');
+  assert.equal(artifact.kind, 'file');
+  assert.equal(artifact.name, 'op.txt');
+  await assert.rejects(
+    verifyWorkspaceWrite(workspace, 'op.txt', '错误内容'),
+    /文件校验失败/,
+  );
+} finally {
+  await fs.rm(workspace, { recursive: true, force: true });
+}
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-audit-'));
 try {

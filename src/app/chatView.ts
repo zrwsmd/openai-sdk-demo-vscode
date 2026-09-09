@@ -96,7 +96,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
       model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
       orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
-      outputMode: cfg.get<'text' | 'structured'>('outputMode') ?? 'text',
       savedInPlugin: !!(saved.baseUrl || saved.model || savedKey),
     };
   }
@@ -131,7 +130,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
       workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
       orchestration: live.orchestration,
-      outputMode: live.outputMode,
     };
     await this.coordinator.start(text, config, live.apiKey);
   }

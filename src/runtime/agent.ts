@@ -25,21 +25,37 @@ import { z } from 'zod';
 import OpenAI from 'openai';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { listFiles, readFileRange, writeFileText, searchText, runCommand } from '../tools/workspaceTools';
+import {
+  listFiles,
+  readFileRange,
+  resolveInWorkspace,
+  writeFileText,
+  searchText,
+  runCommand,
+} from '../tools/workspaceTools';
 import { EffectRecoveryRequiredError } from './errors';
 import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from '../tools/toolContract';
 import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
 import type { AuditEvent } from '../observability/audit';
 import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
-import { parseToolResult, type ApprovalRequest as ProtocolApprovalRequest, type UsageSummary } from '../protocol/results';
+import {
+  createAgentResult,
+  parseToolResult,
+  type AgentResult,
+  type ApprovalRequest as ProtocolApprovalRequest,
+  type Artifact,
+  type ToolResult,
+  type UsageSummary,
+} from '../protocol/results';
 import { AgentStreamAdapter } from './streaming';
 import type { AgentEventFactory, AgentProtocolEvent } from '../protocol/events';
 import {
-  getAgentOutputDefinition,
+  industrialAgentOutputDefinition,
+  parseIndustrialAgentOutput,
+  type IndustrialAgentOutput,
   projectAgentOutput,
-  type AgentOutputMode,
+  AgentOutputValidationError,
 } from './output';
-import type { Artifact, Diagnostic } from '../protocol/results';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -65,8 +81,6 @@ export interface AgentConfig {
   plcAdapter?: PlcAdapter;
   audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
-  /** Text is the compatibility default; structured uses the SDK outputType contract. */
-  outputMode?: AgentOutputMode;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
@@ -115,14 +129,14 @@ export interface AgentRunOptions {
 }
 
 export interface AgentRunResult {
+  /** Canonical result consumed by hosts, persistence and protocol adapters. */
+  result: AgentResult<IndustrialAgentOutput>;
+  /** Projection of result.output.message for the chat/session surface. */
   output: string;
   usage: TurnUsage;
   status: AgentRunStatus;
   state?: string;
   approvals?: ApprovalRequest[];
-  structuredOutput?: unknown;
-  diagnostics?: Diagnostic[];
-  artifacts?: Artifact[];
 }
 
 // ---------- 工具(策略/审计/设备适配器由宿主注入,工具合同保持稳定) ----------
@@ -351,6 +365,8 @@ const SYSTEM_PROMPT =
   '你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、' +
   'search_files 搜索代码、write_file 写文件、run_command 执行命令' +
   '（write_file 和 run_command 会先征求用户批准）。' +
+  '当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；' +
+  '只有收到工具成功回执后，才能在最终结果中报告写入完成。' +
   '任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，' +
   '不允许调用完工具不给结论就结束。回答要简洁，用中文。';
 
@@ -364,6 +380,52 @@ export class EmptyGatewayResponseError extends Error {
   }
 }
 
+export class AgentActionVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentActionVerificationError';
+  }
+}
+
+export async function verifyWorkspaceWrite(
+  workspaceRoot: string,
+  relativePath: string,
+  expectedContent: string,
+): Promise<Artifact> {
+  const file = resolveInWorkspace(workspaceRoot, relativePath);
+  const actual = await fs.readFile(file, 'utf8').catch(() => undefined);
+  if (actual !== expectedContent) {
+    throw new AgentActionVerificationError(`工具 write_file 返回成功，但文件校验失败: ${relativePath}`);
+  }
+  return {
+    kind: 'file',
+    name: path.basename(file),
+    uri: file,
+    mimeType: 'text/plain',
+    metadata: { bytes: Buffer.byteLength(actual) },
+  };
+}
+
+/** A side-effect tool explicitly required by the user's request. */
+export type RequiredAgentTool = 'write_file' | 'export_st_program' | 'run_command';
+
+/** Detects only explicit workspace-write requests; ordinary conversation stays unconstrained. */
+export function inferRequiredTool(userText: string): RequiredAgentTool | undefined {
+  if (/(不要|无需|不需要|别|勿)[^。！？\r\n]{0,8}(写|保存|修改|覆盖|创建)/u.test(userText)) return undefined;
+  const mentionsWorkspaceFile = /(?:文件|工作区|当前项目|workspace|\bfile\b|\.[a-z0-9]{1,8}\b)/iu.test(userText);
+  const asksToWrite = /(?:写入|写到|写进|写文件|保存到|保存为|落盘|创建|修改|覆盖|\bwrite\b|\bsave\b|\bcreate\b|\bmodify\b|\boverwrite\b)/iu.test(userText);
+  if (mentionsWorkspaceFile && asksToWrite) {
+    return 'write_file';
+  }
+  if (/(?=.*(?:导出|保存|落盘))(?=.*(?:ST|程序|源码))|export.*program|save.*program/iu.test(userText)) {
+    return 'export_st_program';
+  }
+  if (/(执行|运行).*(命令|脚本)|run\s+(a\s+)?command|execute.*command/iu.test(userText)) {
+    return 'run_command';
+  }
+  return undefined;
+}
+
 /**
  * 带"空回复熔断"的 chat_completions 模型。
  *
@@ -374,15 +436,32 @@ export class EmptyGatewayResponseError extends Error {
  */
 class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   private emptyStreak = 0;
+  private requiredToolOnce?: RequiredAgentTool;
 
   /** 每轮用户消息开始时清零,避免跨轮误伤 */
   resetEmptyStreak(): void {
     this.emptyStreak = 0;
+    this.requiredToolOnce = undefined;
+  }
+
+  requireToolOnce(toolName: RequiredAgentTool): void {
+    this.requiredToolOnce = toolName;
   }
 
   async *getStreamedResponse(request: any): AsyncGenerator<any> {
+    const requiredTool = this.requiredToolOnce;
+    this.requiredToolOnce = undefined;
+    const effectiveRequest = requiredTool
+      ? {
+        ...request,
+        modelSettings: {
+          ...request.modelSettings,
+          toolChoice: requiredTool,
+        },
+      }
+      : request;
     let sawOutput = false;
-    for await (const ev of super.getStreamedResponse(request) as AsyncIterable<any>) {
+    for await (const ev of super.getStreamedResponse(effectiveRequest) as AsyncIterable<any>) {
       // chat_completions 下 SDK 只透出 response_started/model/output_text_delta,没有终结的
       // model_response 事件,所以直接看原始 chunk 的 delta:有正文或 tool_calls 就不算空回复
       if (ev?.type === 'output_text_delta') sawOutput = true;
@@ -414,6 +493,9 @@ function summarizeOutgoing(body: unknown): string {
       model?: string;
       stream?: boolean;
       messages?: { role: string; content?: unknown; tool_calls?: { function?: { name?: string } }[] }[];
+      tools?: { function?: { name?: string } }[];
+      tool_choice?: unknown;
+      response_format?: { type?: string; json_schema?: { name?: string } };
     };
     const chain = (j.messages ?? [])
       .map((m) =>
@@ -422,7 +504,14 @@ function summarizeOutgoing(body: unknown): string {
           : `${m.role}(len=${typeof m.content === 'string' ? m.content.length : '-'})`,
       )
       .join(' ');
-    return `${j.model} stream=${j.stream} ${chain}`.slice(0, 600);
+    const tools = (j.tools ?? []).map((tool) => tool.function?.name).filter(Boolean).join('|') || '-';
+    const choice = typeof j.tool_choice === 'string'
+      ? j.tool_choice
+      : j.tool_choice ? JSON.stringify(j.tool_choice) : '-';
+    const format = j.response_format?.type
+      ? `${j.response_format.type}${j.response_format.json_schema?.name ? `:${j.response_format.json_schema.name}` : ''}`
+      : '-';
+    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} format=${format} ${chain}`.slice(0, 900);
   } catch {
     return '(请求体无法解析)';
   }
@@ -524,16 +613,14 @@ export async function runAgentTurn(
   userText: string,
   onEvent: (ev: AgentEvent) => void,
   requestApproval: ApprovalRequester,
-): Promise<Pick<AgentRunResult, 'output' | 'usage' | 'structuredOutput' | 'diagnostics' | 'artifacts'>> {
+): Promise<Pick<AgentRunResult, 'result' | 'output' | 'usage'>> {
   const result = await runAgent(cfg, session, userText, onEvent, {
     requestApproval,
   });
   return {
+    result: result.result,
     output: result.output,
     usage: result.usage,
-    structuredOutput: result.structuredOutput,
-    diagnostics: result.diagnostics,
-    artifacts: result.artifacts,
   };
 }
 
@@ -550,29 +637,85 @@ export async function runAgent(
   onEvent: (ev: AgentEvent) => void,
   options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
+  const requiredTool = inferRequiredTool(userText);
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
+  const gatewayActionTurn = model instanceof GatewayGuardedModel && requiredTool !== undefined;
+  if (model instanceof GatewayGuardedModel && requiredTool && !options.initialState) {
+    model.requireToolOnce(requiredTool);
+  }
   const tools = buildTools(cfg);
-  const outputDefinition = getAgentOutputDefinition(cfg.outputMode);
   const agent = cfg.orchestration === 'team'
-    ? createIndustrialAgentTeam(model, tools, outputDefinition).planner
+    ? (() => {
+      const team = createIndustrialAgentTeam(model, tools, {
+        executorStructuredOutput: !gatewayActionTurn,
+      });
+      // Explicit side effects bypass planning and enter the controlled executor
+      // directly. Planning remains the default for read-only/analysis requests.
+      return requiredTool ? team.executor : team.planner;
+    })()
     : new Agent({
       name: 'PLC 编程助手',
       model,
       instructions: SYSTEM_PROMPT,
       tools,
-      ...(outputDefinition ? { outputType: outputDefinition.schema } : {}),
+      // Some OpenAI-compatible gateways cannot honor response_format and
+      // tool_choice in the same request. Action turns use text internally;
+      // the host still creates the canonical structured result below.
+      ...(gatewayActionTurn ? {} : { outputType: industrialAgentOutputDefinition.schema }),
     });
 
   const runner = new Runner();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = '';
-  let structuredOutput: unknown;
-  let diagnostics: Diagnostic[] | undefined;
-  let artifacts: Artifact[] | undefined;
+  let structuredOutput: IndustrialAgentOutput | undefined;
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
+  const toolCalls = new Map<string, { name: string; args: string }>();
+  const toolResults = new Map<string, { name: string; args: string; result: ToolResult }>();
+
+  const recordToolCall = (name: string, callId: string | undefined, args: string): void => {
+    const key = callId || `${name}:${toolCalls.size}`;
+    toolCalls.set(key, { name, args });
+  };
+
+  const recordToolResult = (
+    name: string,
+    callId: string | undefined,
+    result: ToolResult | undefined,
+  ): void => {
+    if (!result) return;
+    const key = callId && toolCalls.has(callId)
+      ? callId
+      : [...toolCalls.keys()].reverse().find((candidate) => toolCalls.get(candidate)?.name === name && !toolResults.has(candidate));
+    const call = key ? toolCalls.get(key) : undefined;
+    if (key && call) toolResults.set(key, { ...call, name, result });
+  };
+
+  const verifyRequiredActions = async (): Promise<Artifact[]> => {
+    if (!requiredTool) return [];
+    const verified: Artifact[] = [];
+    for (const call of toolResults.values()) {
+      if (call.name !== requiredTool || !call.result.ok) continue;
+      // Every required side-effect must have a successful structured tool
+      // result. File writes additionally get a read-back byte-for-byte check.
+      if (requiredTool !== 'write_file') continue;
+      let args: { path?: unknown; content?: unknown };
+      try {
+        args = JSON.parse(call.args) as { path?: unknown; content?: unknown };
+      } catch {
+        continue;
+      }
+      if (typeof args.path !== 'string' || typeof args.content !== 'string') continue;
+      verified.push(await verifyWorkspaceWrite(cfg.workspaceRoot, args.path, args.content));
+    }
+    const successful = [...toolResults.values()].some((call) => call.name === requiredTool && call.result.ok);
+    if (!successful || (requiredTool === 'write_file' && !verified.length)) {
+      throw new AgentActionVerificationError(`用户明确要求执行 ${requiredTool}，但本轮没有成功执行并确认该工具`);
+    }
+    return verified;
+  };
 
   const summarizeToolOutput = (out: unknown): { ok: boolean; summary: string } => {
     const flat = Array.isArray(out)
@@ -595,28 +738,45 @@ export async function runAgent(
     return { ok, summary };
   };
 
+  const parseObservedToolResult = (out: unknown): ToolResult | undefined => {
+    const flat = Array.isArray(out)
+      ? out.map((part) => (typeof part === 'string' ? part : (part as { text?: string })?.text ?? '')).join('')
+      : typeof out === 'string'
+        ? out
+        : JSON.stringify(out ?? '');
+    try {
+      return parseToolResult(JSON.parse(flat));
+    } catch {
+      return undefined;
+    }
+  };
+
   const legacyPump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
     let bailed = false;
     try {
       for await (const event of stream) {
         if (event.type === 'raw_model_stream_event') {
-          if (event.data.type === 'output_text_delta') {
-            const delta = event.data.delta ?? '';
-            if (delta) {
-              output += delta;
-              onEvent({ type: 'delta', text: delta });
+          if (gatewayActionTurn) {
+            const data = event.data as { type?: string; delta?: unknown } | undefined;
+            const text = data?.type === 'output_text_delta' && typeof data.delta === 'string' ? data.delta : '';
+            if (text) {
+              output += text;
+              onEvent({ type: 'delta', text });
             }
           }
         } else if (event.type === 'run_item_stream_event') {
           if (event.item.type === 'tool_call_item') {
-            const raw = event.item.rawItem as { name?: string; callId?: string } | undefined;
+            const raw = event.item.rawItem as { name?: string; callId?: string; arguments?: string } | undefined;
             if (raw?.callId && raw.name) toolNameByCallId.set(raw.callId, raw.name);
+            recordToolCall(raw?.name ?? 'tool', raw?.callId, raw?.arguments ?? '');
             onEvent({ type: 'tool', name: raw?.name ?? 'tool' });
           } else if (event.item.type === 'tool_call_output_item') {
             // 工具已执行完(或审批被拒),把回执透出给 UI —— 即使随后模型不再返回文本,用户也能看到成败
             const raw = event.item.rawItem as { name?: string; callId?: string } | undefined;
             const name = raw?.name || toolNameByCallId.get(raw?.callId ?? '') || 'tool';
-            const { ok, summary } = summarizeToolOutput((event.item as { output?: unknown }).output);
+            const toolOutput = (event.item as { output?: unknown }).output;
+            const { ok, summary } = summarizeToolOutput(toolOutput);
+            recordToolResult(name, raw?.callId, parseObservedToolResult(toolOutput));
             onEvent({ type: 'tool_result', name, ok, summary });
           }
         }
@@ -638,13 +798,30 @@ export async function runAgent(
     ? new AgentStreamAdapter({
       runId: options.protocol.runId,
       operationId: options.protocol.operationId,
+      structuredOutput: !gatewayActionTurn,
       eventFactory: options.protocol.eventFactory,
       emit: options.protocol.onEvent,
     })
     : undefined;
 
   const pump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
-    if (!protocolAdapter) return legacyPump(stream);
+    if (!protocolAdapter) {
+      const outcome = await legacyPump(stream);
+      if (stream.finalOutput !== undefined) {
+        structuredOutput = gatewayActionTurn
+          ? {
+            message: typeof stream.finalOutput === 'string' ? stream.finalOutput : String(stream.finalOutput ?? ''),
+            diagnostics: [],
+            artifacts: [],
+            data: null,
+          }
+          : parseIndustrialAgentOutput(stream.finalOutput);
+        if (!gatewayActionTurn) {
+          output = projectAgentOutput(industrialAgentOutputDefinition, structuredOutput).text;
+        }
+      }
+      return outcome;
+    }
     let bailed = false;
     try {
       const adapted = await protocolAdapter.consume(stream, {
@@ -653,8 +830,10 @@ export async function runAgent(
             output += event.text;
             onEvent({ type: 'delta', text: event.text });
           } else if (event.type === 'tool') {
+            recordToolCall(event.name, event.callId, event.args ?? '');
             onEvent({ type: 'tool', name: event.name });
           } else {
+            recordToolResult(event.name, event.callId, event.result);
             onEvent({ type: 'tool_result', name: event.name, ok: event.ok, summary: event.summary });
           }
         },
@@ -669,12 +848,17 @@ export async function runAgent(
       usage.inputTokens = stream.state.usage.inputTokens;
       usage.outputTokens = stream.state.usage.outputTokens;
     }
-    if (outputDefinition && stream.finalOutput !== undefined) {
-      structuredOutput = stream.finalOutput;
-      const projected = projectAgentOutput(outputDefinition, stream.finalOutput);
+    if (stream.finalOutput !== undefined) {
+      structuredOutput = gatewayActionTurn
+        ? {
+          message: typeof stream.finalOutput === 'string' ? stream.finalOutput : String(stream.finalOutput ?? ''),
+          diagnostics: [],
+          artifacts: [],
+          data: null,
+        }
+        : parseIndustrialAgentOutput(stream.finalOutput);
+      const projected = projectAgentOutput(industrialAgentOutputDefinition, structuredOutput);
       output = projected.text;
-      diagnostics = projected.diagnostics;
-      artifacts = projected.artifacts;
     }
     return bailed ? 'empty-bailed' : 'done';
   };
@@ -710,6 +894,10 @@ export async function runAgent(
     for (let index = 0; index < pending.length; index++) {
       const item = pending[index];
       const request = requests[index];
+      // On a durable resume the SDK may emit only tool output after approval.
+      // Seed the call index from the persisted approval so verification still
+      // has the original tool arguments.
+      recordToolCall(request.name, request.id, request.args);
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
       if (decision === undefined && options.requestApproval) {
@@ -747,7 +935,13 @@ export async function runAgent(
         const unresolved = await resolveApprovals(state, pending);
         if (unresolved.length) {
           await checkpoint(state, unresolved);
-          return { output, usage, status: 'awaiting_approval', state: state.toString(), approvals: unresolved };
+          const result = createAgentResult<IndustrialAgentOutput>({
+            status: 'awaiting_approval',
+            state: state.toString(),
+            approvals: unresolved,
+            usage,
+          });
+          return { result, output, usage, status: 'awaiting_approval', state: state.toString(), approvals: unresolved };
         }
       }
     }
@@ -762,10 +956,44 @@ export async function runAgent(
     state = stream.state;
 
     if (options.signal?.aborted || stream.cancelled) {
-      return { output, usage, status: 'cancelled', structuredOutput, diagnostics, artifacts };
+      return {
+        result: createAgentResult({
+          status: 'cancelled',
+          reason: 'aborted',
+          usage,
+        }),
+        output,
+        usage,
+        status: 'cancelled',
+      };
     }
     if (outcome === 'empty-bailed' || !state.getInterruptions().length) {
-      return { output, usage, status: 'completed', structuredOutput, diagnostics, artifacts };
+      if (!structuredOutput) {
+        throw new AgentOutputValidationError('Agent 未返回符合 Schema 的最终结构化结果');
+      }
+      const verifiedArtifacts = await verifyRequiredActions();
+      const canonicalOutput: IndustrialAgentOutput = {
+        ...structuredOutput,
+        artifacts: [
+          ...structuredOutput.artifacts,
+          ...verifiedArtifacts.map((artifact) => ({
+            kind: artifact.kind,
+            name: artifact.name,
+            uri: artifact.uri ?? null,
+            mimeType: artifact.mimeType ?? null,
+            content: artifact.content ?? null,
+          })),
+        ],
+      };
+      const projected = projectAgentOutput(industrialAgentOutputDefinition, canonicalOutput);
+      const result = createAgentResult({
+        status: 'completed',
+        output: canonicalOutput,
+        usage,
+        diagnostics: projected.diagnostics,
+        artifacts: projected.artifacts,
+      });
+      return { result, output: structuredOutput.message, usage, status: 'completed' };
     }
   }
 }

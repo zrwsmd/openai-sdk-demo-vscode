@@ -1,10 +1,12 @@
 import { AgentEventFactory, type AgentProtocolEvent, type AgentEventSource } from '../protocol/events';
-import { parseToolResult } from '../protocol/results';
+import { parseToolResult, type ToolResult } from '../protocol/results';
 
 export interface AgentStreamAdapterOptions {
   runId: string;
   operationId?: string;
   initialSequence?: number;
+  /** Structured output is parsed at completion; do not expose JSON chunks as text. */
+  structuredOutput?: boolean;
   eventFactory?: AgentEventFactory;
   emit?: (event: AgentProtocolEvent) => void;
 }
@@ -16,8 +18,8 @@ export interface AgentStreamAdapterResult {
 
 export type AgentStreamLegacyEvent =
   | { type: 'delta'; text: string }
-  | { type: 'tool'; name: string }
-  | { type: 'tool_result'; name: string; ok: boolean; summary: string };
+  | { type: 'tool'; name: string; callId?: string; args?: string }
+  | { type: 'tool_result'; name: string; ok: boolean; summary: string; callId?: string; result?: ToolResult };
 
 export interface AgentStreamAdapterHooks {
   onLegacyEvent?: (event: AgentStreamLegacyEvent) => void;
@@ -91,6 +93,7 @@ export class AgentStreamAdapter {
     if (type !== 'output_text_delta' && type !== 'response.output_text.delta') return '';
     const text = typeof data?.delta === 'string' ? data.delta : '';
     if (!text) return '';
+    if (this.options.structuredOutput) return text;
     this.emit('text.delta', 'model', { text, itemId: data.itemId ?? data.item_id });
     hooks.onLegacyEvent?.({ type: 'delta', text });
     return text;
@@ -111,7 +114,12 @@ export class AgentStreamAdapter {
         arguments: argumentsOf(item),
         serverId: serverIdOf(raw),
       });
-      hooks.onLegacyEvent?.({ type: 'tool', name });
+      hooks.onLegacyEvent?.({
+        type: 'tool',
+        name,
+        callId,
+        args: argumentsOf(item),
+      });
       return;
     }
     if (eventName === 'tool_output' || itemType === 'tool_call_output_item') {
@@ -128,7 +136,14 @@ export class AgentStreamAdapter {
         ...(parsed ? { result: parsed } : {}),
         serverId: serverIdOf(raw),
       });
-      hooks.onLegacyEvent?.({ type: 'tool_result', name, ok: summary.ok, summary: summary.text });
+      hooks.onLegacyEvent?.({
+        type: 'tool_result',
+        name,
+        ok: summary.ok,
+        summary: summary.text,
+        callId,
+        result: parsed as ToolResult | undefined,
+      });
       return;
     }
     if (eventName === 'tool_approval_requested' || itemType === 'tool_approval_item') {

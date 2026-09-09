@@ -1,13 +1,27 @@
 import { z } from 'zod';
 import {
-  artifactSchema,
-  diagnosticSchema,
   type Artifact,
   type Diagnostic,
 } from '../protocol/results';
 
-/** Output modes are serializable so a durable run can be resumed safely. */
-export type AgentOutputMode = 'text' | 'structured';
+// The wire protocol intentionally allows forward-compatible fields, but the
+// model-facing Structured Outputs schema must be closed at every object node.
+// Keep this boundary separate so protocol/MCP payloads can evolve without
+// making the provider reject the Agent output schema.
+const industrialDiagnosticSchema = z.object({
+  code: z.string().min(1),
+  message: z.string(),
+  severity: z.enum(['info', 'warning', 'error', 'blocking']),
+  path: z.string().nullable(),
+}).strict();
+
+const industrialArtifactSchema = z.object({
+  kind: z.enum(['file', 'code', 'report', 'data', 'unknown']),
+  name: z.string().min(1),
+  uri: z.string().nullable(),
+  mimeType: z.string().nullable(),
+  content: z.string().nullable(),
+}).strict();
 
 /**
  * The product-level final output contract used by the industrial Agent.
@@ -16,12 +30,28 @@ export type AgentOutputMode = 'text' | 'structured';
  */
 export const industrialAgentOutputSchema = z.object({
   message: z.string(),
-  diagnostics: z.array(diagnosticSchema).default([]),
-  artifacts: z.array(artifactSchema).default([]),
-  data: z.unknown().optional(),
+  diagnostics: z.array(industrialDiagnosticSchema),
+  artifacts: z.array(industrialArtifactSchema),
+  data: z.unknown().nullable(),
 });
 
 export type IndustrialAgentOutput = z.infer<typeof industrialAgentOutputSchema>;
+
+export class AgentOutputValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentOutputValidationError';
+  }
+}
+
+export function parseIndustrialAgentOutput(value: unknown): IndustrialAgentOutput {
+  try {
+    return industrialAgentOutputSchema.parse(value);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AgentOutputValidationError(`Agent 最终输出不符合 IndustrialAgentOutput Schema: ${detail}`);
+  }
+}
 
 export interface AgentOutputDefinition<TOutput = unknown> {
   schema: z.ZodObject<any>;
@@ -36,14 +66,21 @@ export const industrialAgentOutputDefinition: AgentOutputDefinition<IndustrialAg
   schema: industrialAgentOutputSchema,
   toText: (output) => output.message,
   toProtocol: (output) => ({
-    diagnostics: output.diagnostics,
-    artifacts: output.artifacts,
+    diagnostics: output.diagnostics.map((diagnostic) => ({
+      code: diagnostic.code,
+      message: diagnostic.message,
+      severity: diagnostic.severity,
+      ...(diagnostic.path === null ? {} : { path: diagnostic.path }),
+    })),
+    artifacts: output.artifacts.map((artifact) => ({
+      kind: artifact.kind,
+      name: artifact.name,
+      ...(artifact.uri === null ? {} : { uri: artifact.uri }),
+      ...(artifact.mimeType === null ? {} : { mimeType: artifact.mimeType }),
+      ...(artifact.content === null ? {} : { content: artifact.content }),
+    })),
   }),
 };
-
-export function getAgentOutputDefinition(mode: AgentOutputMode = 'text'): AgentOutputDefinition<any> | undefined {
-  return mode === 'structured' ? industrialAgentOutputDefinition : undefined;
-}
 
 export function projectAgentOutput<TOutput>(
   definition: AgentOutputDefinition<TOutput>,

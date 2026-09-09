@@ -84,6 +84,11 @@ export class RunCoordinator {
       await this.session.truncate(active.sessionItemCountBefore);
       active.status = 'failed';
       active.error = '扩展进程在运行期间中断，本轮已回滚，可以安全重试。';
+      active.result = createAgentResult({
+        status: 'failed',
+        error: active.error,
+        usage: active.usage,
+      });
       await this.store.update(active);
       await this.replayHistory();
       this.emit({ type: 'runRecovered', message: active.error, canRetry: true });
@@ -189,6 +194,11 @@ export class RunCoordinator {
     // safely repeats this idempotent truncation.
     await this.session.truncate(run.sessionItemCountBefore);
     run.status = 'cancelled';
+    run.result = createAgentResult({
+      status: 'cancelled',
+      reason: 'user_cancelled',
+      usage: run.usage,
+    });
     run.state = undefined;
     run.approvals = [];
     await this.store.update(run);
@@ -308,10 +318,8 @@ export class RunCoordinator {
         },
       );
 
-      run.output = baseOutput + result.output;
-      run.structuredOutput = result.structuredOutput;
-      run.diagnostics = result.diagnostics;
-      run.artifacts = result.artifacts;
+      run.output = result.output;
+      run.result = result.result;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
       run.state = result.state;
@@ -349,13 +357,7 @@ export class RunCoordinator {
         this.writeLog(
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
-        const agentResult = createAgentResult({
-          status: 'completed',
-          output: run.structuredOutput ?? run.output,
-          usage: result.usage,
-          diagnostics: run.diagnostics,
-          artifacts: run.artifacts,
-        });
+        const agentResult = result.result;
         this.emit({ type: 'done', usage: result.usage, result: agentResult, canRetry: true });
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.completed',
@@ -369,6 +371,13 @@ export class RunCoordinator {
       run.state = undefined;
       run.approvals = [];
       run.error = cancelled ? undefined : this.formatError(error);
+      run.result = cancelled
+        ? createAgentResult({ status: 'cancelled', reason: 'aborted', usage: run.usage })
+        : createAgentResult({
+          status: 'failed',
+          error: run.error ?? 'unknown_error',
+          usage: run.usage,
+        });
       await this.store.update(run);
       if (cancelled) {
         await this.audit('run_cancelled', run);

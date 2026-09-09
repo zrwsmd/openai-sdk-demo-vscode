@@ -45,4 +45,22 @@ assert.equal(events[3].payload.result.ok, true);
 for (const event of events) parseAgentEvent(event);
 for (let i = 1; i < events.length; i += 1) assert.equal(events[i].sequence, events[i - 1].sequence + 1);
 
+const structuredEvents = [];
+const structuredLegacy = [];
+const structuredStream = scriptedEvents();
+structuredStream.state = { usage: { inputTokens: 3, outputTokens: 4, requests: 1 } };
+const structuredAdapter = new AgentStreamAdapter({
+  runId: 'run-structured',
+  operationId: 'op-structured',
+  structuredOutput: true,
+  eventFactory: new AgentEventFactory('run-structured', 'op-structured'),
+  emit: (event) => structuredEvents.push(event),
+});
+const structuredResult = await structuredAdapter.consume(structuredStream, {
+  onLegacyEvent: (event) => structuredLegacy.push(event),
+});
+assert.equal(structuredResult.output, '开始检查完成');
+assert.equal(structuredEvents.some((event) => event.type === 'text.delta'), false);
+assert.deepEqual(structuredLegacy.map((event) => event.type), ['tool', 'tool_result']);
+
 console.log('streaming adapter tests passed: SDK events, legacy bridge, structured tool result, usage');
