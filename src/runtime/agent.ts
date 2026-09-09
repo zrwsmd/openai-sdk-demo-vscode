@@ -299,8 +299,8 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
     description: '读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读前 4000 行)。',
     parameters: z.object({
       path: z.string().describe('相对工作区的文件路径'),
-      startLine: z.number().optional().describe('起始行(1 起)'),
-      endLine: z.number().optional().describe('结束行(含)'),
+      startLine: z.coerce.number().optional().describe('起始行(1 起),整数'),
+      endLine: z.coerce.number().optional().describe('结束行(含),整数'),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
@@ -544,6 +544,8 @@ function makeLoggingFetch(): unknown {
       let toolCallDeltas = 0;
       let finish = '-';
       let errorLine = '';
+      // 收集模型实际生成的工具参数分片,按 index 重组,定位畸形 JSON 的确切原文
+      const toolCallArgs = new Map<number, { id?: string; name?: string; args: string }>();
       for (const line of text.split('\n')) {
         const s = line.trim();
         if (!s.startsWith('data:')) continue;
@@ -552,7 +554,19 @@ function makeLoggingFetch(): unknown {
         try {
           const j = JSON.parse(payload) as {
             error?: unknown;
-            choices?: { finish_reason?: string | null; delta?: Record<string, unknown> }[];
+            choices?: {
+              finish_reason?: string | null;
+              delta?: {
+                content?: unknown;
+                reasoning_content?: unknown;
+                reasoning?: unknown;
+                tool_calls?: {
+                  index?: unknown;
+                  id?: unknown;
+                  function?: { name?: unknown; arguments?: unknown };
+                }[];
+              };
+            }[];
           };
           if (j.error) { errorLine = JSON.stringify(j.error).slice(0, 300); continue; }
           const c = j.choices?.[0];
@@ -561,12 +575,29 @@ function makeLoggingFetch(): unknown {
           if (typeof d.content === 'string') contentChars += d.content.length;
           const rz = (d.reasoning_content ?? d.reasoning) as string | undefined;
           if (typeof rz === 'string') reasoningChars += rz.length;
-          if (Array.isArray(d.tool_calls)) toolCallDeltas += d.tool_calls.length;
+          if (Array.isArray(d.tool_calls)) {
+            toolCallDeltas += d.tool_calls.length;
+            for (const tc of d.tool_calls) {
+              const idx = typeof tc?.index === 'number' ? tc.index : 0;
+              const cur = toolCallArgs.get(idx) ?? { args: '' };
+              if (typeof tc?.id === 'string' && tc.id) cur.id = tc.id;
+              if (typeof tc?.function?.name === 'string' && tc.function.name) cur.name = tc.function.name;
+              if (typeof tc?.function?.arguments === 'string') cur.args += tc.function.arguments;
+              toolCallArgs.set(idx, cur);
+            }
+          }
         } catch { /* 非 JSON 行忽略 */ }
       }
       agentLog(
         `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}${errorLine ? ' ERROR=' + errorLine : ''}`,
       );
+      if (toolCallArgs.size > 0) {
+        // 打印重组后的工具参数原文,定位 InvalidToolInputError 的畸形处
+        for (const [idx, call] of toolCallArgs) {
+          const snippet = call.args.length > 500 ? call.args.slice(0, 500) + '…' : call.args;
+          agentLog(`[toolargs] #${idx} name=${call.name ?? '?'} id=${call.id ?? '-'} args=${JSON.stringify(snippet)}`);
+        }
+      }
       if (contentChars === 0 && reasoningChars === 0 && toolCallDeltas === 0) {
         agentLog(`[resp] 空完成原文(尾部): ${text.slice(-500).replace(/\n/g, '⏎')}`);
       }
