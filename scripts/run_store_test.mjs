@@ -6,7 +6,17 @@ import { JsonRunStore, JsonFileSession } from './agent.testbundle.mjs';
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-run-store-test-'));
 const file = path.join(dir, 'runs.json');
 const store = new JsonRunStore(file);
-const config = { baseUrl: 'http://mock/v1', model: 'mock', exportDir: dir, workspaceRoot: dir };
+const config = {
+  baseUrl: 'http://mock/v1',
+  model: 'mock',
+  exportDir: dir,
+  workspaceRoot: dir,
+  policyContext: {
+    allowedCommands: ['npm'],
+    allowedDevices: ['plc-main'],
+    dryRun: true,
+  },
+};
 
 // Lifecycle records remain readable from a fresh store instance.
 const run = await store.begin('export', config, 3, 'operation-1');
@@ -17,6 +27,13 @@ await store.update(run);
 const restored = await new JsonRunStore(file).getActive();
 if (restored?.state !== run.state || restored.approvals[0]?.id !== 'call-1') {
   throw new Error('durable approval checkpoint was not restored');
+}
+if (
+  restored.config.policyContext?.dryRun !== true ||
+  restored.config.policyContext.allowedCommands?.[0] !== 'npm' ||
+  restored.config.policyContext.allowedDevices?.[0] !== 'plc-main'
+) {
+  throw new Error('policy context was not persisted with the durable run');
 }
 let activeConflict = false;
 try {

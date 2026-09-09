@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ApprovalRequest, TurnUsage } from './agent';
 import { EffectRecoveryRequiredError } from './errors';
 import { parseAgentResult, type AgentResult } from '../protocol/results';
+import type { ToolPolicyOverrides } from '../tools/toolContract';
 
 export type DurableRunStatus =
   | 'running'
@@ -18,6 +19,8 @@ export interface DurableRunConfig {
   exportDir: string;
   workspaceRoot: string;
   workspaceRoots?: string[];
+  /** Host-configured policy limits persisted with the run for safe resume/retry. */
+  policyContext?: ToolPolicyOverrides;
   orchestration?: 'single' | 'team';
 }
 
@@ -171,6 +174,15 @@ export class JsonRunStore implements RunStore {
       typeof run.config.workspaceRoot !== 'string' ||
       (run.config.workspaceRoots !== undefined &&
         (!Array.isArray(run.config.workspaceRoots) || run.config.workspaceRoots.some((root) => typeof root !== 'string'))) ||
+      (run.config.policyContext !== undefined &&
+        (!isRecord(run.config.policyContext) ||
+          (run.config.policyContext.allowedCommands !== undefined &&
+            (!Array.isArray(run.config.policyContext.allowedCommands) ||
+              run.config.policyContext.allowedCommands.some((command) => typeof command !== 'string'))) ||
+          (run.config.policyContext.allowedDevices !== undefined &&
+            (!Array.isArray(run.config.policyContext.allowedDevices) ||
+              run.config.policyContext.allowedDevices.some((device) => typeof device !== 'string'))) ||
+          (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
       (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       !Array.isArray(run.approvals) ||

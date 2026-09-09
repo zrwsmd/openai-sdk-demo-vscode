@@ -92,6 +92,27 @@
           "enum": ["single", "team"],
           "default": "single",
           "description": "Agent 编排模式:single 保持单角色，team 启用规划/安全审查/受控执行三角色"
+        },
+        "plcAgent.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "run_command 允许执行的命令名白名单；为空表示不增加命令名限制"
+        },
+        "plcAgent.allowedDevices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "write_plc_variables 允许写入的设备标识白名单；为空表示不增加设备限制"
+        },
+        "plcAgent.dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "干运行模式：禁止写文件、执行命令和设备写入等副作用操作"
         }
       }
     }

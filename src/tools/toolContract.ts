@@ -13,6 +13,11 @@ export interface ToolPolicyContext {
   dryRun?: boolean;
 }
 
+export type ToolPolicyOverrides = Pick<
+  ToolPolicyContext,
+  'allowedCommands' | 'allowedDevices' | 'dryRun'
+>;
+
 export interface ToolPolicyDecision {
   allowed: boolean;
   requiresApproval: boolean;

@@ -91,11 +91,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
     const saved = this.context.globalState.get<{ baseUrl?: string; model?: string }>('settings') ?? {};
     const savedKey = (await this.context.secrets.get('apiKey')) ?? '';
+    const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
+    const allowedDevices = stringListSetting(cfg, 'allowedDevices');
     return {
       baseUrl: (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim(),
       apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
       model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
       orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
+      policyContext: {
+        allowedCommands,
+        allowedDevices,
+        dryRun: cfg.get<boolean>('dryRun') ?? false,
+      },
       savedInPlugin: !!(saved.baseUrl || saved.model || savedKey),
     };
   }
@@ -131,6 +138,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
+      policyContext: live.policyContext,
       orchestration: live.orchestration,
     };
     await this.coordinator.start(text, config, live.apiKey);
@@ -205,4 +213,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function stringListSetting(
+  config: vscode.WorkspaceConfiguration,
+  key: string,
+  lowerCase = false,
+): string[] {
+  const value = config.get<unknown>(key);
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => {
+      const trimmed = item.trim();
+      return lowerCase ? trimmed.toLowerCase() : trimmed;
+    })
+    .filter(Boolean);
 }

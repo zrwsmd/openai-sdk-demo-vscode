@@ -32,7 +32,13 @@ import {
   runCommand,
 } from '../tools/workspaceTools';
 import { EffectRecoveryRequiredError } from './errors';
-import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from '../tools/toolContract';
+import {
+  DefaultToolPolicy,
+  type ToolPolicy,
+  type ToolPolicyOverrides,
+  toolResult,
+  type ToolRisk,
+} from '../tools/toolContract';
 import { DefaultActionPolicy, type ActionPolicy } from '../policy/actionPolicy';
 import type { RequiredAgentTool } from '../policy/actionPolicy';
 import { WorkspaceScope, workspaceScopeFromRoots } from '../workspace/workspaceScope';
@@ -83,7 +89,7 @@ export interface AgentConfig {
   executeEffect?: <T>(toolName: string, input: unknown, execute: () => Promise<T>) => Promise<T>;
   /** Policy is host-owned and must be enforced before side effects. */
   policy?: ToolPolicy;
-  policyContext?: { allowedCommands?: string[]; allowedDevices?: string[]; dryRun?: boolean };
+  policyContext?: ToolPolicyOverrides;
   plcAdapter?: PlcAdapter;
   audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
