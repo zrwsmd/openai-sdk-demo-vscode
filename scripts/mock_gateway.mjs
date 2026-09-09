@@ -103,6 +103,8 @@ const server = http.createServer((req, res) => {
       sse(res, usageChunk(model, 100, 15));
       res.write('data: [DONE]\n\n');
       res.end();
+    } else if (userText.includes('rr.txt') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({ path: 'rr.txt', content: '你好我是agent' }));
     } else if (userText.includes('读取') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'lk.txt' }));
     } else if (last.role === 'tool' && userText.includes('思考')) {
@@ -127,6 +129,8 @@ const server = http.createServer((req, res) => {
       await streamText(res, model, '好的,已按你的要求导出为 .st 文件。');
     } else if (last.role === 'tool' && userText.includes('读取')) {
       await streamText(res, model, '已读取 lk.txt 文件内容。');
+    } else if (last.role === 'tool' && userText.includes('rr.txt')) {
+      await streamText(res, model, '已写入 rr.txt 文件。');
     } else if (last.role === 'tool') {
       await streamStructuredText(res, model, `已通过变量表和校验,星三角程序如下:\n\`\`\`\n${ST_CODE}\n\`\`\``);
     } else if (userText.includes('星三角')) {

@@ -71,6 +71,7 @@ const structuredValue = industrialAgentOutputSchema.parse({
 assert.equal(structuredValue.message, '程序已校验');
 assert.equal(inferRequiredTool('请把你好写入当前项目的 op.txt 文件'), 'write_file');
 assert.equal(inferRequiredTool('write this content to config.json'), 'write_file');
+assert.equal(inferRequiredTool('写你好我是agent这5个字到rr.txt下面'), 'write_file');
 assert.equal(inferRequiredTool('读取 lk.txt 文件里面的内容'), 'read_file');
 assert.equal(inferRequiredTool('读取 `lk.txt` 文件里面的内容'), 'read_file');
 assert.equal(inferRequiredTool('读取并修改 lk.txt 文件'), 'write_file');

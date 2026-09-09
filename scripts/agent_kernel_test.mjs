@@ -131,10 +131,32 @@ const collect = () => {
 
 // [9] 新会话:clearSession 后文件清空
 {
+  const asked = [];
+  const { events, onEvent } = collect();
+  const r = await runAgentTurn(
+    cfg,
+    session,
+    '写你好我是agent这5个字到rr.txt下面',
+    onEvent,
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+  );
+  const written = await fs.readFile(path.join(dir, 'rr.txt'), 'utf8');
+  const toolCalls = events.filter((e) => e.type === 'tool').map((e) => e.name);
+  console.log('[9] 写入文件:工具链 =', toolCalls.join(','), '| 内容 =', written, '| 输出 =', r.output);
+  if (toolCalls.join(',') !== 'write_file' || asked.length !== 1 || written !== '你好我是agent') {
+    throw new Error('自然语言写入请求未通过 write_file 正确落盘');
+  }
+}
+
+// [10] 新会话:clearSession 后文件清空
+{
   await session.clearSession();
   const raw = JSON.parse(await fs.readFile(path.join(dir, 'session.json'), 'utf8'));
   const chat = extractChatMessages(await session.getItems());
-  console.log('[8] clearSession:条目 =', raw.items.length, '| 回放消息 =', chat.length);
+  console.log('[10] clearSession:条目 =', raw.items.length, '| 回放消息 =', chat.length);
   if (raw.items.length !== 0) throw new Error('场景8 clearSession 未清空');
 }
 
