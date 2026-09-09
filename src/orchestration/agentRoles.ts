@@ -14,6 +14,20 @@ export const plcReviewReportSchema = z.object({
 
 export type PlcReviewReport = z.infer<typeof plcReviewReportSchema>;
 
+export function reviewReportToToolResult(finalOutput: unknown): string {
+  const report = plcReviewReportSchema.parse(finalOutput);
+  const error = report.approved
+    ? undefined
+    : `PLC 安全审查未通过: ${report.summary || '存在需要修正的风险。'}`;
+  return toolResult({
+    ok: report.approved,
+    data: report,
+    ...(error ? { error } : {}),
+    effect: 'none',
+    risk: 'plan',
+  });
+}
+
 /**
  * Role boundaries for the industrial workflow. The planner owns the
  * conversation, the reviewer is a bounded read-only sub-agent tool, and only
@@ -36,8 +50,7 @@ export function createIndustrialAgentTeam(
   const reviewerTool = reviewer.asTool({
     toolName: 'review_plc_plan',
     toolDescription: '对 PLC 程序或控制方案做只读安全审查，返回结构化风险和必改项。',
-    customOutputExtractor: async ({ finalOutput }) =>
-      toolResult({ ok: true, data: finalOutput, effect: 'none', risk: 'plan' }),
+    customOutputExtractor: async ({ finalOutput }) => reviewReportToToolResult(finalOutput),
   });
   const executor = new Agent({
     name: 'PLC Controlled Executor',

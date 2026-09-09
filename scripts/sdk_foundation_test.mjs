@@ -11,6 +11,8 @@ import {
   inferRequiredTool,
   industrialAgentOutputDefinition,
   industrialAgentOutputSchema,
+  parseToolResult,
+  reviewReportToToolResult,
   verifyWorkspaceWrite,
   toolResult,
   DefaultActionPolicy,
@@ -61,6 +63,28 @@ assert.equal(team.planner.tools.length, 1);
 assert.equal(team.planner.tools[0].name, 'review_plc_plan');
 assert.equal(team.reviewer.tools.length, 0);
 assert.equal(team.executor.tools.length, 0);
+
+const approvedReview = {
+  approved: true,
+  summary: '方案满足基本安全要求',
+  findings: [],
+  requiredChanges: [],
+};
+const approvedToolResult = parseToolResult(JSON.parse(reviewReportToToolResult(approvedReview)));
+assert.equal(approvedToolResult.ok, true);
+assert.deepEqual(approvedToolResult.data, approvedReview);
+assert.equal(approvedToolResult.error, undefined);
+
+const rejectedReview = {
+  approved: false,
+  summary: '急停回路缺少复位互锁',
+  findings: ['急停后未限制自动重启'],
+  requiredChanges: ['增加人工复位条件'],
+};
+const rejectedToolResult = parseToolResult(JSON.parse(reviewReportToToolResult(rejectedReview)));
+assert.equal(rejectedToolResult.ok, false);
+assert.deepEqual(rejectedToolResult.data, rejectedReview);
+assert.equal(rejectedToolResult.error, 'PLC 安全审查未通过: 急停回路缺少复位互锁');
 
 const structuredValue = industrialAgentOutputSchema.parse({
   message: '程序已校验',
