@@ -53,6 +53,78 @@ function addNote(className, text) {
   return el;
 }
 
+function parseJsonValue(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return undefined; }
+}
+
+function toolArgsSummary(name, args) {
+  const parsed = parseJsonValue(args);
+  if (!parsed || typeof parsed !== 'object') return '';
+  if (name === 'write_file' && typeof parsed.path === 'string') {
+    const bytes = typeof parsed.content === 'string' ? new TextEncoder().encode(parsed.content).length : 0;
+    return `文件 ${parsed.path}${bytes ? ` · ${bytes} 字节` : ''}`;
+  }
+  if (name === 'export_st_program') return '导出 IEC 61131-3 ST 程序';
+  if (name === 'run_command' && typeof parsed.command === 'string') return `命令：${parsed.command}`;
+  return '';
+}
+
+function formatToolResult(name, summary) {
+  const parsed = parseJsonValue(summary);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { headline: summary || '工具返回空结果', detail: '' };
+  }
+  if (parsed.ok === false) {
+    return { headline: parsed.error ? `执行失败：${parsed.error}` : '执行失败', detail: parsed };
+  }
+  const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : {};
+  if (name === 'write_file' && typeof data.file === 'string') {
+    return {
+      headline: `已写入 ${data.file}${typeof data.bytes === 'number' ? ` · ${data.bytes} 字节` : ''}`,
+      detail: parsed,
+    };
+  }
+  if (name === 'export_st_program' && typeof data.file === 'string') {
+    return { headline: `已导出 ${data.file}`, detail: parsed };
+  }
+  if (name === 'run_command' && data && typeof data.exitCode === 'number') {
+    return { headline: `命令执行完成 · 退出码 ${data.exitCode}`, detail: parsed };
+  }
+  return { headline: '工具执行成功', detail: parsed };
+}
+
+function addToolResult(name, ok, summary) {
+  const note = document.createElement('div');
+  note.className = `tool-result ${ok ? 'success' : 'failure'}`;
+  const icon = document.createElement('span');
+  icon.className = 'tool-result-icon';
+  icon.textContent = ok ? '✓' : '!';
+  const body = document.createElement('div');
+  body.className = 'tool-result-body';
+  const formatted = formatToolResult(name, summary);
+  const title = document.createElement('div');
+  title.className = 'tool-result-title';
+  title.textContent = formatted.headline;
+  const meta = document.createElement('div');
+  meta.className = 'tool-result-meta';
+  meta.textContent = name;
+  body.append(title, meta);
+  if (formatted.detail) {
+    const details = document.createElement('details');
+    const summaryEl = document.createElement('summary');
+    summaryEl.textContent = '查看执行详情';
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(formatted.detail, null, 2);
+    details.append(summaryEl, pre);
+    body.appendChild(details);
+  }
+  note.append(icon, body);
+  messagesEl.appendChild(note);
+  scrollBottom();
+  return note;
+}
+
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
 function showUsage(usage) {
   if (!usage) return;
@@ -60,7 +132,7 @@ function showUsage(usage) {
   if (!total) return;
   addNote(
     'usage-note',
-    `📊 本轮 tokens:输入 ${usage.inputTokens} / 输出 ${usage.outputTokens},模型调用 ${usage.requests} 次`,
+    `用量 · 输入 ${usage.inputTokens} / 输出 ${usage.outputTokens} · 模型调用 ${usage.requests} 次`,
   );
 }
 
@@ -177,8 +249,21 @@ function addApprovalCard(runId, approval) {
 
   const title = document.createElement('div');
   title.className = 'approval-title';
-  title.textContent = `⚠ Agent 请求执行工具:${name}`;
+  const titleText = document.createElement('span');
+  titleText.textContent = `需要审批 · ${name}`;
+  const status = document.createElement('span');
+  status.className = 'approval-status';
+  status.textContent = '等待决定';
+  title.append(titleText, status);
   card.appendChild(title);
+
+  const actionSummary = toolArgsSummary(name, args);
+  if (actionSummary) {
+    const summaryText = document.createElement('div');
+    summaryText.className = 'approval-summary';
+    summaryText.textContent = actionSummary;
+    card.appendChild(summaryText);
+  }
 
   if (args) {
     const detail = document.createElement('details');
@@ -195,13 +280,15 @@ function addApprovalCard(runId, approval) {
   bar.className = 'approval-actions';
   const okBtn = document.createElement('button');
   okBtn.className = 'btn primary';
-  okBtn.textContent = '允许';
+  okBtn.textContent = '✓ 允许';
   const noBtn = document.createElement('button');
   noBtn.className = 'btn';
   noBtn.textContent = '拒绝';
   const finish = (approve) => {
     okBtn.disabled = noBtn.disabled = true;
     card.classList.add(approve ? 'approved' : 'rejected');
+    status.textContent = approve ? '已允许 · 执行中' : '已拒绝';
+    status.classList.add(approve ? 'approved' : 'rejected');
     vscode.postMessage({ type: 'approvalResponse', runId, approvalId: id, approve });
   };
   okBtn.addEventListener('click', () => finish(true));
@@ -221,6 +308,8 @@ function showApprovals(runId, approvals) {
     agentBubble = null;
   }
   currentRunId = runId;
+  pendingToolCount = Math.max(pendingToolCount, (approvals || []).length);
+  hadToolThisTurn = true;
   for (const approval of approvals || []) addApprovalCard(runId, approval);
   setRuntimeMode('awaiting');
 }
@@ -228,6 +317,11 @@ function showApprovals(runId, approvals) {
 function finishApprovalCards(className) {
   for (const card of messagesEl.querySelectorAll('.approval-card:not(.approved):not(.rejected)')) {
     card.classList.add(className);
+    const status = card.querySelector('.approval-status');
+    if (status) {
+      status.textContent = className === 'rejected' ? '已取消' : '已结束';
+      status.classList.add(className);
+    }
     for (const button of card.querySelectorAll('button')) button.disabled = true;
   }
 }
@@ -258,7 +352,13 @@ function handleProtocolEvent(event) {
         const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
         const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
         if (diagnostics.length) addNote('tool-note', `结构化结果包含 ${diagnostics.length} 条诊断信息`);
-        if (artifacts.length) addNote('tool-note', `已生成 ${artifacts.length} 个产物`);
+        if (artifacts.length) {
+          const names = artifacts
+            .map((artifact) => artifact && (artifact.name || artifact.uri))
+            .filter(Boolean)
+            .join('、');
+          addNote('tool-note', `已生成 ${artifacts.length} 个产物${names ? `：${names}` : ''}`);
+        }
       }
       break;
     }
@@ -284,7 +384,35 @@ function handleProtocolEvent(event) {
 
 let agentBubble = null;
 let agentText = '';
+let pendingAgentText = '';
+let pendingFinalText = null;
+let pendingToolCount = 0;
 let hadToolThisTurn = false;
+
+function renderAgentText(text) {
+  agentText = text;
+  if (agentBubble) {
+    // The streaming bubble is created immediately after the user message.
+    // Once tools were involved, move the final answer below tool results.
+    if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
+    renderRich(agentBubble, agentText);
+    agentBubble.classList.remove('streaming');
+  }
+}
+
+function flushPendingAgentText() {
+  if (pendingToolCount > 0) return;
+  if (pendingFinalText !== null) {
+    pendingAgentText = '';
+    renderAgentText(pendingFinalText);
+    pendingFinalText = null;
+    return;
+  }
+  if (pendingAgentText) {
+    renderAgentText(agentText + pendingAgentText);
+    pendingAgentText = '';
+  }
+}
 
 window.addEventListener('message', (event) => {
   const msg = event.data;
@@ -299,6 +427,9 @@ window.addEventListener('message', (event) => {
       addMessage('user', msg.text);
       currentRunId = msg.runId || null;
       agentText = '';
+      pendingAgentText = '';
+      pendingFinalText = null;
+      pendingToolCount = 0;
       hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
       agentBubble.classList.add('streaming');
@@ -306,31 +437,43 @@ window.addEventListener('message', (event) => {
     }
     case 'delta':
       if (agentBubble) {
-        agentText += msg.text;
-        renderRich(agentBubble, agentText);
+        if (pendingToolCount > 0) {
+          pendingAgentText += msg.text;
+        } else {
+          agentText += msg.text;
+          if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
+          renderRich(agentBubble, agentText);
+        }
         scrollBottom();
       }
       break;
     case 'tool':
-      addNote('tool-note', `调用工具 ${msg.name}`);
+      addNote('tool-note', `正在执行 · ${msg.name}`);
       hadToolThisTurn = true;
+      pendingToolCount += 1;
+      if (agentText) {
+        pendingAgentText = agentText + pendingAgentText;
+        agentText = '';
+        if (agentBubble) renderRich(agentBubble, '');
+      }
       break;
     case 'toolResult':
       // 工具执行回执:即使网关在工具后返回空文本,用户也能看到成败
-      addNote(
-        msg.ok ? 'tool-note ok-note' : 'error-note',
-        `${msg.ok ? '✓' : '✗'} ${msg.name}: ${msg.summary}`,
-      );
+      addToolResult(msg.name, msg.ok === true, msg.summary);
+      pendingToolCount = Math.max(0, pendingToolCount - 1);
+      flushPendingAgentText();
       break;
     case 'done': {
       const structuredMessage = msg.result?.output && typeof msg.result.output === 'object'
         ? msg.result.output.message
         : undefined;
       if (typeof structuredMessage === 'string') {
-        agentText = structuredMessage;
-        if (agentBubble) renderRich(agentBubble, agentText);
+        if (pendingToolCount > 0) pendingFinalText = structuredMessage;
+        else renderAgentText(structuredMessage);
       }
-      const empty = !agentText;
+      flushPendingAgentText();
+      const waitingForToolResult = pendingToolCount > 0;
+      const empty = !agentText && !waitingForToolResult;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (empty) agentBubble.remove(); // 空气泡看起来像卡死,换成明确说明
@@ -343,7 +486,7 @@ window.addEventListener('message', (event) => {
             : '模型本轮没有返回文本(网关返回了空内容),可直接重试。',
         );
       }
-      agentBubble = null;
+      if (!waitingForToolResult) agentBubble = null;
       showUsage(msg.usage);
       canRetry = msg.canRetry === true;
       currentRunId = null;
@@ -353,7 +496,7 @@ window.addEventListener('message', (event) => {
     case 'error':
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (!agentText) agentBubble.textContent = '(无输出)';
+        if (!agentText) agentBubble.remove();
       }
       agentBubble = null;
       addNote('error-note', msg.message);
@@ -373,6 +516,10 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       agentBubble = null;
       agentText = '';
+      pendingAgentText = '';
+      pendingFinalText = null;
+      pendingToolCount = 0;
+      hadToolThisTurn = false;
       currentRunId = null;
       canRetry = false;
       setRuntimeMode('idle');
@@ -383,6 +530,10 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       agentBubble = null;
       agentText = '';
+      pendingAgentText = '';
+      pendingFinalText = null;
+      pendingToolCount = 0;
+      hadToolThisTurn = false;
       for (const m of msg.messages || []) {
         if (m.role === 'user') addMessage('user', m.text);
         else {
@@ -406,6 +557,9 @@ window.addEventListener('message', (event) => {
       if (lastUser !== msg.userText) addMessage('user', msg.userText);
       currentRunId = msg.runId;
       agentText = msg.partialOutput || '';
+      pendingAgentText = '';
+      pendingFinalText = null;
+      pendingToolCount = 0;
       hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
       renderRich(agentBubble, agentText);
@@ -416,7 +570,6 @@ window.addEventListener('message', (event) => {
     case 'resumeStarted':
       if (!agentBubble) {
         agentText = '';
-        hadToolThisTurn = false;
         agentBubble = addMessage('agent', '');
         agentBubble.classList.add('streaming');
       }
