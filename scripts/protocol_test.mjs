@@ -54,11 +54,11 @@ assert.throws(() => parseToolResult({ ok: true, data: {} }));
 
 const result = createAgentResult({
   status: 'completed',
-  output: '完成',
+  output: { message: '完成' },
   usage: { inputTokens: 4, outputTokens: 5, requests: 1 },
 });
 assert.equal(result.protocolVersion, 1);
-assert.deepEqual(parseAgentResult(result).output, '完成');
+assert.deepEqual(parseAgentResult(result).output, { message: '完成' });
 assert.deepEqual(result.diagnostics, []);
 assert.deepEqual(result.artifacts, []);
 assert.throws(() => parseAgentResult({ status: 'awaiting_approval', approvals: [] }));

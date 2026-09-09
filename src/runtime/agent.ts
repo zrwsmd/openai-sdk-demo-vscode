@@ -34,6 +34,12 @@ import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestr
 import { parseToolResult, type ApprovalRequest as ProtocolApprovalRequest, type UsageSummary } from '../protocol/results';
 import { AgentStreamAdapter } from './streaming';
 import type { AgentEventFactory, AgentProtocolEvent } from '../protocol/events';
+import {
+  getAgentOutputDefinition,
+  projectAgentOutput,
+  type AgentOutputMode,
+} from './output';
+import type { Artifact, Diagnostic } from '../protocol/results';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -59,6 +65,8 @@ export interface AgentConfig {
   plcAdapter?: PlcAdapter;
   audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
+  /** Text is the compatibility default; structured uses the SDK outputType contract. */
+  outputMode?: AgentOutputMode;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
@@ -112,6 +120,9 @@ export interface AgentRunResult {
   status: AgentRunStatus;
   state?: string;
   approvals?: ApprovalRequest[];
+  structuredOutput?: unknown;
+  diagnostics?: Diagnostic[];
+  artifacts?: Artifact[];
 }
 
 // ---------- 工具(策略/审计/设备适配器由宿主注入,工具合同保持稳定) ----------
@@ -513,11 +524,17 @@ export async function runAgentTurn(
   userText: string,
   onEvent: (ev: AgentEvent) => void,
   requestApproval: ApprovalRequester,
-): Promise<{ output: string; usage: TurnUsage }> {
+): Promise<Pick<AgentRunResult, 'output' | 'usage' | 'structuredOutput' | 'diagnostics' | 'artifacts'>> {
   const result = await runAgent(cfg, session, userText, onEvent, {
     requestApproval,
   });
-  return { output: result.output, usage: result.usage };
+  return {
+    output: result.output,
+    usage: result.usage,
+    structuredOutput: result.structuredOutput,
+    diagnostics: result.diagnostics,
+    artifacts: result.artifacts,
+  };
 }
 
 /**
@@ -536,18 +553,23 @@ export async function runAgent(
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   const tools = buildTools(cfg);
+  const outputDefinition = getAgentOutputDefinition(cfg.outputMode);
   const agent = cfg.orchestration === 'team'
-    ? createIndustrialAgentTeam(model, tools).planner
+    ? createIndustrialAgentTeam(model, tools, outputDefinition).planner
     : new Agent({
       name: 'PLC 编程助手',
       model,
       instructions: SYSTEM_PROMPT,
       tools,
+      ...(outputDefinition ? { outputType: outputDefinition.schema } : {}),
     });
 
   const runner = new Runner();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = '';
+  let structuredOutput: unknown;
+  let diagnostics: Diagnostic[] | undefined;
+  let artifacts: Artifact[] | undefined;
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
@@ -647,6 +669,13 @@ export async function runAgent(
       usage.inputTokens = stream.state.usage.inputTokens;
       usage.outputTokens = stream.state.usage.outputTokens;
     }
+    if (outputDefinition && stream.finalOutput !== undefined) {
+      structuredOutput = stream.finalOutput;
+      const projected = projectAgentOutput(outputDefinition, stream.finalOutput);
+      output = projected.text;
+      diagnostics = projected.diagnostics;
+      artifacts = projected.artifacts;
+    }
     return bailed ? 'empty-bailed' : 'done';
   };
 
@@ -733,10 +762,10 @@ export async function runAgent(
     state = stream.state;
 
     if (options.signal?.aborted || stream.cancelled) {
-      return { output, usage, status: 'cancelled' };
+      return { output, usage, status: 'cancelled', structuredOutput, diagnostics, artifacts };
     }
     if (outcome === 'empty-bailed' || !state.getInterruptions().length) {
-      return { output, usage, status: 'completed' };
+      return { output, usage, status: 'completed', structuredOutput, diagnostics, artifacts };
     }
   }
 }

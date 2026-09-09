@@ -7,6 +7,9 @@ import {
   JsonAuditSink,
   MockPlcAdapter,
   createIndustrialAgentTeam,
+  industrialAgentOutputDefinition,
+  industrialAgentOutputSchema,
+  getAgentOutputDefinition,
   toolResult,
 } from './agent.testbundle.mjs';
 
@@ -54,6 +57,18 @@ assert.equal(team.planner.tools.length, 1);
 assert.equal(team.planner.tools[0].name, 'review_plc_plan');
 assert.equal(team.reviewer.tools.length, 0);
 assert.equal(team.executor.tools.length, 0);
+
+const structuredValue = industrialAgentOutputSchema.parse({
+  message: '程序已校验',
+  diagnostics: [],
+  artifacts: [],
+});
+assert.equal(structuredValue.message, '程序已校验');
+assert.equal(getAgentOutputDefinition('text'), undefined);
+assert.equal(getAgentOutputDefinition('structured'), industrialAgentOutputDefinition);
+const structuredTeam = createIndustrialAgentTeam('gpt-4o-mini', [], industrialAgentOutputDefinition);
+const parsedPlannerOutput = structuredTeam.planner.processFinalOutput(JSON.stringify(structuredValue));
+assert.equal(parsedPlannerOutput.message, '程序已校验');
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-audit-'));
 try {

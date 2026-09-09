@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ApprovalRequest, TurnUsage } from './agent';
 import { EffectRecoveryRequiredError } from './errors';
+import type { AgentOutputMode } from './output';
+import type { Artifact, Diagnostic } from '../protocol/results';
 
 export type DurableRunStatus =
   | 'running'
@@ -17,6 +19,7 @@ export interface DurableRunConfig {
   exportDir: string;
   workspaceRoot: string;
   orchestration?: 'single' | 'team';
+  outputMode?: AgentOutputMode;
 }
 
 export interface DurableRunRecord {
@@ -31,6 +34,9 @@ export interface DurableRunRecord {
   state?: string;
   approvals: ApprovalRequest[];
   output: string;
+  structuredOutput?: unknown;
+  diagnostics?: Diagnostic[];
+  artifacts?: Artifact[];
   usage: TurnUsage;
   createdAt: string;
   updatedAt: string;
@@ -165,6 +171,7 @@ export class JsonRunStore implements RunStore {
       typeof run.config.exportDir !== 'string' ||
       typeof run.config.workspaceRoot !== 'string' ||
       (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
+      (run.config.outputMode !== undefined && !['text', 'structured'].includes(run.config.outputMode)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       !Array.isArray(run.approvals) ||
       run.approvals.some(
@@ -175,6 +182,8 @@ export class JsonRunStore implements RunStore {
           typeof approval.args !== 'string',
       ) ||
       typeof run.output !== 'string' ||
+      (run.diagnostics !== undefined && !Array.isArray(run.diagnostics)) ||
+      (run.artifacts !== undefined && !Array.isArray(run.artifacts)) ||
       !run.usage ||
       !Number.isFinite(run.usage.inputTokens) ||
       !Number.isFinite(run.usage.outputTokens) ||

@@ -309,6 +309,9 @@ export class RunCoordinator {
       );
 
       run.output = baseOutput + result.output;
+      run.structuredOutput = result.structuredOutput;
+      run.diagnostics = result.diagnostics;
+      run.artifacts = result.artifacts;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
       run.state = result.state;
@@ -346,16 +349,17 @@ export class RunCoordinator {
         this.writeLog(
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
-        this.emit({ type: 'done', usage: result.usage, canRetry: true });
+        const agentResult = createAgentResult({
+          status: 'completed',
+          output: run.structuredOutput ?? run.output,
+          usage: result.usage,
+          diagnostics: run.diagnostics,
+          artifacts: run.artifacts,
+        });
+        this.emit({ type: 'done', usage: result.usage, result: agentResult, canRetry: true });
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.completed',
-          payload: {
-            result: createAgentResult({
-              status: 'completed',
-              output: run.output,
-              usage: result.usage,
-            }),
-          },
+          payload: { result: agentResult },
         }));
       }
     } catch (error) {

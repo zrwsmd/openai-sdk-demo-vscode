@@ -1,6 +1,7 @@
 import { Agent, type Model, type Tool } from '@openai/agents';
 import { z } from 'zod';
 import { toolResult } from '../tools/toolContract';
+import type { AgentOutputDefinition } from '../runtime/output';
 
 export type IndustrialAgentMode = 'single' | 'team';
 
@@ -18,7 +19,11 @@ export type PlcReviewReport = z.infer<typeof plcReviewReportSchema>;
  * conversation, the reviewer is a bounded read-only sub-agent tool, and only
  * the executor receives tools that can interact with the workspace or devices.
  */
-export function createIndustrialAgentTeam(model: string | Model, tools: Tool[]) {
+export function createIndustrialAgentTeam(
+  model: string | Model,
+  tools: Tool[],
+  outputDefinition?: AgentOutputDefinition,
+) {
   const reviewer = new Agent({
     name: 'PLC Safety Reviewer',
     handoffDescription: '检查 PLC 方案的互锁、急停、故障复位和 IEC 61131-3 正确性。',
@@ -39,6 +44,7 @@ export function createIndustrialAgentTeam(model: string | Model, tools: Tool[]) 
     handoffDescription: '在策略、审批与审计约束下执行工作区或 PLC 工具。',
     model,
     tools,
+    ...(outputDefinition ? { outputType: outputDefinition.schema } : {}),
     instructions:
       '你是受控执行角色。只执行已给出的具体步骤；写文件、运行命令或设备写入必须经过审批。' +
       '所有结论必须基于结构化工具结果，工具失败时立即停止相关动作。',
@@ -49,6 +55,7 @@ export function createIndustrialAgentTeam(model: string | Model, tools: Tool[]) 
     model,
     tools: [reviewerTool],
     handoffs: [executor],
+    ...(outputDefinition ? { outputType: outputDefinition.schema } : {}),
     instructions:
       '你是工控任务规划角色。先确认目标和已知现场信息，再形成步骤；' +
       '涉及 PLC 程序或控制逻辑时先调用 review_plc_plan 获取结构化审查报告；' +

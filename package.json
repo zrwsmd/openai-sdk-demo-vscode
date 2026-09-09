@@ -92,6 +92,12 @@
           "enum": ["single", "team"],
           "default": "single",
           "description": "Agent 编排模式:single 保持单角色，team 启用规划/安全审查/受控执行三角色"
+        },
+        "plcAgent.outputMode": {
+          "type": "string",
+          "enum": ["text", "structured"],
+          "default": "text",
+          "description": "Agent 最终输出模式:text 保持聊天兼容，structured 启用 SDK Schema 校验并返回诊断/产物"
         }
       }
     }

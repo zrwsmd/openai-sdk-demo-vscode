@@ -323,6 +323,13 @@ window.addEventListener('message', (event) => {
       );
       break;
     case 'done': {
+      const structuredMessage = msg.result?.output && typeof msg.result.output === 'object'
+        ? msg.result.output.message
+        : undefined;
+      if (typeof structuredMessage === 'string') {
+        agentText = structuredMessage;
+        if (agentBubble) renderRich(agentBubble, agentText);
+      }
       const empty = !agentText;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
