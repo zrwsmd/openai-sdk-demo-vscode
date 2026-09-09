@@ -1,4 +1,4 @@
-import { Agent, type Model, type Tool } from '@openai/agents';
+import { Agent, type Model, type ModelSettings, type Tool } from '@openai/agents';
 import { z } from 'zod';
 import { toolResult } from '../tools/toolContract';
 import { industrialAgentOutputDefinition } from '../runtime/output';
@@ -22,7 +22,7 @@ export type PlcReviewReport = z.infer<typeof plcReviewReportSchema>;
 export function createIndustrialAgentTeam(
   model: string | Model,
   tools: Tool[],
-  options: { executorStructuredOutput?: boolean } = {},
+  options: { executorStructuredOutput?: boolean; executorModelSettings?: ModelSettings } = {},
 ) {
   const reviewer = new Agent({
     name: 'PLC Safety Reviewer',
@@ -44,6 +44,7 @@ export function createIndustrialAgentTeam(
     handoffDescription: '在策略、审批与审计约束下执行工作区或 PLC 工具。',
     model,
     tools,
+    ...(options.executorModelSettings ? { modelSettings: options.executorModelSettings } : {}),
     ...(options.executorStructuredOutput === false ? {} : { outputType: industrialAgentOutputDefinition.schema }),
     instructions:
       '你是受控执行角色。只执行已给出的具体步骤；写文件、运行命令或设备写入必须经过审批。' +

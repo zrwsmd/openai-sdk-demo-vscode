@@ -18,8 +18,9 @@ const diagLines = [];
 setAgentLogger((line) => diagLines.push(line));
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-test-'));
+const mockGatewayPort = process.env.MOCK_GATEWAY_PORT || '8790';
 const cfg = {
-  baseUrl: 'http://127.0.0.1:8790/v1',
+  baseUrl: `http://127.0.0.1:${mockGatewayPort}/v1`,
   apiKey: 'mock-key',
   model: 'mock-model',
   exportDir: path.join(dir, 'exports'),
@@ -92,10 +93,15 @@ const collect = () => {
     asked.push({ name, args });
     return false;
   };
-  await runAgentTurn(cfg, session, '再次把程序导出为文件', () => {}, denyAll);
+  let refused = false;
+  try {
+    await runAgentTurn(cfg, session, '再次把程序导出为文件', () => {}, denyAll);
+  } catch {
+    refused = true;
+  }
   const files = await fs.readdir(path.join(dir, 'exports'));
   console.log('[6] 审批(拒绝):asked =', asked.map((a) => a.name).join(','), '| 落盘文件仍为 =', files.join(','));
-  if (asked.length < 1 || files.length !== 1) throw new Error('场景6 拒绝后不应产生新文件');
+  if (asked.length < 1 || files.length !== 1 || !refused) throw new Error('场景6 拒绝后应失败且不产生新文件');
 }
 
 // [7] 死循环 → maxTurns 截停(放最后:会往会话里灌 10 轮工具往返)
@@ -112,6 +118,19 @@ const collect = () => {
 
 // [8] 新会话:clearSession 后文件清空
 {
+  await fs.writeFile(path.join(dir, 'lk.txt'), '你好', 'utf8');
+  const { events, onEvent } = collect();
+  const r = await runAgentTurn(cfg, session, '读取 lk.txt 文件里面的内容', onEvent, noApproval);
+  const toolCalls = events.filter((e) => e.type === 'tool').map((e) => e.name);
+  const toolResults = events.filter((e) => e.type === 'tool_result');
+  console.log('[8] 读取文件:工具链 =', toolCalls.join(','), '| 成功回执 =', toolResults.some((e) => e.name === 'read_file' && e.ok), '| 输出 =', r.output);
+  if (toolCalls.join(',') !== 'read_file' || !toolResults.some((e) => e.name === 'read_file' && e.ok)) {
+    throw new Error('读取文件未通过 read_file 成功完成');
+  }
+}
+
+// [9] 新会话:clearSession 后文件清空
+{
   await session.clearSession();
   const raw = JSON.parse(await fs.readFile(path.join(dir, 'session.json'), 'utf8'));
   const chat = extractChatMessages(await session.getItems());
@@ -119,7 +138,7 @@ const collect = () => {
   if (raw.items.length !== 0) throw new Error('场景8 clearSession 未清空');
 }
 
-// [9] 复现"批准后无反馈"场景:批准后模型在工具结果回喂后返回空 completion(真实网关坏行为)。
+// [10] 复现"批准后无反馈"场景:批准后模型在工具结果回喂后返回空 completion(真实网关坏行为)。
 //     内核仍必须透出 tool_result 事件(带文件路径),UI 才有"✓ 成功"可显示;模型文本为空但不算出错
 {
   const { events, onEvent } = collect();
@@ -138,7 +157,7 @@ const collect = () => {
     throw new Error(`场景9 熔断未生效或过度截停,模型调用 = ${r.usage.requests}`);
 }
 
-// [10] 只吐 reasoning 不吐正文(套壳推理模型常见坏行为):诊断日志必须记录到 推理>0/正文=0,
+// [11] 只吐 reasoning 不吐正文(套壳推理模型常见坏行为):诊断日志必须记录到 推理>0/正文=0,
 //      熔断照常截停,工具回执照常透出
 {
   const { events, onEvent } = collect();

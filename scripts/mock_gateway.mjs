@@ -52,8 +52,25 @@ async function streamText(res, model, text) {
   res.end();
 }
 
+async function streamStructuredText(res, model, text) {
+  await streamText(res, model, JSON.stringify({
+    message: text,
+    diagnostics: [],
+    artifacts: [],
+    data: null,
+  }));
+}
+
 function endWithToolCall(res, model) {
   sse(res, toolCallChunk(model));
+  sse(res, chunk(model, {}, 'tool_calls'));
+  sse(res, usageChunk(model, 90, 12));
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+function endWithNamedToolCall(res, model, name, args) {
+  sse(res, toolCallChunk(model, name, args));
   sse(res, chunk(model, {}, 'tool_calls'));
   sse(res, usageChunk(model, 90, 12));
   res.write('data: [DONE]\n\n');
@@ -86,6 +103,8 @@ const server = http.createServer((req, res) => {
       sse(res, usageChunk(model, 100, 15));
       res.write('data: [DONE]\n\n');
       res.end();
+    } else if (userText.includes('读取') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'lk.txt' }));
     } else if (last.role === 'tool' && userText.includes('思考')) {
       // 复现套壳推理模型的坏行为:工具结果回喂后只吐 reasoning_content,正文始终为空
       console.log('[mock] 思考模式:工具结果回喂后只返回 reasoning,无正文');
@@ -106,13 +125,15 @@ const server = http.createServer((req, res) => {
       res.end();
     } else if (last.role === 'tool' && userText.includes('导出')) {
       await streamText(res, model, '好的,已按你的要求导出为 .st 文件。');
+    } else if (last.role === 'tool' && userText.includes('读取')) {
+      await streamText(res, model, '已读取 lk.txt 文件内容。');
     } else if (last.role === 'tool') {
-      await streamText(res, model, `已通过变量表和校验,星三角程序如下:\n\`\`\`\n${ST_CODE}\n\`\`\``);
+      await streamStructuredText(res, model, `已通过变量表和校验,星三角程序如下:\n\`\`\`\n${ST_CODE}\n\`\`\``);
     } else if (userText.includes('星三角')) {
       endWithToolCall(res, model);
     } else {
       // 回显 messages 数量:第二句话应能看到第一句的历史 → 验证 session 回放
-      await streamText(res, model, `${REPLY} [msgs=${messages.length}]`);
+      await streamStructuredText(res, model, `${REPLY} [msgs=${messages.length}]`);
     }
   });
 });

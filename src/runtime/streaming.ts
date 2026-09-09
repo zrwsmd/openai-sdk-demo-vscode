@@ -223,24 +223,39 @@ function sourceForTool(name: string): AgentEventSource {
 }
 
 function summarize(value: unknown): { ok: boolean; text: string } {
-  const flat = Array.isArray(value)
-    ? value.map((part) => typeof part === 'string' ? part : (part as { text?: string })?.text ?? '').join('')
-    : typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  const flat = toolOutputText(value);
   let ok = true;
   try {
     const parsed = JSON.parse(flat) as { ok?: boolean; error?: unknown };
     ok = parsed?.ok !== false && parsed?.error === undefined;
   } catch {
-    ok = !/reject|denied|error/i.test(flat);
+    ok = !/reject|denied|error|拒绝|失败|错误|未返回|不允许/i.test(flat);
   }
   return { ok, text: flat.length > 200 ? `${flat.slice(0, 200)}…` : flat };
 }
 
 function parseStructuredToolResult(value: unknown): unknown | undefined {
   try {
-    const flat = typeof value === 'string' ? value : JSON.stringify(value);
+    const flat = toolOutputText(value);
     return parseToolResult(JSON.parse(flat));
   } catch {
     return undefined;
   }
+}
+
+function toolOutputText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+        return (part as { text: string }).text;
+      }
+      return JSON.stringify(part ?? '');
+    }).join('');
+  }
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof (value as { text?: unknown }).text === 'string') {
+    return (value as { text: string }).text;
+  }
+  return JSON.stringify(value ?? '');
 }

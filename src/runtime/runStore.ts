@@ -17,6 +17,7 @@ export interface DurableRunConfig {
   model: string;
   exportDir: string;
   workspaceRoot: string;
+  workspaceRoots?: string[];
   orchestration?: 'single' | 'team';
 }
 
@@ -168,6 +169,8 @@ export class JsonRunStore implements RunStore {
       typeof run.config.model !== 'string' ||
       typeof run.config.exportDir !== 'string' ||
       typeof run.config.workspaceRoot !== 'string' ||
+      (run.config.workspaceRoots !== undefined &&
+        (!Array.isArray(run.config.workspaceRoots) || run.config.workspaceRoots.some((root) => typeof root !== 'string'))) ||
       (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       !Array.isArray(run.approvals) ||

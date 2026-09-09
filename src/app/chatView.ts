@@ -124,11 +124,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async send(text: string): Promise<void> {
     const live = await this.getConfig();
+    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const config: DurableRunConfig = {
       baseUrl: live.baseUrl,
       model: live.model,
       exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
-      workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      workspaceRoot: workspaceRoots[0] ?? '',
+      workspaceRoots,
       orchestration: live.orchestration,
     };
     await this.coordinator.start(text, config, live.apiKey);

@@ -13,6 +13,8 @@ import {
   industrialAgentOutputSchema,
   verifyWorkspaceWrite,
   toolResult,
+  DefaultActionPolicy,
+  WorkspaceScope,
 } from './agent.testbundle.mjs';
 
 const policy = new DefaultToolPolicy();
@@ -69,6 +71,10 @@ const structuredValue = industrialAgentOutputSchema.parse({
 assert.equal(structuredValue.message, '程序已校验');
 assert.equal(inferRequiredTool('请把你好写入当前项目的 op.txt 文件'), 'write_file');
 assert.equal(inferRequiredTool('write this content to config.json'), 'write_file');
+assert.equal(inferRequiredTool('读取 lk.txt 文件里面的内容'), 'read_file');
+assert.equal(inferRequiredTool('读取 `lk.txt` 文件里面的内容'), 'read_file');
+assert.equal(inferRequiredTool('读取并修改 lk.txt 文件'), 'write_file');
+assert.equal(inferRequiredTool('不要读取 lk.txt，只解释读取工具'), undefined);
 assert.equal(inferRequiredTool('只解释一下 write_file 的作用，不要执行写入'), undefined);
 assert.equal(inferRequiredTool('请把这段 ST 程序导出保存'), 'export_st_program');
 assert.equal(inferRequiredTool('请运行这个命令检查工程'), 'run_command');
@@ -99,6 +105,24 @@ try {
   );
 } finally {
   await fs.rm(workspace, { recursive: true, force: true });
+}
+
+const scopeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-scope-'));
+const scopeOther = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-scope-other-'));
+const scopeOutside = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-scope-outside-'));
+try {
+  const scope = new WorkspaceScope([scopeRoot, scopeOther]);
+  assert.equal(scope.resolve('lk.txt').root, path.resolve(scopeRoot));
+  assert.equal(scope.resolve('`lk.txt`').relativePath, 'lk.txt');
+  const otherFile = path.join(scopeOther, 'remote.txt');
+  await fs.writeFile(otherFile, 'remote', 'utf8');
+  assert.equal(scope.resolve(otherFile).root, path.resolve(scopeOther));
+  assert.throws(() => scope.resolve(path.join(scopeOutside, 'blocked.txt')), /不在已授权工作区内/);
+  assert.equal(new DefaultActionPolicy().requiredToolFor('读取 lk.txt 文件里面的内容'), 'read_file');
+} finally {
+  await fs.rm(scopeRoot, { recursive: true, force: true });
+  await fs.rm(scopeOther, { recursive: true, force: true });
+  await fs.rm(scopeOutside, { recursive: true, force: true });
 }
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-audit-'));

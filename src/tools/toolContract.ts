@@ -7,6 +7,7 @@ export type { ToolEffect, ToolResult, ToolResultInput, ToolRisk } from '../proto
 
 export interface ToolPolicyContext {
   workspaceRoot: string;
+  workspaceRoots?: string[];
   allowedCommands?: string[];
   allowedDevices?: string[];
   dryRun?: boolean;

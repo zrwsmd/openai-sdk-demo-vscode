@@ -15,7 +15,7 @@ async function* scriptedEvents() {
     item: {
       type: 'tool_call_output_item',
       rawItem: { callId: 'call-1' },
-      output: JSON.stringify({ protocolVersion: 1, ok: true, data: { value: false }, effect: 'none', risk: 'read', diagnostics: [] }),
+      output: [{ type: 'text', text: JSON.stringify({ protocolVersion: 1, ok: true, data: { value: false }, effect: 'none', risk: 'read', diagnostics: [] }) }],
     },
   };
   yield { type: 'agent_updated_stream_event', agent: { name: 'Reviewer' } };

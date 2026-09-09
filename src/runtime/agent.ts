@@ -28,13 +28,15 @@ import path from 'node:path';
 import {
   listFiles,
   readFileRange,
-  resolveInWorkspace,
   writeFileText,
   searchText,
   runCommand,
 } from '../tools/workspaceTools';
 import { EffectRecoveryRequiredError } from './errors';
 import { DefaultToolPolicy, type ToolPolicy, toolResult, type ToolRisk } from '../tools/toolContract';
+import { DefaultActionPolicy, type ActionPolicy } from '../policy/actionPolicy';
+import type { RequiredAgentTool } from '../policy/actionPolicy';
+import { WorkspaceScope, workspaceScopeFromRoots } from '../workspace/workspaceScope';
 import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
 import type { AuditEvent } from '../observability/audit';
 import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
@@ -57,6 +59,9 @@ import {
   AgentOutputValidationError,
 } from './output';
 
+export { inferRequiredTool } from '../policy/actionPolicy';
+export type { RequiredAgentTool } from '../policy/actionPolicy';
+
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
 setTracingDisabled(true);
@@ -73,6 +78,8 @@ export interface AgentConfig {
   exportDir: string;
   /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
   workspaceRoot: string;
+  /** Host-authorized workspace roots. Relative paths use workspaceRoot. */
+  workspaceRoots?: string[];
   /** Host-owned effect journal. It may return a previously committed result. */
   executeEffect?: <T>(toolName: string, input: unknown, execute: () => Promise<T>) => Promise<T>;
   /** Policy is host-owned and must be enforced before side effects. */
@@ -81,6 +88,7 @@ export interface AgentConfig {
   plcAdapter?: PlcAdapter;
   audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
+  actionPolicy?: ActionPolicy;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
@@ -148,12 +156,30 @@ function toolArguments(raw: string | undefined): unknown {
   try { return JSON.parse(raw); } catch { return raw; }
 }
 
+/** SDK tool outputs may arrive as strings, text parts, or structured values. */
+function toolOutputText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+        return (part as { text: string }).text;
+      }
+      return JSON.stringify(part ?? '');
+    }).join('');
+  }
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof (value as { text?: unknown }).text === 'string') {
+    return (value as { text: string }).text;
+  }
+  return JSON.stringify(value ?? '');
+}
+
 function audit(cfg: AgentConfig, event: Omit<AuditEvent, 'id' | 'timestamp'>): void {
   void Promise.resolve(cfg.audit?.(event)).catch(() => undefined);
 }
 
 function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
-  const context = { workspaceRoot: cfg.workspaceRoot, ...cfg.policyContext };
+  const context = { workspaceRoot: cfg.workspaceRoot, workspaceRoots: cfg.workspaceRoots, ...cfg.policyContext };
   const input = defineToolInputGuardrail({
     name: 'industrial-tool-policy',
     run: async ({ toolCall }) => {
@@ -174,7 +200,7 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
     name: 'structured-tool-output',
     run: async ({ toolCall, output: result }) => {
       const name = (toolCall as { name?: string }).name ?? 'tool';
-      const text = typeof result === 'string' ? result : JSON.stringify(result);
+      const text = toolOutputText(result);
       try {
         const parsed = parseToolResult(JSON.parse(text));
         audit(cfg, {
@@ -193,9 +219,10 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
   return { input: [input], output: [output] };
 }
 
-function buildTools(cfg: AgentConfig) {
+function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
+  const workspace = workspaceScopeFromRoots(cfg.workspaceRoot, cfg.workspaceRoots);
   const guardrails = buildToolGuardrails(cfg, policy);
   const withEffect = <T>(toolName: string, input: unknown, risk: ToolRisk, execute: () => Promise<T>) => {
     audit(cfg, { type: 'tool_requested', toolName, risk });
@@ -282,12 +309,12 @@ function buildTools(cfg: AgentConfig) {
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ dir }) =>
-      guard(async () => contract({ files: await listFiles(cfg.workspaceRoot, dir ?? '.') }, 'read'), 'read'),
+      guard(async () => contract({ files: await listFiles(workspace.primaryRoot, dir ?? '.') }, 'read'), 'read'),
   });
 
   const readFileTool = tool({
     name: 'read_file',
-    description: '读取工作区内一个文本文件的内容。可用 startLine/endLine 分段读大文件(缺省读前 4000 行)。',
+    description: '读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读前 4000 行)。',
     parameters: z.object({
       path: z.string().describe('相对工作区的文件路径'),
       startLine: z.number().optional().describe('起始行(1 起)'),
@@ -297,7 +324,8 @@ function buildTools(cfg: AgentConfig) {
     outputGuardrails: guardrails.output,
     execute: ({ path: p, startLine, endLine }) =>
       guard(async () => {
-        const r = await readFileRange(cfg.workspaceRoot, p, startLine, endLine);
+        const target = workspace.resolve(p);
+        const r = await readFileRange(target.root, target.relativePath, startLine, endLine);
         return contract({ totalLines: r.totalLines, content: r.text }, 'read');
       }, 'read'),
   });
@@ -313,12 +341,12 @@ function buildTools(cfg: AgentConfig) {
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ text, glob, isRegex }) =>
-      guard(async () => contract({ matches: await searchText(cfg.workspaceRoot, text, { glob, isRegex }) }, 'read'), 'read'),
+      guard(async () => contract({ matches: await searchText(workspace.primaryRoot, text, { glob, isRegex }) }, 'read'), 'read'),
   });
 
   const writeFileTool = tool({
     name: 'write_file',
-    description: '把文本内容写入工作区内的文件(会覆盖)。属于写操作,执行前需要用户在界面批准。',
+    description: '把文本内容写入已授权工作区内的文件(会覆盖)。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。属于写操作,执行前需要用户在界面批准。',
     parameters: z.object({
       path: z.string().describe('相对工作区的文件路径'),
       content: z.string().describe('要写入的完整文本内容'),
@@ -328,9 +356,16 @@ function buildTools(cfg: AgentConfig) {
     outputGuardrails: guardrails.output,
     execute: ({ path: p, content }) =>
       guard(
-        () => withEffect('write_file', { path: p, content }, 'write', async () =>
-          contract(await writeFileText(cfg.workspaceRoot, p, content), 'write', 'filesystem'),
-        ),
+        async () => {
+          const target = workspace.resolve(p);
+          return withEffect('write_file', {
+            path: target.relativePath,
+            workspaceRoot: target.root,
+            content,
+          }, 'write', async () =>
+            contract(await writeFileText(target.root, target.relativePath, content), 'write', 'filesystem'),
+          );
+        },
         'write',
         'filesystem',
       ),
@@ -346,14 +381,15 @@ function buildTools(cfg: AgentConfig) {
     execute: ({ command }, _context, details) =>
       guard(
         () => withEffect('run_command', { command }, 'execute', async () =>
-          contract(await runCommand(cfg.workspaceRoot, command, 60_000, details?.signal), 'execute', 'process'),
+          contract(await runCommand(workspace.primaryRoot, command, 60_000, details?.signal), 'execute', 'process'),
         ),
         'execute',
         'process',
       ),
   });
 
-  return [getIoTable, readPlcVariables, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
+  const allTools = [getIoTable, readPlcVariables, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
+  return requiredTool ? allTools.filter((candidate) => candidate.name === requiredTool) : allTools;
 }
 
 const SYSTEM_PROMPT =
@@ -388,11 +424,14 @@ export class AgentActionVerificationError extends Error {
 }
 
 export async function verifyWorkspaceWrite(
-  workspaceRoot: string,
+  workspaceRoot: string | WorkspaceScope,
   relativePath: string,
   expectedContent: string,
 ): Promise<Artifact> {
-  const file = resolveInWorkspace(workspaceRoot, relativePath);
+  const scope = workspaceRoot instanceof WorkspaceScope
+    ? workspaceRoot
+    : new WorkspaceScope(workspaceRoot ? [workspaceRoot] : []);
+  const file = scope.resolve(relativePath).absolutePath;
   const actual = await fs.readFile(file, 'utf8').catch(() => undefined);
   if (actual !== expectedContent) {
     throw new AgentActionVerificationError(`工具 write_file 返回成功，但文件校验失败: ${relativePath}`);
@@ -404,26 +443,6 @@ export async function verifyWorkspaceWrite(
     mimeType: 'text/plain',
     metadata: { bytes: Buffer.byteLength(actual) },
   };
-}
-
-/** A side-effect tool explicitly required by the user's request. */
-export type RequiredAgentTool = 'write_file' | 'export_st_program' | 'run_command';
-
-/** Detects only explicit workspace-write requests; ordinary conversation stays unconstrained. */
-export function inferRequiredTool(userText: string): RequiredAgentTool | undefined {
-  if (/(不要|无需|不需要|别|勿)[^。！？\r\n]{0,8}(写|保存|修改|覆盖|创建)/u.test(userText)) return undefined;
-  const mentionsWorkspaceFile = /(?:文件|工作区|当前项目|workspace|\bfile\b|\.[a-z0-9]{1,8}\b)/iu.test(userText);
-  const asksToWrite = /(?:写入|写到|写进|写文件|保存到|保存为|落盘|创建|修改|覆盖|\bwrite\b|\bsave\b|\bcreate\b|\bmodify\b|\boverwrite\b)/iu.test(userText);
-  if (mentionsWorkspaceFile && asksToWrite) {
-    return 'write_file';
-  }
-  if (/(?=.*(?:导出|保存|落盘))(?=.*(?:ST|程序|源码))|export.*program|save.*program/iu.test(userText)) {
-    return 'export_st_program';
-  }
-  if (/(执行|运行).*(命令|脚本)|run\s+(a\s+)?command|execute.*command/iu.test(userText)) {
-    return 'run_command';
-  }
-  return undefined;
 }
 
 /**
@@ -637,18 +656,22 @@ export async function runAgent(
   onEvent: (ev: AgentEvent) => void,
   options: AgentRunOptions = {},
 ): Promise<AgentRunResult> {
-  const requiredTool = inferRequiredTool(userText);
+  const actionPolicy = cfg.actionPolicy ?? new DefaultActionPolicy();
+  const requiredTool = actionPolicy.requiredToolFor(userText);
+  const forceToolChoice = requiredTool && !options.initialState ? { toolChoice: requiredTool } : undefined;
+  const workspace = workspaceScopeFromRoots(cfg.workspaceRoot, cfg.workspaceRoots);
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   const gatewayActionTurn = model instanceof GatewayGuardedModel && requiredTool !== undefined;
   if (model instanceof GatewayGuardedModel && requiredTool && !options.initialState) {
     model.requireToolOnce(requiredTool);
   }
-  const tools = buildTools(cfg);
+  const tools = buildTools(cfg, requiredTool);
   const agent = cfg.orchestration === 'team'
     ? (() => {
       const team = createIndustrialAgentTeam(model, tools, {
         executorStructuredOutput: !gatewayActionTurn,
+        executorModelSettings: forceToolChoice,
       });
       // Explicit side effects bypass planning and enter the controlled executor
       // directly. Planning remains the default for read-only/analysis requests.
@@ -659,6 +682,7 @@ export async function runAgent(
       model,
       instructions: SYSTEM_PROMPT,
       tools,
+      ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
       // Some OpenAI-compatible gateways cannot honor response_format and
       // tool_choice in the same request. Action turns use text internally;
       // the host still creates the canonical structured result below.
@@ -688,9 +712,10 @@ export async function runAgent(
     if (!result) return;
     const key = callId && toolCalls.has(callId)
       ? callId
-      : [...toolCalls.keys()].reverse().find((candidate) => toolCalls.get(candidate)?.name === name && !toolResults.has(candidate));
+      : [...toolCalls.keys()].reverse().find((candidate) =>
+        !toolResults.has(candidate) && (name === 'tool' || toolCalls.get(candidate)?.name === name));
     const call = key ? toolCalls.get(key) : undefined;
-    if (key && call) toolResults.set(key, { ...call, name, result });
+    if (key && call) toolResults.set(key, { ...call, name: name === 'tool' ? call.name : name, result });
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
@@ -708,7 +733,7 @@ export async function runAgent(
         continue;
       }
       if (typeof args.path !== 'string' || typeof args.content !== 'string') continue;
-      verified.push(await verifyWorkspaceWrite(cfg.workspaceRoot, args.path, args.content));
+      verified.push(await verifyWorkspaceWrite(workspace, args.path, args.content));
     }
     const successful = [...toolResults.values()].some((call) => call.name === requiredTool && call.result.ok);
     if (!successful || (requiredTool === 'write_file' && !verified.length)) {
@@ -718,11 +743,7 @@ export async function runAgent(
   };
 
   const summarizeToolOutput = (out: unknown): { ok: boolean; summary: string } => {
-    const flat = Array.isArray(out)
-      ? out.map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? '')).join('')
-      : typeof out === 'string'
-        ? out
-        : JSON.stringify(out ?? '');
+    const flat = toolOutputText(out);
     let ok = true;
     try {
       const parsed = JSON.parse(flat) as { ok?: boolean; error?: unknown } | unknown;
@@ -732,18 +753,14 @@ export async function runAgent(
       }
     } catch {
       // 非 JSON(如 SDK 的拒绝文案 "user rejected tool call")
-      ok = !/reject|denied/i.test(flat);
+      ok = !/reject|denied|拒绝|失败|错误|未返回|不允许/i.test(flat);
     }
     const summary = flat.length > 200 ? flat.slice(0, 200) + '…' : flat;
     return { ok, summary };
   };
 
   const parseObservedToolResult = (out: unknown): ToolResult | undefined => {
-    const flat = Array.isArray(out)
-      ? out.map((part) => (typeof part === 'string' ? part : (part as { text?: string })?.text ?? '')).join('')
-      : typeof out === 'string'
-        ? out
-        : JSON.stringify(out ?? '');
+    const flat = toolOutputText(out);
     try {
       return parseToolResult(JSON.parse(flat));
     } catch {
@@ -898,6 +915,7 @@ export async function runAgent(
       // Seed the call index from the persisted approval so verification still
       // has the original tool arguments.
       recordToolCall(request.name, request.id, request.args);
+      toolNameByCallId.set(request.id, request.name);
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
       if (decision === undefined && options.requestApproval) {
@@ -954,6 +972,18 @@ export async function runAgent(
     });
     const outcome = await pump(stream);
     state = stream.state;
+
+    // A gateway may complete a successful action without a final text turn.
+    // The action result is still valid; keep the canonical result structured
+    // and let the UI show the tool receipt instead of failing Schema parsing.
+    if (!structuredOutput && gatewayActionTurn) {
+      structuredOutput = {
+        message: output,
+        diagnostics: [],
+        artifacts: [],
+        data: null,
+      };
+    }
 
     if (options.signal?.aborted || stream.cancelled) {
       return {

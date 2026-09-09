@@ -12,3 +12,5 @@ export * from '../src/orchestration/agentRoles';
 export * from '../src/protocol';
 export * from '../src/runtime/streaming';
 export * from '../src/runtime/output';
+export * from '../src/policy/actionPolicy';
+export * from '../src/workspace/workspaceScope';

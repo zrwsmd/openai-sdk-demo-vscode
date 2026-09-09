@@ -103,6 +103,9 @@ function addToolResult(name, ok, summary) {
   const body = document.createElement('div');
   body.className = 'tool-result-body';
   const formatted = formatToolResult(name, summary);
+  if (!ok) formatted.headline = formatted.headline.startsWith('执行失败')
+    ? formatted.headline
+    : `执行失败：${formatted.headline}`;
   const title = document.createElement('div');
   title.className = 'tool-result-title';
   title.textContent = formatted.headline;
