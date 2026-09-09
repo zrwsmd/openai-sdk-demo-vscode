@@ -32,6 +32,8 @@ import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
 import type { AuditEvent } from '../observability/audit';
 import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
 import { parseToolResult, type ApprovalRequest as ProtocolApprovalRequest, type UsageSummary } from '../protocol/results';
+import { AgentStreamAdapter } from './streaming';
+import type { AgentEventFactory, AgentProtocolEvent } from '../protocol/events';
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -95,6 +97,13 @@ export interface AgentRunOptions {
   requestApproval?: ApprovalRequester;
   /** Called whenever a resumable state is available or changes. */
   onCheckpoint?: (checkpoint: AgentRunCheckpoint) => Promise<void> | void;
+  /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
+  protocol?: {
+    runId: string;
+    operationId?: string;
+    eventFactory?: AgentEventFactory;
+    onEvent: (event: AgentProtocolEvent) => void;
+  };
 }
 
 export interface AgentRunResult {
@@ -564,7 +573,7 @@ export async function runAgent(
     return { ok, summary };
   };
 
-  const pump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
+  const legacyPump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
     let bailed = false;
     try {
       for await (const event of stream) {
@@ -600,6 +609,44 @@ export async function runAgent(
     usage.requests = stream.state.usage.requests;
     usage.inputTokens = stream.state.usage.inputTokens;
     usage.outputTokens = stream.state.usage.outputTokens;
+    return bailed ? 'empty-bailed' : 'done';
+  };
+
+  const protocolAdapter = options.protocol
+    ? new AgentStreamAdapter({
+      runId: options.protocol.runId,
+      operationId: options.protocol.operationId,
+      eventFactory: options.protocol.eventFactory,
+      emit: options.protocol.onEvent,
+    })
+    : undefined;
+
+  const pump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
+    if (!protocolAdapter) return legacyPump(stream);
+    let bailed = false;
+    try {
+      const adapted = await protocolAdapter.consume(stream, {
+        onLegacyEvent: (event) => {
+          if (event.type === 'delta') {
+            output += event.text;
+            onEvent({ type: 'delta', text: event.text });
+          } else if (event.type === 'tool') {
+            onEvent({ type: 'tool', name: event.name });
+          } else {
+            onEvent({ type: 'tool_result', name: event.name, ok: event.ok, summary: event.summary });
+          }
+        },
+      });
+      usage.inputTokens = adapted.usage.inputTokens;
+      usage.outputTokens = adapted.usage.outputTokens;
+      usage.requests = adapted.usage.requests;
+    } catch (e) {
+      if (!(e instanceof EmptyGatewayResponseError)) throw e;
+      bailed = true;
+      usage.requests = stream.state.usage.requests;
+      usage.inputTokens = stream.state.usage.inputTokens;
+      usage.outputTokens = stream.state.usage.outputTokens;
+    }
     return bailed ? 'empty-bailed' : 'done';
   };
 

@@ -232,6 +232,54 @@ function finishApprovalCards(className) {
   }
 }
 
+// Stable protocol events are additive to the legacy host messages. Text and
+// tool events remain rendered by their existing path for backward compatibility;
+// lifecycle events use this path so future hosts can stream without knowing the
+// SDK's raw event names.
+function handleProtocolEvent(event) {
+  if (!event || typeof event !== 'object') return;
+  const payload = event.payload || {};
+  switch (event.type) {
+    case 'agent.started':
+      addNote('agent-note', `Agent: ${payload.agentName || 'unknown'}`);
+      break;
+    case 'agent.updated':
+      addNote('agent-note', `切换 Agent: ${payload.agentName || 'unknown'}`);
+      break;
+    case 'handoff.started':
+      addNote('agent-note', `交接: ${payload.fromAgent || 'agent'} -> ${payload.toAgent || 'agent'}`);
+      break;
+    case 'handoff.completed':
+      addNote('agent-note', `已完成交接: ${payload.toAgent || 'agent'}`);
+      break;
+    case 'run.completed': {
+      const result = payload.result;
+      if (result && typeof result === 'object') {
+        const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+        const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+        if (diagnostics.length) addNote('tool-note', `结构化结果包含 ${diagnostics.length} 条诊断信息`);
+        if (artifacts.length) addNote('tool-note', `已生成 ${artifacts.length} 个产物`);
+      }
+      break;
+    }
+    case 'run.failed':
+      // The legacy error event owns the detailed error bubble.
+      break;
+    case 'run.cancelled':
+      // The legacy cancelled event owns the retry state and controls.
+      break;
+    case 'approval.requested':
+    case 'approval.resolved':
+    case 'text.delta':
+    case 'tool.started':
+    case 'tool.completed':
+    case 'usage.updated':
+    case 'run.started':
+    case 'run.progress':
+      break;
+  }
+}
+
 // ---------- host 消息 ----------
 
 let agentBubble = null;
@@ -240,6 +288,10 @@ let hadToolThisTurn = false;
 
 window.addEventListener('message', (event) => {
   const msg = event.data;
+  if (msg.type === 'agentEvent') {
+    handleProtocolEvent(msg.event);
+    return;
+  }
   switch (msg.type) {
     case 'user': {
       const hint = messagesEl.querySelector('.hint');

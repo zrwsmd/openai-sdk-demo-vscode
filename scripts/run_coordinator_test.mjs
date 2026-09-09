@@ -28,6 +28,9 @@ async function fixture(executeAgent) {
   if (!test.events.some((event) => event.type === 'runAttached')) throw new Error('live run was mistaken for a crash');
   await test.coordinator.stop();
   await running;
+  if (!test.events.some((event) => event.type === 'agentEvent' && event.event.type === 'run.started')) {
+    throw new Error('stable run.started protocol event missing');
+  }
   if ((await test.session.getItems()).length !== 0) throw new Error('coordinator did not rollback cancelled session');
   if ((await test.store.getLast())?.status !== 'cancelled') throw new Error('cancelled run was not persisted');
   if (!test.events.some((event) => event.type === 'cancelled')) throw new Error('cancelled event missing');

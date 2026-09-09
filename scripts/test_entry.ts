@@ -10,3 +10,4 @@ export * from '../src/plc/plcAdapter';
 export * from '../src/observability/audit';
 export * from '../src/orchestration/agentRoles';
 export * from '../src/protocol';
+export * from '../src/runtime/streaming';

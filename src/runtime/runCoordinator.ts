@@ -10,9 +10,12 @@ import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
 import type { AuditEventType, AuditSink } from '../observability/audit';
+import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
+import { createAgentResult } from '../protocol/results';
 
 export type RuntimeEvent =
   | ({ type: AgentEvent['type']; runId: string } & Record<string, unknown>)
+  | { type: 'agentEvent'; event: AgentProtocolEvent }
   | ({ type: string } & Record<string, unknown>);
 
 export interface RunCoordinatorDependencies {
@@ -51,6 +54,8 @@ export class RunCoordinator {
   private resolveActiveDone?: () => void;
   private liveOutput = '';
   private stopRequested = false;
+  private protocolFactory?: AgentEventFactory;
+  private protocolRunId?: string;
 
   constructor(dependencies: RunCoordinatorDependencies) {
     this.session = dependencies.session;
@@ -139,6 +144,11 @@ export class RunCoordinator {
       await this.store.update(run);
       await this.audit('run_resumed', run, { approvalId });
       this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
+      this.ensureProtocolFactory(run);
+      this.emitProtocol(this.protocolFactory!.next({
+        type: 'approval.resolved',
+        payload: { approvalId, approved },
+      }));
       if (this.stopRequested) {
         this.stopRequested = false;
         await this.cancelPending(run, false);
@@ -252,6 +262,10 @@ export class RunCoordinator {
     }
     this.emit({ type: 'busy', runId: run.id });
 
+    // Keep the same envelope sequence across an approval resume, while a
+    // retry/new run receives a fresh factory bound to its new run id.
+    this.ensureProtocolFactory(run);
+
     const baseOutput = run.output;
     try {
       const result = await this.executeAgent(
@@ -276,6 +290,12 @@ export class RunCoordinator {
         {
           ...options,
           signal: controller.signal,
+          protocol: {
+            runId: run.id,
+            operationId: run.operationId,
+            eventFactory: this.protocolFactory,
+            onEvent: (event: AgentProtocolEvent) => this.emitProtocol(event),
+          },
           onCheckpoint: async (checkpoint) => {
             run.status = 'awaiting_approval';
             run.state = checkpoint.state;
@@ -303,16 +323,40 @@ export class RunCoordinator {
         await this.audit('approval_requested', run, { approvals: run.approvals });
         this.writeLog(`[run:${run.id}] 已持久化审批断点 (${run.approvals.length} 项)`);
         this.emit({ type: 'awaitingApproval', runId: run.id, approvals: run.approvals });
+        for (const approval of run.approvals) {
+          this.emitProtocol(this.protocolFactory!.next({
+            type: 'approval.requested',
+            payload: {
+              approvalId: approval.id,
+              toolName: approval.name,
+              args: approval.args,
+            },
+          }));
+        }
       } else if (result.status === 'cancelled') {
         await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.cancelled',
+          payload: { reason: 'user_cancelled' },
+        }));
       } else {
         await this.audit('run_completed', run, { usage: result.usage });
         this.writeLog(
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
         this.emit({ type: 'done', usage: result.usage, canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.completed',
+          payload: {
+            result: createAgentResult({
+              status: 'completed',
+              output: run.output,
+              usage: result.usage,
+            }),
+          },
+        }));
       }
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
@@ -326,10 +370,18 @@ export class RunCoordinator {
         await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.cancelled',
+          payload: { reason: 'aborted' },
+        }));
       } else {
         await this.audit('run_failed', run, { error: run.error });
         this.writeLog(`[run:${run.id}] 出错: ${run.error}`);
         this.emit({ type: 'error', message: run.error, canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.failed',
+          payload: { error: run.error ?? 'unknown_error' },
+        }));
       }
     } finally {
       if (this.controller === controller) this.controller = undefined;
@@ -351,6 +403,20 @@ export class RunCoordinator {
       this.writeLog(`[run:${runId}] ${event.name} -> ${event.ok ? 'ok' : 'fail'}: ${event.summary.slice(0, 300)}`);
       this.emit({ ...event, type: 'toolResult', runId });
     }
+  }
+
+  private emitProtocol(event: AgentProtocolEvent): void {
+    this.emit({ type: 'agentEvent', event });
+  }
+
+  private ensureProtocolFactory(run: DurableRunRecord): void {
+    if (this.protocolFactory && this.protocolRunId === run.id) return;
+    this.protocolFactory = new AgentEventFactory(run.id, run.operationId);
+    this.protocolRunId = run.id;
+    this.emitProtocol(this.protocolFactory.next({
+      type: 'run.started',
+      payload: { userText: run.userText },
+    }));
   }
 
   private async replayHistory(): Promise<void> {
