@@ -207,6 +207,25 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
   return { input: [input], output: [] };
 }
 
+/**
+ * 宽容整数参数 schema。
+ * 背景:兼容网关模型常把整数写成字符串("1000"),或用 "None"/null 表示"未提供"。
+ * z.coerce.number() 会把 "None" 转成 NaN,而 zod 拒绝 NaN,SDK 校验层直接抛
+ * InvalidToolInputError(execute 根本不会被调用)。所以 schema 用并集放行这些形态,
+ * 真正的解析统一放在 execute(parseOptionalInt)。
+ */
+const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
+
+function parseOptionalInt(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    // 只接受纯数字字符串;"None"/"null"/空串等一律视为未提供
+    return /^\d+$/.test(trimmed) && Number(trimmed) > 0 ? Number(trimmed) : undefined;
+  }
+  return undefined;
+}
+
 function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -302,21 +321,20 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
 
   const readFileTool = tool({
     name: 'read_file',
-    description: '读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读前 4000 行)。',
+    description: '读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。',
     parameters: z.object({
       path: z.string().describe('相对工作区的文件路径'),
-      startLine: z.coerce.number().optional().describe('起始行(1 起),整数'),
-      endLine: z.coerce.number().optional().describe('结束行(含),整数'),
+      startLine: optionalIntParam.describe('起始行(1 起),整数;不需要分段时省略,不要传 null/None'),
+      endLine: optionalIntParam.describe('结束行(含),整数;不需要分段时省略,不要传 null/None'),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ path: p, startLine, endLine }) =>
       guard(async () => {
         const target = workspace.resolve(p);
-        // 网关可能把数字参数传成字符串或 "None";coerce 会转成 NaN,这里兜底:
-        // startLine 非正整数 → 1;endLine 非正整数 → 读到文件末尾(不限制结束行)
-        const s = typeof startLine === 'number' && Number.isFinite(startLine) && startLine > 0 ? startLine : 1;
-        const e = typeof endLine === 'number' && Number.isFinite(endLine) && endLine > 0 ? endLine : undefined;
+        // 宽容解析:数字字符串("1000")→数字;"None"/null/非法值→视为未提供(startLine 回退 1,endLine 读到末尾)
+        const s = parseOptionalInt(startLine) ?? 1;
+        const e = parseOptionalInt(endLine);
         const r = await readFileRange(target.root, target.relativePath, s, e);
         return contract({ totalLines: r.totalLines, content: r.text }, 'read');
       }, 'read'),
