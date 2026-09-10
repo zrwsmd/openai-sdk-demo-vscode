@@ -35,7 +35,7 @@ export class AnthropicMessagesModel implements Model {
       params as MessageCreateParamsNonStreaming,
       request.signal ? { signal: request.signal } : undefined,
     );
-    return messageToModelResponse(message);
+    return messageToModelResponse(message, request.outputType);
   }
 
   async *getStreamedResponse(
@@ -335,8 +335,11 @@ function toAnthropicOutputConfig(outputType: unknown): unknown | undefined {
   };
 }
 
-function messageToModelResponse(message: Message): ModelResponse {
-  const output = contentToAgentOutput(message.content);
+function messageToModelResponse(
+  message: Message,
+  outputType: unknown,
+): ModelResponse {
+  const output = contentToAgentOutput(message.content, outputType);
   return {
     usage: usageFromAnthropic(message.usage),
     output,
@@ -345,13 +348,22 @@ function messageToModelResponse(message: Message): ModelResponse {
   } as ModelResponse;
 }
 
-function contentToAgentOutput(content: unknown): unknown[] {
+function contentToAgentOutput(content: unknown, outputType?: unknown): unknown[] {
   const output: unknown[] = [];
   const text: unknown[] = [];
-  for (const raw of Array.isArray(content) ? content : []) {
+  const blocks = Array.isArray(content) ? content : [];
+  const hasToolUse = blocks.some(
+    (raw) => (raw as Record<string, unknown>)?.type === 'tool_use',
+  );
+  for (const raw of blocks) {
     const block = raw as Record<string, unknown>;
     if (block.type === 'text' && typeof block.text === 'string') {
-      text.push({ type: 'output_text', text: block.text });
+      text.push({
+        type: 'output_text',
+        text: hasToolUse
+          ? block.text
+          : normalizeStructuredOutputText(block.text, outputType),
+      });
       continue;
     }
     if (block.type === 'tool_use') {
@@ -545,7 +557,7 @@ async function* streamToModelEvents(
     },
   } as Message;
   const usage = usageFromAnthropic(finalMessage.usage);
-  const output = contentToAgentOutput(finalMessage.content);
+  const output = contentToAgentOutput(finalMessage.content, request.outputType);
   yield {
     type: 'response_done',
     response: {
@@ -587,6 +599,55 @@ function streamBlockToContent(block: StreamBlockState): unknown[] {
 function streamToolArguments(block: StreamBlockState): string {
   if (block.inputJson) return block.inputJson;
   return JSON.stringify(block.initialInput ?? {});
+}
+
+/**
+ * Some Anthropic-compatible gateways accept the Messages envelope but ignore
+ * structured-output instructions and return ordinary prose. The Agents SDK
+ * still validates the final text against the requested output schema, so
+ * normalize that compatibility response only for the product's object-shaped
+ * output contract. Native JSON responses pass through unchanged.
+ */
+function normalizeStructuredOutputText(
+  text: string,
+  outputType: unknown,
+): string {
+  if (!isIndustrialOutputType(outputType)) return text;
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+
+  const unfenced = stripJsonFence(trimmed);
+  try {
+    const parsed = JSON.parse(unfenced);
+    if (isRecord(parsed)) return JSON.stringify(parsed);
+  } catch {
+    // Treat ordinary prose as the user-facing message below.
+  }
+
+  return JSON.stringify({
+    message: text,
+    diagnostics: [],
+    artifacts: [],
+    data: null,
+  });
+}
+
+function isIndustrialOutputType(outputType: unknown): boolean {
+  if (!isRecord(outputType) || outputType.type !== 'json_schema') return false;
+  const schema = outputType.schema;
+  if (!isRecord(schema) || schema.type !== 'object') return false;
+  const properties = schema.properties;
+  return isRecord(properties)
+    && isRecord(properties.message)
+    && properties.message.type === 'string'
+    && isRecord(properties.diagnostics)
+    && isRecord(properties.artifacts)
+    && Object.hasOwn(properties, 'data');
+}
+
+function stripJsonFence(value: string): string {
+  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(value);
+  return match?.[1]?.trim() ?? value;
 }
 
 function modelEvent(event: Record<string, unknown>): ModelStreamEvent {

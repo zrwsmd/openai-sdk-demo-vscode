@@ -113,12 +113,7 @@ const server = http.createServer((req, res) => {
         await streamMessage(res, request.model, [
           {
             type: 'text',
-            text: JSON.stringify({
-              message: 'Anthropic Messages API 已连通',
-              diagnostics: [],
-              artifacts: [],
-              data: null,
-            }),
+            text: '你好，我是 Anthropic Messages 兼容模型。',
           },
         ], {
           stopReason: 'end_turn',
@@ -252,9 +247,9 @@ async function runTestTurn(text) {
 }
 
 try {
-  const normal = await runTestTurn('你好');
-  assert.equal(normal.result.status, 'completed');
-  assert.match(normal.result.output, /Anthropic Messages API 已连通/);
+      const normal = await runTestTurn('你好');
+      assert.equal(normal.result.status, 'completed');
+      assert.match(normal.result.output, /你好，我是 Anthropic Messages 兼容模型/);
 
   await fs.writeFile(path.join(workspace, 'lk.txt'), '你好', 'utf8');
   const read = await runTestTurn('读取 lk.txt 的内容');
