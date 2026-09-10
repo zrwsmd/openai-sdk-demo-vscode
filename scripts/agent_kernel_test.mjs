@@ -5,7 +5,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  runAgentTurn,
+  AgentEventFactory,
+  runAgent,
   setAgentLogger,
   JsonFileSession,
   extractChatMessages,
@@ -30,15 +31,36 @@ const session = new JsonFileSession(path.join(dir, 'session.json'));
 const noApproval = async (name) => {
   throw new Error(`不应触发审批,却收到 ${name}`);
 };
-const collect = () => {
+let runSequence = 0;
+async function runTestTurn(userText, decide) {
   const events = [];
-  return { events, onEvent: (ev) => events.push(ev) };
-};
+  const runId = `kernel-${++runSequence}`;
+  const factory = new AgentEventFactory(runId, runId);
+  const protocol = {
+    runId,
+    operationId: runId,
+    eventFactory: factory,
+    onEvent: (event) => events.push(event),
+  };
+  let result = await runAgent(cfg, session, userText, { protocol });
+  while (result.status === 'awaiting_approval') {
+    if (!decide) throw new Error('测试遇到未处理的审批断点');
+    const decisions = {};
+    for (const approval of result.approvals || []) {
+      decisions[approval.id] = await decide(approval.name, approval.args);
+    }
+    result = await runAgent(cfg, session, userText, {
+      initialState: result.state,
+      decisions,
+      protocol,
+    });
+  }
+  return { ...result, events };
+}
 
 // [1] 第一句问候 → mock 回显 msgs=2(系统提示+本句);usage 单次
 {
-  const { events, onEvent } = collect();
-  const r = await runAgentTurn(cfg, session, '你好', onEvent, noApproval);
+  const r = await runTestTurn('你好', noApproval);
   const m = /\[msgs=(\d+)\]/.exec(r.output);
   console.log('[1] 问候:', r.output.slice(0, 16) + '…', '| msgs 回显 =', m?.[1], '| usage =', JSON.stringify(r.usage));
   if (!m || Number(m[1]) !== 2) throw new Error('场景1 msgs 不为 2');
@@ -47,7 +69,7 @@ const collect = () => {
 
 // [2] 同一会话第二句 → msgs 应包含第一句历史(系统+u1+a1+u2 = 4),证明 session 回放
 {
-  const r = await runAgentTurn(cfg, session, '记住,我叫张三', () => {}, noApproval);
+  const r = await runTestTurn('记住,我叫张三', noApproval);
   const m = /\[msgs=(\d+)\]/.exec(r.output);
   console.log('[2] 第二句:msgs 回显 =', m?.[1], '(>2 即带上了历史)');
   if (!m || Number(m[1]) < 4) throw new Error('场景2 会话历史未回放');
@@ -64,9 +86,8 @@ const collect = () => {
 
 // [4] 星三角工具链(无需审批):get_io_table → 最终 ST 代码
 {
-  const { events, onEvent } = collect();
-  const r = await runAgentTurn(cfg, session, '写一个电机星三角启动的 ST 程序,延时 5 秒切换', onEvent, noApproval);
-  const toolCalls = events.filter((e) => e.type === 'tool').map((e) => e.name);
+  const r = await runTestTurn('写一个电机星三角启动的 ST 程序,延时 5 秒切换', noApproval);
+  const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
   console.log('[4] 工具链:', toolCalls.join(','), '| 含ST代码 =', r.output.includes('END_PROGRAM'), '| usage =', JSON.stringify(r.usage));
   if (r.usage.requests < 2 || !r.output.includes('END_PROGRAM')) throw new Error('场景4 工具链不符合预期');
 }
@@ -78,7 +99,7 @@ const collect = () => {
     asked.push({ name, args });
     return true;
   };
-  const r = await runAgentTurn(cfg, session, '把上面的程序导出为文件', () => {}, approveAll);
+  const r = await runTestTurn('把上面的程序导出为文件', approveAll);
   const files = await fs.readdir(path.join(dir, 'exports'));
   console.log('[5] 审批(允许):asked =', JSON.stringify(asked.map((a) => a.name)), '| 落盘文件 =', files.join(','), '| 输出含确认 =', r.output.includes('导出'));
   if (asked.length !== 1 || asked[0].name !== 'export_st_program' || !asked[0].args.includes('PROGRAM'))
@@ -95,7 +116,7 @@ const collect = () => {
   };
   let refused = false;
   try {
-    await runAgentTurn(cfg, session, '再次把程序导出为文件', () => {}, denyAll);
+    await runTestTurn('再次把程序导出为文件', denyAll);
   } catch {
     refused = true;
   }
@@ -108,7 +129,7 @@ const collect = () => {
 {
   let thrown = null;
   try {
-    await runAgentTurn(cfg, session, '写一个循环测试程序', () => {}, noApproval);
+    await runTestTurn('写一个循环测试程序', noApproval);
   } catch (e) {
     thrown = e;
   }
@@ -119,12 +140,11 @@ const collect = () => {
 // [8] 新会话:clearSession 后文件清空
 {
   await fs.writeFile(path.join(dir, 'lk.txt'), '你好', 'utf8');
-  const { events, onEvent } = collect();
-  const r = await runAgentTurn(cfg, session, '读取 lk.txt 文件里面的内容', onEvent, noApproval);
-  const toolCalls = events.filter((e) => e.type === 'tool').map((e) => e.name);
-  const toolResults = events.filter((e) => e.type === 'tool_result');
-  console.log('[8] 读取文件:工具链 =', toolCalls.join(','), '| 成功回执 =', toolResults.some((e) => e.name === 'read_file' && e.ok), '| 输出 =', r.output);
-  if (toolCalls.join(',') !== 'read_file' || !toolResults.some((e) => e.name === 'read_file' && e.ok)) {
+  const r = await runTestTurn('读取 lk.txt 文件里面的内容', noApproval);
+  const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
+  const toolResults = r.events.filter((e) => e.type === 'tool.completed');
+  console.log('[8] 读取文件:工具链 =', toolCalls.join(','), '| 成功回执 =', toolResults.some((e) => e.payload.toolName === 'read_file' && e.payload.ok), '| 输出 =', r.output);
+  if (toolCalls.join(',') !== 'read_file' || !toolResults.some((e) => e.payload.toolName === 'read_file' && e.payload.ok)) {
     throw new Error('读取文件未通过 read_file 成功完成');
   }
 }
@@ -132,19 +152,15 @@ const collect = () => {
 // [9] 新会话:clearSession 后文件清空
 {
   const asked = [];
-  const { events, onEvent } = collect();
-  const r = await runAgentTurn(
-    cfg,
-    session,
+  const r = await runTestTurn(
     '写你好我是agent这5个字到rr.txt下面',
-    onEvent,
     async (name, args) => {
       asked.push({ name, args });
       return true;
     },
   );
   const written = await fs.readFile(path.join(dir, 'rr.txt'), 'utf8');
-  const toolCalls = events.filter((e) => e.type === 'tool').map((e) => e.name);
+  const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
   console.log('[9] 写入文件:工具链 =', toolCalls.join(','), '| 内容 =', written, '| 输出 =', r.output);
   if (toolCalls.join(',') !== 'write_file' || asked.length !== 1 || written !== '你好我是agent') {
     throw new Error('自然语言写入请求未通过 write_file 正确落盘');
@@ -163,17 +179,16 @@ const collect = () => {
 // [10] 复现"批准后无反馈"场景:批准后模型在工具结果回喂后返回空 completion(真实网关坏行为)。
 //     内核仍必须透出 tool_result 事件(带文件路径),UI 才有"✓ 成功"可显示;模型文本为空但不算出错
 {
-  const { events, onEvent } = collect();
-  const r = await runAgentTurn(cfg, session, '静默导出程序', onEvent, async () => true);
-  const results = events.filter((e) => e.type === 'tool_result');
+  const r = await runTestTurn('静默导出程序', async () => true);
+  const results = r.events.filter((e) => e.type === 'tool.completed');
   console.log(
     '[9] 工具后模型沉默:模型文本长度 =', r.output.length,
-    '| tool_result =', JSON.stringify(results.map((e) => ({ n: e.name, ok: e.ok }))),
+    '| tool.completed =', JSON.stringify(results.map((e) => ({ n: e.payload.toolName, ok: e.payload.ok }))),
     '| 模型调用 =', r.usage.requests,
   );
   if (r.output.length !== 0) throw new Error('场景9 预期模型无文本输出');
-  const okResult = results.find((e) => e.name === 'export_st_program' && e.ok);
-  if (!okResult || !okResult.summary.includes('StarDelta.st')) throw new Error('场景9 未透出成功的工具回执');
+  const okResult = results.find((e) => e.payload.toolName === 'export_st_program' && e.payload.ok);
+  if (!okResult || !okResult.payload.summary.includes('StarDelta.st')) throw new Error('场景9 未透出成功的工具回执');
   // 熔断生效:空回复重试被截停在个位数(SDK 原生会一路重试到 maxTurns=10)
   if (r.usage.requests < 2 || r.usage.requests > 6)
     throw new Error(`场景9 熔断未生效或过度截停,模型调用 = ${r.usage.requests}`);
@@ -182,15 +197,14 @@ const collect = () => {
 // [11] 只吐 reasoning 不吐正文(套壳推理模型常见坏行为):诊断日志必须记录到 推理>0/正文=0,
 //      熔断照常截停,工具回执照常透出
 {
-  const { events, onEvent } = collect();
   const before = diagLines.length;
-  const r = await runAgentTurn(cfg, session, '思考导出程序', onEvent, async () => true);
+  const r = await runTestTurn('思考导出程序', async () => true);
   const myLines = diagLines.slice(before);
   const respLine = myLines.find((l) => l.includes('正文=0') && /推理=[1-9]/.test(l));
-  console.log('[10] 只思考不说话:模型文本长度 =', r.output.length, '| tool_result ok =', events.some((e) => e.type === 'tool_result' && e.ok), '| 诊断行:', (respLine ?? myLines.at(-1) ?? '(无)').slice(0, 90));
+  console.log('[10] 只思考不说话:模型文本长度 =', r.output.length, '| tool.completed ok =', r.events.some((e) => e.type === 'tool.completed' && e.payload.ok), '| 诊断行:', (respLine ?? myLines.at(-1) ?? '(无)').slice(0, 90));
   if (r.output.length !== 0) throw new Error('场景10 预期无正文');
   if (!respLine) throw new Error('场景10 诊断日志未识别出"正文0/推理>0"的响应');
-  if (!events.some((e) => e.type === 'tool_result' && e.ok)) throw new Error('场景10 工具回执丢失');
+  if (!r.events.some((e) => e.type === 'tool.completed' && e.payload.ok)) throw new Error('场景10 工具回执丢失');
 }
 
 console.log(`\n全部通过 ✔ (MAX_TURNS=${MAX_TURNS},工作目录 ${dir})`);

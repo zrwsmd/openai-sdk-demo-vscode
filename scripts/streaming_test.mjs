@@ -31,12 +31,10 @@ const adapter = new AgentStreamAdapter({
   eventFactory: new AgentEventFactory('run-stream', 'op-stream'),
   emit: (event) => events.push(event),
 });
-const legacy = [];
-const result = await adapter.consume(stream, { onLegacyEvent: (event) => legacy.push(event) });
+const result = await adapter.consume(stream);
 
 assert.equal(result.output, '开始检查完成');
 assert.deepEqual(result.usage, { inputTokens: 3, outputTokens: 4, requests: 1 });
-assert.deepEqual(legacy.map((event) => event.type), ['delta', 'tool', 'tool_result', 'delta']);
 assert.deepEqual(events.map((event) => event.type), [
   'agent.started', 'text.delta', 'tool.started', 'tool.completed',
   'agent.updated', 'text.delta', 'usage.updated',
@@ -46,7 +44,6 @@ for (const event of events) parseAgentEvent(event);
 for (let i = 1; i < events.length; i += 1) assert.equal(events[i].sequence, events[i - 1].sequence + 1);
 
 const structuredEvents = [];
-const structuredLegacy = [];
 const structuredStream = scriptedEvents();
 structuredStream.state = { usage: { inputTokens: 3, outputTokens: 4, requests: 1 } };
 const structuredAdapter = new AgentStreamAdapter({
@@ -56,11 +53,8 @@ const structuredAdapter = new AgentStreamAdapter({
   eventFactory: new AgentEventFactory('run-structured', 'op-structured'),
   emit: (event) => structuredEvents.push(event),
 });
-const structuredResult = await structuredAdapter.consume(structuredStream, {
-  onLegacyEvent: (event) => structuredLegacy.push(event),
-});
+const structuredResult = await structuredAdapter.consume(structuredStream);
 assert.equal(structuredResult.output, '开始检查完成');
 assert.equal(structuredEvents.some((event) => event.type === 'text.delta'), false);
-assert.deepEqual(structuredLegacy.map((event) => event.type), ['tool', 'tool_result']);
 
-console.log('streaming adapter tests passed: SDK events, legacy bridge, structured tool result, usage');
+console.log('streaming adapter tests passed: SDK events, structured tool result, usage');

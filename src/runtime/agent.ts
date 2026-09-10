@@ -19,53 +19,58 @@ import {
   type RunToolApprovalItem,
   type Session,
   type StreamedRunResult,
-} from '@openai/agents';
-import { z } from 'zod';
-import OpenAI from 'openai';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
+} from "@openai/agents";
+import { z } from "zod";
+import OpenAI from "openai";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import {
   listFiles,
   readFileRange,
   writeFileText,
   searchText,
   runCommand,
-} from '../tools/workspaceTools';
-import { EffectRecoveryRequiredError } from './errors';
+} from "../tools/workspaceTools";
+import { EffectRecoveryRequiredError } from "./errors";
 import {
   DefaultToolPolicy,
   type ToolPolicy,
   type ToolPolicyOverrides,
   toolResult,
   type ToolRisk,
-} from '../tools/toolContract';
-import { DefaultActionPolicy, type ActionPolicy } from '../policy/actionPolicy';
-import type { RequiredAgentTool } from '../policy/actionPolicy';
-import { WorkspaceScope, workspaceScopeFromRoots } from '../workspace/workspaceScope';
-import { MockPlcAdapter, type PlcAdapter } from '../plc/plcAdapter';
-import type { AuditEvent } from '../observability/audit';
-import { createIndustrialAgentTeam, type IndustrialAgentMode } from '../orchestration/agentRoles';
+} from "../tools/toolContract";
+import { DefaultActionPolicy, type ActionPolicy } from "../policy/actionPolicy";
+import type { RequiredAgentTool } from "../policy/actionPolicy";
+import {
+  WorkspaceScope,
+  workspaceScopeFromRoots,
+} from "../workspace/workspaceScope";
+import { MockPlcAdapter, type PlcAdapter } from "../plc/plcAdapter";
+import type { AuditEvent } from "../observability/audit";
+import {
+  createIndustrialAgentTeam,
+  type IndustrialAgentMode,
+} from "../orchestration/agentRoles";
 import {
   createAgentResult,
-  parseToolResult,
   type AgentResult,
   type ApprovalRequest as ProtocolApprovalRequest,
   type Artifact,
   type ToolResult,
   type UsageSummary,
-} from '../protocol/results';
-import { AgentStreamAdapter } from './streaming';
-import type { AgentEventFactory, AgentProtocolEvent } from '../protocol/events';
+} from "../protocol/results";
+import { AgentStreamAdapter } from "./streaming";
+import type { AgentEventFactory, AgentProtocolEvent } from "../protocol/events";
 import {
   industrialAgentOutputDefinition,
   parseIndustrialAgentOutput,
   type IndustrialAgentOutput,
   projectAgentOutput,
   AgentOutputValidationError,
-} from './output';
+} from "./output";
 
-export { inferRequiredTool } from '../policy/actionPolicy';
-export type { RequiredAgentTool } from '../policy/actionPolicy';
+export { inferRequiredTool } from "../policy/actionPolicy";
+export type { RequiredAgentTool } from "../policy/actionPolicy";
 
 // 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
 // 必须在模块加载时调用,运行时设置无效。
@@ -86,33 +91,27 @@ export interface AgentConfig {
   /** Host-authorized workspace roots. Relative paths use workspaceRoot. */
   workspaceRoots?: string[];
   /** Host-owned effect journal. It may return a previously committed result. */
-  executeEffect?: <T>(toolName: string, input: unknown, execute: () => Promise<T>) => Promise<T>;
+  executeEffect?: <T>(
+    toolName: string,
+    input: unknown,
+    execute: () => Promise<T>,
+  ) => Promise<T>;
   /** Policy is host-owned and must be enforced before side effects. */
   policy?: ToolPolicy;
   policyContext?: ToolPolicyOverrides;
   plcAdapter?: PlcAdapter;
-  audit?: (event: Omit<AuditEvent, 'id' | 'timestamp'>) => void | Promise<void>;
+  audit?: (event: Omit<AuditEvent, "id" | "timestamp">) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
   actionPolicy?: ActionPolicy;
 }
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
-export type AgentEvent =
-  | { type: 'delta'; text: string }
-  | { type: 'tool'; name: string }
-  /** 工具真正执行完(或被拒绝)的回执。UI 必须渲染它:部分网关在工具结果回喂后模型返回空文本 */
-  | { type: 'tool_result'; name: string; ok: boolean; summary: string };
-
 /**
  * 需要用户批准的工具被调用时,内核通过它向 UI 请求决定(宿主实现:发审批卡片,等点击)。
  */
-export type ApprovalRequester = (toolName: string, args: string) => Promise<boolean>;
-
-/** Stable, UI-safe description of a pending approval checkpoint. */
-/** Backward-compatible alias; the protocol owns the serialized shape. */
 export type ApprovalRequest = ProtocolApprovalRequest;
 
-export type AgentRunStatus = 'completed' | 'awaiting_approval' | 'cancelled';
+export type AgentRunStatus = "completed" | "awaiting_approval" | "cancelled";
 
 export interface AgentRunCheckpoint {
   state: string;
@@ -128,12 +127,10 @@ export interface AgentRunOptions {
   decisions?: Record<string, boolean>;
   /** Cancels model streaming and cooperative tool execution. */
   signal?: AbortSignal;
-  /** Omit for a durable external approval flow; provide for the legacy inline flow. */
-  requestApproval?: ApprovalRequester;
   /** Called whenever a resumable state is available or changes. */
   onCheckpoint?: (checkpoint: AgentRunCheckpoint) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
-  protocol?: {
+  protocol: {
     runId: string;
     operationId?: string;
     eventFactory?: AgentEventFactory;
@@ -154,51 +151,56 @@ export interface AgentRunResult {
 
 // ---------- 工具(策略/审计/设备适配器由宿主注入,工具合同保持稳定) ----------
 
-type ToolEffect = 'none' | 'filesystem' | 'process' | 'device';
+type ToolEffect = "none" | "filesystem" | "process" | "device";
 
 function toolArguments(raw: string | undefined): unknown {
   if (!raw) return {};
-  try { return JSON.parse(raw); } catch { return raw; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
-/** SDK tool outputs may arrive as strings, text parts, or structured values. */
-function toolOutputText(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value.map((part) => {
-      if (typeof part === 'string') return part;
-      if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
-        return (part as { text: string }).text;
-      }
-      return JSON.stringify(part ?? '');
-    }).join('');
-  }
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof (value as { text?: unknown }).text === 'string') {
-    return (value as { text: string }).text;
-  }
-  return JSON.stringify(value ?? '');
-}
-
-function audit(cfg: AgentConfig, event: Omit<AuditEvent, 'id' | 'timestamp'>): void {
+function audit(
+  cfg: AgentConfig,
+  event: Omit<AuditEvent, "id" | "timestamp">,
+): void {
   void Promise.resolve(cfg.audit?.(event)).catch(() => undefined);
 }
 
 function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
-  const context = { workspaceRoot: cfg.workspaceRoot, workspaceRoots: cfg.workspaceRoots, ...cfg.policyContext };
+  const context = {
+    workspaceRoot: cfg.workspaceRoot,
+    workspaceRoots: cfg.workspaceRoots,
+    ...cfg.policyContext,
+  };
   const input = defineToolInputGuardrail({
-    name: 'industrial-tool-policy',
+    name: "industrial-tool-policy",
     run: async ({ toolCall }) => {
       const call = toolCall as { name?: string; arguments?: string };
-      const name = call.name ?? 'unknown_tool';
-      const decision = policy.evaluate(name, toolArguments(call.arguments), context);
+      const name = call.name ?? "unknown_tool";
+      const decision = policy.evaluate(
+        name,
+        toolArguments(call.arguments),
+        context,
+      );
       audit(cfg, {
-        type: 'guardrail_evaluated', toolName: name, risk: decision.risk,
-        decision: decision.allowed ? 'allow' : 'deny',
-        metadata: { requiresApproval: decision.requiresApproval, reason: decision.reason },
+        type: "guardrail_evaluated",
+        toolName: name,
+        risk: decision.risk,
+        decision: decision.allowed ? "allow" : "deny",
+        metadata: {
+          requiresApproval: decision.requiresApproval,
+          reason: decision.reason,
+        },
       });
       return decision.allowed
         ? ToolGuardrailFunctionOutputFactory.allow(decision)
-        : ToolGuardrailFunctionOutputFactory.rejectContent(decision.reason ?? '工具调用被工控安全策略拒绝。', decision);
+        : ToolGuardrailFunctionOutputFactory.rejectContent(
+            decision.reason ?? "工具调用被工控安全策略拒绝。",
+            decision,
+          );
     },
   });
   // toolResult() validates and serializes every local result at construction
@@ -217,11 +219,14 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
 const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
 
 function parseOptionalInt(value: unknown): number | undefined {
-  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
-  if (typeof value === 'string') {
+  if (typeof value === "number")
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  if (typeof value === "string") {
     const trimmed = value.trim();
     // 只接受纯数字字符串;"None"/"null"/空串等一律视为未提供
-    return /^\d+$/.test(trimmed) && Number(trimmed) > 0 ? Number(trimmed) : undefined;
+    return /^\d+$/.test(trimmed) && Number(trimmed) > 0
+      ? Number(trimmed)
+      : undefined;
   }
   return undefined;
 }
@@ -229,103 +234,166 @@ function parseOptionalInt(value: unknown): number | undefined {
 function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
-  const workspace = workspaceScopeFromRoots(cfg.workspaceRoot, cfg.workspaceRoots);
+  const workspace = workspaceScopeFromRoots(
+    cfg.workspaceRoot,
+    cfg.workspaceRoots,
+  );
   const guardrails = buildToolGuardrails(cfg, policy);
-  const withEffect = <T>(toolName: string, input: unknown, risk: ToolRisk, execute: () => Promise<T>) => {
-    audit(cfg, { type: 'tool_requested', toolName, risk });
+  const withEffect = <T>(
+    toolName: string,
+    input: unknown,
+    risk: ToolRisk,
+    execute: () => Promise<T>,
+  ) => {
+    audit(cfg, { type: "tool_requested", toolName, risk });
     const run = () => execute();
     return cfg.executeEffect ? cfg.executeEffect(toolName, input, run) : run();
   };
-  const contract = <T>(data: T, risk: ToolRisk, effect: ToolEffect = 'none') =>
+  const contract = <T>(data: T, risk: ToolRisk, effect: ToolEffect = "none") =>
     toolResult({ ok: true, data, effect, risk });
-  const failed = (error: unknown, risk: ToolRisk, effect: ToolEffect = 'none') =>
-    toolResult({ ok: false, error: error instanceof Error ? error.message : String(error), effect, risk });
+  const failed = (
+    error: unknown,
+    risk: ToolRisk,
+    effect: ToolEffect = "none",
+  ) =>
+    toolResult({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      effect,
+      risk,
+    });
   const getIoTable = tool({
-    name: 'get_io_table',
-    description: '查询当前 PLC 项目的 I/O 变量表。',
+    name: "get_io_table",
+    description: "查询当前 PLC 项目的 I/O 变量表。",
     parameters: z.object({}),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: async () => {
-      try { return contract({ adapter: plc.id, variables: await plc.getIoTable() }, 'read'); }
-      catch (error) { return failed(error, 'read'); }
+      try {
+        return contract(
+          { adapter: plc.id, variables: await plc.getIoTable() },
+          "read",
+        );
+      } catch (error) {
+        return failed(error, "read");
+      }
     },
   });
 
   const readPlcVariables = tool({
-    name: 'read_plc_variables',
-    description: '从已配置的 PLC 适配器读取指定变量的当前值，只读且不改变设备状态。',
-    parameters: z.object({ names: z.array(z.string()).min(1).describe('要读取的 PLC 变量名') }),
+    name: "read_plc_variables",
+    description:
+      "从已配置的 PLC 适配器读取指定变量的当前值，只读且不改变设备状态。",
+    parameters: z.object({
+      names: z.array(z.string()).min(1).describe("要读取的 PLC 变量名"),
+    }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: async ({ names }) => {
-      try { return contract({ adapter: plc.id, variables: await plc.readVariables(names) }, 'read'); }
-      catch (error) { return failed(error, 'read'); }
+      try {
+        return contract(
+          { adapter: plc.id, variables: await plc.readVariables(names) },
+          "read",
+        );
+      } catch (error) {
+        return failed(error, "read");
+      }
     },
   });
 
   const validateStCode = tool({
-    name: 'validate_st_code',
-    description: '校验一段 IEC 61131-3 ST 代码，返回校验结果。参数 code 为完整 ST 源码。',
-    parameters: z.object({ code: z.string().describe('完整 ST 源码') }),
+    name: "validate_st_code",
+    description:
+      "校验一段 IEC 61131-3 ST 代码，返回校验结果。参数 code 为完整 ST 源码。",
+    parameters: z.object({ code: z.string().describe("完整 ST 源码") }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: async ({ code }) => {
-      if (!code.toUpperCase().includes('END_PROGRAM')) {
-        return toolResult({ ok: false, data: { errors: ['缺少 END_PROGRAM 结束标记'] }, effect: 'none', risk: 'plan' });
+      if (!code.toUpperCase().includes("END_PROGRAM")) {
+        return toolResult({
+          ok: false,
+          data: { errors: ["缺少 END_PROGRAM 结束标记"] },
+          effect: "none",
+          risk: "plan",
+        });
       }
-      if (code.includes('TON') && !code.includes('T#')) {
-        return toolResult({ ok: false, data: { errors: ['使用了 TON 但未发现时间字面量(如 T#5s)'] }, effect: 'none', risk: 'plan' });
+      if (code.includes("TON") && !code.includes("T#")) {
+        return toolResult({
+          ok: false,
+          data: { errors: ["使用了 TON 但未发现时间字面量(如 T#5s)"] },
+          effect: "none",
+          risk: "plan",
+        });
       }
-      return contract({ errors: [] }, 'plan');
+      return contract({ errors: [] }, "plan");
     },
   });
 
   // 会往磁盘写文件 → needsApproval:SDK 在真正执行前中断,由 UI 批准/拒绝
   const exportStProgram = tool({
-    name: 'export_st_program',
+    name: "export_st_program",
     description:
       '把一段完整的 IEC 61131-3 ST 程序导出为 .st 文件保存到本地(用户要求"导出/保存/落地文件"时使用)。',
     parameters: z.object({
-      code: z.string().describe('完整 ST 源码(PROGRAM ... END_PROGRAM)'),
+      code: z.string().describe("完整 ST 源码(PROGRAM ... END_PROGRAM)"),
     }),
     needsApproval: true,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
-    execute: ({ code }) => withEffect('export_st_program', { code }, 'write', async () => {
-      const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
-      const name = m?.[1] ?? `program_${Date.now()}`;
-      await fs.mkdir(cfg.exportDir, { recursive: true });
-      const file = path.join(cfg.exportDir, `${name}.st`);
-      await fs.writeFile(file, code, 'utf8');
-      return contract({ file }, 'write', 'filesystem');
-    }),
+    execute: ({ code }) =>
+      withEffect("export_st_program", { code }, "write", async () => {
+        const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
+        const name = m?.[1] ?? `program_${Date.now()}`;
+        await fs.mkdir(cfg.exportDir, { recursive: true });
+        const file = path.join(cfg.exportDir, `${name}.st`);
+        await fs.writeFile(file, code, "utf8");
+        return contract({ file }, "write", "filesystem");
+      }),
   });
 
   // ---- 通用工作区文件工具(作用域锁定在当前工作区根目录) ----
-  const guard = (fn: () => Promise<string>, risk: ToolRisk, effect: ToolEffect = 'none'): Promise<string> =>
+  const guard = (
+    fn: () => Promise<string>,
+    risk: ToolRisk,
+    effect: ToolEffect = "none",
+  ): Promise<string> =>
     fn().catch((e: unknown) => {
       if (e instanceof EffectRecoveryRequiredError) throw e;
       return failed(e, risk, effect);
     });
 
   const listFilesTool = tool({
-    name: 'list_files',
-    description: '列出当前工作区内的文件(相对根目录,自动跳过 node_modules/.git/dist 等)。参数 dir 为相对子目录,默认根目录。',
-    parameters: z.object({ dir: z.string().optional().describe('相对子目录,留空表示工作区根') }),
+    name: "list_files",
+    description:
+      "列出当前工作区内的文件(相对根目录,自动跳过 node_modules/.git/dist 等)。参数 dir 为相对子目录,默认根目录。",
+    parameters: z.object({
+      dir: z.string().optional().describe("相对子目录,留空表示工作区根"),
+    }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ dir }) =>
-      guard(async () => contract({ files: await listFiles(workspace.primaryRoot, dir ?? '.') }, 'read'), 'read'),
+      guard(
+        async () =>
+          contract(
+            { files: await listFiles(workspace.primaryRoot, dir ?? ".") },
+            "read",
+          ),
+        "read",
+      ),
   });
 
   const readFileTool = tool({
-    name: 'read_file',
-    description: '读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。',
+    name: "read_file",
+    description:
+      "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。",
     parameters: z.object({
-      path: z.string().describe('相对工作区的文件路径'),
-      startLine: optionalIntParam.describe('起始行(1 起),整数;不需要分段时省略,不要传 null/None'),
-      endLine: optionalIntParam.describe('结束行(含),整数;不需要分段时省略,不要传 null/None'),
+      path: z.string().describe("相对工作区的文件路径"),
+      startLine: optionalIntParam.describe(
+        "起始行(1 起),整数;不需要分段时省略,不要传 null/None",
+      ),
+      endLine: optionalIntParam.describe(
+        "结束行(含),整数;不需要分段时省略,不要传 null/None",
+      ),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
@@ -336,30 +404,44 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
         const s = parseOptionalInt(startLine) ?? 1;
         const e = parseOptionalInt(endLine);
         const r = await readFileRange(target.root, target.relativePath, s, e);
-        return contract({ totalLines: r.totalLines, content: r.text }, 'read');
-      }, 'read'),
+        return contract({ totalLines: r.totalLines, content: r.text }, "read");
+      }, "read"),
   });
 
   const searchFilesTool = tool({
-    name: 'search_files',
-    description: '在工作区文件里做文本搜索,返回 "相对路径:行号: 内容"。支持 glob 文件名过滤(如 *.st)与 isRegex 正则。',
+    name: "search_files",
+    description:
+      '在工作区文件里做文本搜索,返回 "相对路径:行号: 内容"。支持 glob 文件名过滤(如 *.st)与 isRegex 正则。',
     parameters: z.object({
-      text: z.string().describe('要搜索的字面量或正则'),
-      glob: z.string().optional().describe('按文件名过滤,如 *.st'),
-      isRegex: z.boolean().optional().describe('是否按正则解析 text'),
+      text: z.string().describe("要搜索的字面量或正则"),
+      glob: z.string().optional().describe("按文件名过滤,如 *.st"),
+      isRegex: z.boolean().optional().describe("是否按正则解析 text"),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ text, glob, isRegex }) =>
-      guard(async () => contract({ matches: await searchText(workspace.primaryRoot, text, { glob, isRegex }) }, 'read'), 'read'),
+      guard(
+        async () =>
+          contract(
+            {
+              matches: await searchText(workspace.primaryRoot, text, {
+                glob,
+                isRegex,
+              }),
+            },
+            "read",
+          ),
+        "read",
+      ),
   });
 
   const writeFileTool = tool({
-    name: 'write_file',
-    description: '把文本内容写入已授权工作区内的文件(会覆盖)。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。属于写操作,执行前需要用户在界面批准。',
+    name: "write_file",
+    description:
+      "把文本内容写入已授权工作区内的文件(会覆盖)。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。属于写操作,执行前需要用户在界面批准。",
     parameters: z.object({
-      path: z.string().describe('相对工作区的文件路径'),
-      content: z.string().describe('要写入的完整文本内容'),
+      path: z.string().describe("相对工作区的文件路径"),
+      content: z.string().describe("要写入的完整文本内容"),
     }),
     needsApproval: true,
     inputGuardrails: guardrails.input,
@@ -368,68 +450,101 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
       guard(
         async () => {
           const target = workspace.resolve(p);
-          return withEffect('write_file', {
-            path: target.relativePath,
-            workspaceRoot: target.root,
-            content,
-          }, 'write', async () =>
-            contract(await writeFileText(target.root, target.relativePath, content), 'write', 'filesystem'),
+          return withEffect(
+            "write_file",
+            {
+              path: target.relativePath,
+              workspaceRoot: target.root,
+              content,
+            },
+            "write",
+            async () =>
+              contract(
+                await writeFileText(target.root, target.relativePath, content),
+                "write",
+                "filesystem",
+              ),
           );
         },
-        'write',
-        'filesystem',
+        "write",
+        "filesystem",
       ),
   });
 
   const runCommandTool = tool({
-    name: 'run_command',
-    description: '在工作区根目录执行一条 shell 命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。',
-    parameters: z.object({ command: z.string().describe('要执行的命令行') }),
+    name: "run_command",
+    description:
+      "在工作区根目录执行一条 shell 命令(60 秒超时,输出截断)。属于危险操作,执行前需要用户批准。",
+    parameters: z.object({ command: z.string().describe("要执行的命令行") }),
     needsApproval: true,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ command }, _context, details) =>
       guard(
-        () => withEffect('run_command', { command }, 'execute', async () =>
-          contract(await runCommand(workspace.primaryRoot, command, 60_000, details?.signal), 'execute', 'process'),
-        ),
-        'execute',
-        'process',
+        () =>
+          withEffect("run_command", { command }, "execute", async () =>
+            contract(
+              await runCommand(
+                workspace.primaryRoot,
+                command,
+                60_000,
+                details?.signal,
+              ),
+              "execute",
+              "process",
+            ),
+          ),
+        "execute",
+        "process",
       ),
   });
 
-  const allTools = [getIoTable, readPlcVariables, validateStCode, exportStProgram, listFilesTool, readFileTool, searchFilesTool, writeFileTool, runCommandTool];
-  return requiredTool ? allTools.filter((candidate) => candidate.name === requiredTool) : allTools;
+  const allTools = [
+    getIoTable,
+    readPlcVariables,
+    validateStCode,
+    exportStProgram,
+    listFilesTool,
+    readFileTool,
+    searchFilesTool,
+    writeFileTool,
+    runCommandTool,
+  ];
+  return requiredTool
+    ? allTools.filter((candidate) => candidate.name === requiredTool)
+    : allTools;
 }
 
 const SYSTEM_PROMPT =
-  '你是工控行业的 PLC 编程助手，精通 IEC 61131-3。' +
-  '编写程序前先调用 get_io_table 查询变量表，只使用表中已有的变量名。' +
-  '生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，' +
-  '直到通过为止，最后把通过校验的代码展示给用户。' +
+  "你是工控行业的 PLC 编程助手，精通 IEC 61131-3。" +
+  "编写程序前先调用 get_io_table 查询变量表，只使用表中已有的变量名。" +
+  "生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，" +
+  "直到通过为止，最后把通过校验的代码展示给用户。" +
   '当用户明确要求"导出/保存为文件"时，调用 export_st_program。' +
-  '你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、' +
-  'search_files 搜索代码、write_file 写文件、run_command 执行命令' +
-  '（write_file 和 run_command 会先征求用户批准）。' +
-  '当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；' +
-  '只有收到工具成功回执后，才能在最终结果中报告写入完成。' +
-  '任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，' +
-  '不允许调用完工具不给结论就结束。回答要简洁，用中文。';
+  "你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、" +
+  "search_files 搜索代码、write_file 写文件、run_command 执行命令" +
+  "（write_file 和 run_command 会先征求用户批准）。" +
+  "当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；" +
+  "只有收到工具成功回执后，才能在最终结果中报告写入完成。" +
+  "任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，" +
+  "不允许调用完工具不给结论就结束。回答要简洁，用中文。";
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
 /** 网关连续返回空 completion(无任何内容/工具)时抛出,用于截停 SDK 的无限重试 */
 export class EmptyGatewayResponseError extends Error {
   constructor() {
-    super('模型连续返回空响应:网关在收到工具结果(或首次请求)后返回了"空内容完成"。已自动停止重试。');
-    this.name = 'EmptyGatewayResponseError';
+    super(
+      '模型连续返回空响应:网关在收到工具结果(或首次请求)后返回了"空内容完成"。已自动停止重试。',
+    );
+    this.name = "EmptyGatewayResponseError";
   }
 }
 
 export class AgentActionVerificationError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'AgentActionVerificationError';
+    this.name = "AgentActionVerificationError";
   }
 }
 
@@ -438,19 +553,22 @@ export async function verifyWorkspaceWrite(
   relativePath: string,
   expectedContent: string,
 ): Promise<Artifact> {
-  const scope = workspaceRoot instanceof WorkspaceScope
-    ? workspaceRoot
-    : new WorkspaceScope(workspaceRoot ? [workspaceRoot] : []);
+  const scope =
+    workspaceRoot instanceof WorkspaceScope
+      ? workspaceRoot
+      : new WorkspaceScope(workspaceRoot ? [workspaceRoot] : []);
   const file = scope.resolve(relativePath).absolutePath;
-  const actual = await fs.readFile(file, 'utf8').catch(() => undefined);
+  const actual = await fs.readFile(file, "utf8").catch(() => undefined);
   if (actual !== expectedContent) {
-    throw new AgentActionVerificationError(`工具 write_file 返回成功，但文件校验失败: ${relativePath}`);
+    throw new AgentActionVerificationError(
+      `工具 write_file 返回成功，但文件校验失败: ${relativePath}`,
+    );
   }
   return {
-    kind: 'file',
+    kind: "file",
     name: path.basename(file),
     uri: file,
-    mimeType: 'text/plain',
+    mimeType: "text/plain",
     metadata: { bytes: Buffer.byteLength(actual) },
   };
 }
@@ -482,19 +600,22 @@ class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     this.requiredToolOnce = undefined;
     const effectiveRequest = requiredTool
       ? {
-        ...request,
-        modelSettings: {
-          ...request.modelSettings,
-          toolChoice: requiredTool,
-        },
-      }
+          ...request,
+          modelSettings: {
+            ...request.modelSettings,
+            toolChoice: requiredTool,
+          },
+        }
       : request;
     let sawOutput = false;
-    for await (const ev of super.getStreamedResponse(effectiveRequest) as AsyncIterable<any>) {
+    for await (const ev of super.getStreamedResponse(
+      effectiveRequest,
+    ) as AsyncIterable<any>) {
       // chat_completions 下 SDK 只透出 response_started/model/output_text_delta,没有终结的
       // model_response 事件,所以直接看原始 chunk 的 delta:有正文或 tool_calls 就不算空回复
-      if (ev?.type === 'output_text_delta') sawOutput = true;
-      const delta = ev?.event?.choices?.[0]?.delta ?? ev?.providerData?.choices?.[0]?.delta;
+      if (ev?.type === "output_text_delta") sawOutput = true;
+      const delta =
+        ev?.event?.choices?.[0]?.delta ?? ev?.providerData?.choices?.[0]?.delta;
       if (delta && (delta.content || delta.tool_calls)) sawOutput = true;
       const out = ev?.response?.output;
       if (Array.isArray(out) && out.length > 0) sawOutput = true;
@@ -518,44 +639,58 @@ export function setAgentLogger(fn: (line: string) => void): void {
 
 function summarizeOutgoing(body: unknown): string {
   try {
-    const j = (typeof body === 'string' ? JSON.parse(body) : body) as {
+    const j = (typeof body === "string" ? JSON.parse(body) : body) as {
       model?: string;
       stream?: boolean;
-      messages?: { role: string; content?: unknown; tool_calls?: { function?: { name?: string } }[] }[];
+      messages?: {
+        role: string;
+        content?: unknown;
+        tool_calls?: { function?: { name?: string } }[];
+      }[];
       tools?: { function?: { name?: string } }[];
       tool_choice?: unknown;
       response_format?: { type?: string; json_schema?: { name?: string } };
     };
     const chain = (j.messages ?? [])
       .map((m) =>
-        m.role === 'assistant' && m.tool_calls?.length
-          ? `assistant(tool_calls:${m.tool_calls.map((t) => t.function?.name).join('|')})`
-          : `${m.role}(len=${typeof m.content === 'string' ? m.content.length : '-'})`,
+        m.role === "assistant" && m.tool_calls?.length
+          ? `assistant(tool_calls:${m.tool_calls.map((t) => t.function?.name).join("|")})`
+          : `${m.role}(len=${typeof m.content === "string" ? m.content.length : "-"})`,
       )
-      .join(' ');
-    const tools = (j.tools ?? []).map((tool) => tool.function?.name).filter(Boolean).join('|') || '-';
-    const choice = typeof j.tool_choice === 'string'
-      ? j.tool_choice
-      : j.tool_choice ? JSON.stringify(j.tool_choice) : '-';
+      .join(" ");
+    const tools =
+      (j.tools ?? [])
+        .map((tool) => tool.function?.name)
+        .filter(Boolean)
+        .join("|") || "-";
+    const choice =
+      typeof j.tool_choice === "string"
+        ? j.tool_choice
+        : j.tool_choice
+          ? JSON.stringify(j.tool_choice)
+          : "-";
     const format = j.response_format?.type
-      ? `${j.response_format.type}${j.response_format.json_schema?.name ? `:${j.response_format.json_schema.name}` : ''}`
-      : '-';
-    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} format=${format} ${chain}`.slice(0, 900);
+      ? `${j.response_format.type}${j.response_format.json_schema?.name ? `:${j.response_format.json_schema.name}` : ""}`
+      : "-";
+    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} format=${format} ${chain}`.slice(
+      0,
+      900,
+    );
   } catch {
-    return '(请求体无法解析)';
+    return "(请求体无法解析)";
   }
 }
 
 function makeLoggingFetch(): unknown {
   return async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
-    const isChat = url.includes('/chat/completions');
+    const isChat = url.includes("/chat/completions");
     if (isChat) agentLog(`[req] ${summarizeOutgoing(init?.body)}`);
     const resp = await fetch(input as never, init as never);
     if (!isChat || !resp.body) return resp;
     const [userSide, tap] = resp.body.tee(); // 原样透传给 SDK,旁路只做解析统计
     void (async () => {
-      let text = '';
+      let text = "";
       try {
         const reader = tap.getReader();
         for (;;) {
@@ -570,15 +705,18 @@ function makeLoggingFetch(): unknown {
       let contentChars = 0;
       let reasoningChars = 0;
       let toolCallDeltas = 0;
-      let finish = '-';
-      let errorLine = '';
+      let finish = "-";
+      let errorLine = "";
       // 收集模型实际生成的工具参数分片,按 index 重组,定位畸形 JSON 的确切原文
-      const toolCallArgs = new Map<number, { id?: string; name?: string; args: string }>();
-      for (const line of text.split('\n')) {
+      const toolCallArgs = new Map<
+        number,
+        { id?: string; name?: string; args: string }
+      >();
+      for (const line of text.split("\n")) {
         const s = line.trim();
-        if (!s.startsWith('data:')) continue;
+        if (!s.startsWith("data:")) continue;
         const payload = s.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
+        if (!payload || payload === "[DONE]") continue;
         try {
           const j = JSON.parse(payload) as {
             error?: unknown;
@@ -596,38 +734,50 @@ function makeLoggingFetch(): unknown {
               };
             }[];
           };
-          if (j.error) { errorLine = JSON.stringify(j.error).slice(0, 300); continue; }
+          if (j.error) {
+            errorLine = JSON.stringify(j.error).slice(0, 300);
+            continue;
+          }
           const c = j.choices?.[0];
           if (c?.finish_reason) finish = c.finish_reason;
           const d = c?.delta ?? {};
-          if (typeof d.content === 'string') contentChars += d.content.length;
+          if (typeof d.content === "string") contentChars += d.content.length;
           const rz = (d.reasoning_content ?? d.reasoning) as string | undefined;
-          if (typeof rz === 'string') reasoningChars += rz.length;
+          if (typeof rz === "string") reasoningChars += rz.length;
           if (Array.isArray(d.tool_calls)) {
             toolCallDeltas += d.tool_calls.length;
             for (const tc of d.tool_calls) {
-              const idx = typeof tc?.index === 'number' ? tc.index : 0;
-              const cur = toolCallArgs.get(idx) ?? { args: '' };
-              if (typeof tc?.id === 'string' && tc.id) cur.id = tc.id;
-              if (typeof tc?.function?.name === 'string' && tc.function.name) cur.name = tc.function.name;
-              if (typeof tc?.function?.arguments === 'string') cur.args += tc.function.arguments;
+              const idx = typeof tc?.index === "number" ? tc.index : 0;
+              const cur = toolCallArgs.get(idx) ?? { args: "" };
+              if (typeof tc?.id === "string" && tc.id) cur.id = tc.id;
+              if (typeof tc?.function?.name === "string" && tc.function.name)
+                cur.name = tc.function.name;
+              if (typeof tc?.function?.arguments === "string")
+                cur.args += tc.function.arguments;
               toolCallArgs.set(idx, cur);
             }
           }
-        } catch { /* 非 JSON 行忽略 */ }
+        } catch {
+          /* 非 JSON 行忽略 */
+        }
       }
       agentLog(
-        `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}${errorLine ? ' ERROR=' + errorLine : ''}`,
+        `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}${errorLine ? " ERROR=" + errorLine : ""}`,
       );
       if (toolCallArgs.size > 0) {
         // 打印重组后的工具参数原文,定位 InvalidToolInputError 的畸形处
         for (const [idx, call] of toolCallArgs) {
-          const snippet = call.args.length > 500 ? call.args.slice(0, 500) + '…' : call.args;
-          agentLog(`[toolargs] #${idx} name=${call.name ?? '?'} id=${call.id ?? '-'} args=${JSON.stringify(snippet)}`);
+          const snippet =
+            call.args.length > 500 ? call.args.slice(0, 500) + "…" : call.args;
+          agentLog(
+            `[toolargs] #${idx} name=${call.name ?? "?"} id=${call.id ?? "-"} args=${JSON.stringify(snippet)}`,
+          );
         }
       }
       if (contentChars === 0 && reasoningChars === 0 && toolCallDeltas === 0) {
-        agentLog(`[resp] 空完成原文(尾部): ${text.slice(-500).replace(/\n/g, '⏎')}`);
+        agentLog(
+          `[resp] 空完成原文(尾部): ${text.slice(-500).replace(/\n/g, "⏎")}`,
+        );
       }
     })();
     return new Response(userSide, {
@@ -645,7 +795,11 @@ function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
   const key = `${cfg.baseUrl}|${cfg.apiKey}|${cfg.model}`;
   let m = modelCache.get(key);
   if (!m) {
-    const client = new OpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: makeLoggingFetch() as never });
+    const client = new OpenAI({
+      baseURL: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      fetch: makeLoggingFetch() as never,
+    });
     m = new GatewayGuardedModel(client, cfg.model);
     modelCache.set(key, m);
   }
@@ -655,34 +809,11 @@ function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
 // ---------- 一轮对话:流式执行 + 会话持久化 + 审批中断/恢复 ----------
 
 /** 本轮 token 用量(从模型响应的 usage 汇总;网关不返回 usage 字段时全为 0) */
-/** Backward-compatible protocol alias used by runtime/run store. */
+/** Protocol usage alias shared by runtime and run store. */
 export type TurnUsage = UsageSummary;
 
 /** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
 export const MAX_TURNS = 10;
-
-/**
- * 跑完一整轮用户消息:
- * - 历史由 session 自动读写(不再手工传 history 数组)
- * - 遇到 needsApproval 工具 → requestApproval 等 UI 决定 → approve/reject 后带 state 续跑
- * - 超 MAX_TURNS 轮抛 MaxTurnsExceededError
- */
-export async function runAgentTurn(
-  cfg: AgentConfig,
-  session: Session,
-  userText: string,
-  onEvent: (ev: AgentEvent) => void,
-  requestApproval: ApprovalRequester,
-): Promise<Pick<AgentRunResult, 'result' | 'output' | 'usage'>> {
-  const result = await runAgent(cfg, session, userText, onEvent, {
-    requestApproval,
-  });
-  return {
-    result: result.result,
-    output: result.output,
-    usage: result.usage,
-  };
-}
 
 /**
  * Product-facing execution entry point. The returned `state` is an SDK-native
@@ -694,53 +825,73 @@ export async function runAgent(
   cfg: AgentConfig,
   session: Session,
   userText: string,
-  onEvent: (ev: AgentEvent) => void,
-  options: AgentRunOptions = {},
+  options: AgentRunOptions,
 ): Promise<AgentRunResult> {
   const actionPolicy = cfg.actionPolicy ?? new DefaultActionPolicy();
   const requiredTool = actionPolicy.requiredToolFor(userText);
-  const forceToolChoice = requiredTool && !options.initialState ? { toolChoice: requiredTool } : undefined;
-  const workspace = workspaceScopeFromRoots(cfg.workspaceRoot, cfg.workspaceRoots);
+  const forceToolChoice =
+    requiredTool && !options.initialState
+      ? { toolChoice: requiredTool }
+      : undefined;
+  const workspace = workspaceScopeFromRoots(
+    cfg.workspaceRoot,
+    cfg.workspaceRoots,
+  );
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
-  const gatewayActionTurn = model instanceof GatewayGuardedModel && requiredTool !== undefined;
-  if (model instanceof GatewayGuardedModel && requiredTool && !options.initialState) {
+  const gatewayActionTurn =
+    model instanceof GatewayGuardedModel && requiredTool !== undefined;
+  if (
+    model instanceof GatewayGuardedModel &&
+    requiredTool &&
+    !options.initialState
+  ) {
     model.requireToolOnce(requiredTool);
   }
   const tools = buildTools(cfg, requiredTool);
-  const agent = cfg.orchestration === 'team'
-    ? (() => {
-      const team = createIndustrialAgentTeam(model, tools, {
-        executorStructuredOutput: !gatewayActionTurn,
-        executorModelSettings: forceToolChoice,
-      });
-      // Explicit side effects bypass planning and enter the controlled executor
-      // directly. Planning remains the default for read-only/analysis requests.
-      return requiredTool ? team.executor : team.planner;
-    })()
-    : new Agent({
-      name: 'PLC 编程助手',
-      model,
-      instructions: SYSTEM_PROMPT,
-      tools,
-      ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
-      // Some OpenAI-compatible gateways cannot honor response_format and
-      // tool_choice in the same request. Action turns use text internally;
-      // the host still creates the canonical structured result below.
-      ...(gatewayActionTurn ? {} : { outputType: industrialAgentOutputDefinition.schema }),
-    });
+  const agent =
+    cfg.orchestration === "team"
+      ? (() => {
+          const team = createIndustrialAgentTeam(model, tools, {
+            executorStructuredOutput: !gatewayActionTurn,
+            executorModelSettings: forceToolChoice,
+          });
+          // Explicit side effects bypass planning and enter the controlled executor
+          // directly. Planning remains the default for read-only/analysis requests.
+          return requiredTool ? team.executor : team.planner;
+        })()
+      : new Agent({
+          name: "PLC 编程助手",
+          model,
+          instructions: SYSTEM_PROMPT,
+          tools,
+          ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
+          // Some OpenAI-compatible gateways cannot honor response_format and
+          // tool_choice in the same request. Action turns use text internally;
+          // the host still creates the canonical structured result below.
+          ...(gatewayActionTurn
+            ? {}
+            : { outputType: industrialAgentOutputDefinition.schema }),
+        });
 
   const runner = new Runner();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
-  let output = '';
+  let output = "";
   let structuredOutput: IndustrialAgentOutput | undefined;
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
   const toolCalls = new Map<string, { name: string; args: string }>();
-  const toolResults = new Map<string, { name: string; args: string; result: ToolResult }>();
+  const toolResults = new Map<
+    string,
+    { name: string; args: string; result: ToolResult }
+  >();
 
-  const recordToolCall = (name: string, callId: string | undefined, args: string): void => {
+  const recordToolCall = (
+    name: string,
+    callId: string | undefined,
+    args: string,
+  ): void => {
     const key = callId || `${name}:${toolCalls.size}`;
     toolCalls.set(key, { name, args });
   };
@@ -751,12 +902,51 @@ export async function runAgent(
     result: ToolResult | undefined,
   ): void => {
     if (!result) return;
-    const key = callId && toolCalls.has(callId)
-      ? callId
-      : [...toolCalls.keys()].reverse().find((candidate) =>
-        !toolResults.has(candidate) && (name === 'tool' || toolCalls.get(candidate)?.name === name));
+    const key =
+      callId && toolCalls.has(callId)
+        ? callId
+        : [...toolCalls.keys()]
+            .reverse()
+            .find(
+              (candidate) =>
+                !toolResults.has(candidate) &&
+                (name === "tool" || toolCalls.get(candidate)?.name === name),
+            );
     const call = key ? toolCalls.get(key) : undefined;
-    if (key && call) toolResults.set(key, { ...call, name: name === 'tool' ? call.name : name, result });
+    if (key && call)
+      toolResults.set(key, {
+        ...call,
+        name: name === "tool" ? call.name : name,
+        result,
+      });
+  };
+
+  const observeProtocolEvent = (event: AgentProtocolEvent): void => {
+    const payload = event.payload as Record<string, unknown>;
+    if (event.type === "text.delta") {
+      if (typeof payload.text === "string") output += payload.text;
+      return;
+    }
+    if (event.type === "tool.started") {
+      const name =
+        typeof payload.toolName === "string" ? payload.toolName : "tool";
+      const callId =
+        typeof payload.callId === "string" ? payload.callId : undefined;
+      const args =
+        typeof payload.arguments === "string" ? payload.arguments : "";
+      if (callId) toolNameByCallId.set(callId, name);
+      recordToolCall(name, callId, args);
+      return;
+    }
+    if (event.type === "tool.completed") {
+      const callId =
+        typeof payload.callId === "string" ? payload.callId : undefined;
+      const name =
+        typeof payload.toolName === "string"
+          ? payload.toolName
+          : (toolNameByCallId.get(callId ?? "") ?? "tool");
+      recordToolResult(name, callId, payload.result as ToolResult | undefined);
+    }
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
@@ -766,139 +956,51 @@ export async function runAgent(
       if (call.name !== requiredTool || !call.result.ok) continue;
       // Every required side-effect must have a successful structured tool
       // result. File writes additionally get a read-back byte-for-byte check.
-      if (requiredTool !== 'write_file') continue;
+      if (requiredTool !== "write_file") continue;
       let args: { path?: unknown; content?: unknown };
       try {
         args = JSON.parse(call.args) as { path?: unknown; content?: unknown };
       } catch {
         continue;
       }
-      if (typeof args.path !== 'string' || typeof args.content !== 'string') continue;
-      verified.push(await verifyWorkspaceWrite(workspace, args.path, args.content));
+      if (typeof args.path !== "string" || typeof args.content !== "string")
+        continue;
+      verified.push(
+        await verifyWorkspaceWrite(workspace, args.path, args.content),
+      );
     }
-    const successful = [...toolResults.values()].some((call) => call.name === requiredTool && call.result.ok);
-    if (!successful || (requiredTool === 'write_file' && !verified.length)) {
-      throw new AgentActionVerificationError(`用户明确要求执行 ${requiredTool}，但本轮没有成功执行并确认该工具`);
+    const successful = [...toolResults.values()].some(
+      (call) => call.name === requiredTool && call.result.ok,
+    );
+    if (!successful || (requiredTool === "write_file" && !verified.length)) {
+      throw new AgentActionVerificationError(
+        `用户明确要求执行 ${requiredTool}，但本轮没有成功执行并确认该工具`,
+      );
     }
     return verified;
   };
 
-  const summarizeToolOutput = (out: unknown): { ok: boolean; summary: string } => {
-    const flat = toolOutputText(out);
-    let ok = true;
-    try {
-      const parsed = JSON.parse(flat) as { ok?: boolean; error?: unknown } | unknown;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const obj = parsed as { ok?: boolean; error?: unknown };
-        ok = obj.ok !== false && obj.error === undefined;
-      }
-    } catch {
-      // 非 JSON(如 SDK 的拒绝文案 "user rejected tool call")
-      ok = !/reject|denied|拒绝|失败|错误|未返回|不允许/i.test(flat);
-    }
-    const summary = flat.length > 200 ? flat.slice(0, 200) + '…' : flat;
-    return { ok, summary };
-  };
+  // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
+  const protocolAdapter = new AgentStreamAdapter({
+    runId: options.protocol.runId,
+    operationId: options.protocol.operationId,
+    structuredOutput: !gatewayActionTurn,
+    eventFactory: options.protocol.eventFactory,
+    emit: (event) => {
+      observeProtocolEvent(event);
+      options.protocol.onEvent(event);
+    },
+  });
 
-  const parseObservedToolResult = (out: unknown): ToolResult | undefined => {
-    const flat = toolOutputText(out);
-    try {
-      return parseToolResult(JSON.parse(flat));
-    } catch {
-      return undefined;
-    }
-  };
-
-  const legacyPump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
+  const pump = async (
+    stream: StreamedRunResult<any, any>,
+  ): Promise<"done" | "empty-bailed"> => {
     let bailed = false;
     try {
-      for await (const event of stream) {
-        if (event.type === 'raw_model_stream_event') {
-          if (gatewayActionTurn) {
-            const data = event.data as { type?: string; delta?: unknown } | undefined;
-            const text = data?.type === 'output_text_delta' && typeof data.delta === 'string' ? data.delta : '';
-            if (text) {
-              output += text;
-              onEvent({ type: 'delta', text });
-            }
-          }
-        } else if (event.type === 'run_item_stream_event') {
-          if (event.item.type === 'tool_call_item') {
-            const raw = event.item.rawItem as { name?: string; callId?: string; arguments?: string } | undefined;
-            if (raw?.callId && raw.name) toolNameByCallId.set(raw.callId, raw.name);
-            recordToolCall(raw?.name ?? 'tool', raw?.callId, raw?.arguments ?? '');
-            onEvent({ type: 'tool', name: raw?.name ?? 'tool' });
-          } else if (event.item.type === 'tool_call_output_item') {
-            // 工具已执行完(或审批被拒),把回执透出给 UI —— 即使随后模型不再返回文本,用户也能看到成败
-            const raw = event.item.rawItem as { name?: string; callId?: string } | undefined;
-            const name = raw?.name || toolNameByCallId.get(raw?.callId ?? '') || 'tool';
-            const toolOutput = (event.item as { output?: unknown }).output;
-            const { ok, summary } = summarizeToolOutput(toolOutput);
-            recordToolResult(name, raw?.callId, parseObservedToolResult(toolOutput));
-            onEvent({ type: 'tool_result', name, ok, summary });
-          }
-        }
-      }
-    } catch (e) {
-      // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
-      if (!(e instanceof EmptyGatewayResponseError)) throw e;
-      bailed = true;
-    }
-    // RunState owns aggregate usage and survives serialization. Reading it here
-    // avoids double-counting raw responses after a durable resume.
-    usage.requests = stream.state.usage.requests;
-    usage.inputTokens = stream.state.usage.inputTokens;
-    usage.outputTokens = stream.state.usage.outputTokens;
-    return bailed ? 'empty-bailed' : 'done';
-  };
-
-  const protocolAdapter = options.protocol
-    ? new AgentStreamAdapter({
-      runId: options.protocol.runId,
-      operationId: options.protocol.operationId,
-      structuredOutput: !gatewayActionTurn,
-      eventFactory: options.protocol.eventFactory,
-      emit: options.protocol.onEvent,
-    })
-    : undefined;
-
-  const pump = async (stream: StreamedRunResult<any, any>): Promise<'done' | 'empty-bailed'> => {
-    if (!protocolAdapter) {
-      const outcome = await legacyPump(stream);
-      if (stream.finalOutput !== undefined) {
-        structuredOutput = gatewayActionTurn
-          ? {
-            message: typeof stream.finalOutput === 'string' ? stream.finalOutput : String(stream.finalOutput ?? ''),
-            diagnostics: [],
-            artifacts: [],
-            data: null,
-          }
-          : parseIndustrialAgentOutput(stream.finalOutput);
-        if (!gatewayActionTurn) {
-          output = projectAgentOutput(industrialAgentOutputDefinition, structuredOutput).text;
-        }
-      }
-      return outcome;
-    }
-    let bailed = false;
-    try {
-      const adapted = await protocolAdapter.consume(stream, {
-        onLegacyEvent: (event) => {
-          if (event.type === 'delta') {
-            output += event.text;
-            onEvent({ type: 'delta', text: event.text });
-          } else if (event.type === 'tool') {
-            recordToolCall(event.name, event.callId, event.args ?? '');
-            onEvent({ type: 'tool', name: event.name });
-          } else {
-            recordToolResult(event.name, event.callId, event.result);
-            onEvent({ type: 'tool_result', name: event.name, ok: event.ok, summary: event.summary });
-          }
-        },
-      });
-      usage.inputTokens = adapted.usage.inputTokens;
-      usage.outputTokens = adapted.usage.outputTokens;
-      usage.requests = adapted.usage.requests;
+      await protocolAdapter.consume(stream);
+      usage.inputTokens = stream.state.usage.inputTokens;
+      usage.outputTokens = stream.state.usage.outputTokens;
+      usage.requests = stream.state.usage.requests;
     } catch (e) {
       if (!(e instanceof EmptyGatewayResponseError)) throw e;
       bailed = true;
@@ -909,19 +1011,28 @@ export async function runAgent(
     if (stream.finalOutput !== undefined) {
       structuredOutput = gatewayActionTurn
         ? {
-          message: typeof stream.finalOutput === 'string' ? stream.finalOutput : String(stream.finalOutput ?? ''),
-          diagnostics: [],
-          artifacts: [],
-          data: null,
-        }
+            message:
+              typeof stream.finalOutput === "string"
+                ? stream.finalOutput
+                : String(stream.finalOutput ?? ""),
+            diagnostics: [],
+            artifacts: [],
+            data: null,
+          }
         : parseIndustrialAgentOutput(stream.finalOutput);
-      const projected = projectAgentOutput(industrialAgentOutputDefinition, structuredOutput);
+      const projected = projectAgentOutput(
+        industrialAgentOutputDefinition,
+        structuredOutput,
+      );
       output = projected.text;
     }
-    return bailed ? 'empty-bailed' : 'done';
+    return bailed ? "empty-bailed" : "done";
   };
 
-  const checkpoint = async (state: RunState<any, any>, approvals: ApprovalRequest[]) => {
+  const checkpoint = async (
+    state: RunState<any, any>,
+    approvals: ApprovalRequest[],
+  ) => {
     await options.onCheckpoint?.({
       state: state.toString(),
       approvals,
@@ -932,7 +1043,7 @@ export async function runAgent(
 
   const approvalId = (item: RunToolApprovalItem, index: number) => {
     const raw = item.rawItem as { name?: string; callId?: string };
-    return raw.callId ?? `${raw.name ?? 'tool'}:${index}`;
+    return raw.callId ?? `${raw.name ?? "tool"}:${index}`;
   };
 
   const decisions = new Map(Object.entries(options.decisions ?? {}));
@@ -944,8 +1055,8 @@ export async function runAgent(
       const raw = item.rawItem as { name?: string; arguments?: string };
       return {
         id: approvalId(item, index),
-        name: raw.name ?? 'tool',
-        args: raw.arguments ?? '',
+        name: raw.name ?? "tool",
+        args: raw.arguments ?? "",
       };
     });
     const unresolved: ApprovalRequest[] = [];
@@ -959,15 +1070,12 @@ export async function runAgent(
       toolNameByCallId.set(request.id, request.name);
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
-      if (decision === undefined && options.requestApproval) {
-        decision = await options.requestApproval(request.name, request.args);
-      }
       if (decision === undefined) {
         unresolved.push(request);
       } else if (decision) {
         state.approve(item);
       } else {
-        state.reject(item, { message: '用户拒绝了该工具调用。' });
+        state.reject(item, { message: "用户拒绝了该工具调用。" });
       }
     }
     return unresolved;
@@ -982,12 +1090,12 @@ export async function runAgent(
     usage.outputTokens = state.usage.outputTokens;
   }
 
-  // Approval checkpoints are first-class results. Inline callers can still
-  // provide requestApproval for backwards compatibility, while the product
-  // host normally persists this checkpoint and resumes later with decisions.
+  // Approval checkpoints are first-class results. The host persists the
+  // checkpoint and resumes the same SDK RunState with explicit decisions.
   let approvalRounds = 0;
   while (true) {
-    if (approvalRounds++ >= MAX_TURNS) throw new MaxTurnsExceededError('审批恢复次数超过上限');
+    if (approvalRounds++ >= MAX_TURNS)
+      throw new MaxTurnsExceededError("审批恢复次数超过上限");
     if (state) {
       const pending = state.getInterruptions();
       if (pending.length) {
@@ -995,12 +1103,19 @@ export async function runAgent(
         if (unresolved.length) {
           await checkpoint(state, unresolved);
           const result = createAgentResult<IndustrialAgentOutput>({
-            status: 'awaiting_approval',
+            status: "awaiting_approval",
             state: state.toString(),
             approvals: unresolved,
             usage,
           });
-          return { result, output, usage, status: 'awaiting_approval', state: state.toString(), approvals: unresolved };
+          return {
+            result,
+            output,
+            usage,
+            status: "awaiting_approval",
+            state: state.toString(),
+            approvals: unresolved,
+          };
         }
       }
     }
@@ -1029,18 +1144,20 @@ export async function runAgent(
     if (options.signal?.aborted || stream.cancelled) {
       return {
         result: createAgentResult({
-          status: 'cancelled',
-          reason: 'aborted',
+          status: "cancelled",
+          reason: "aborted",
           usage,
         }),
         output,
         usage,
-        status: 'cancelled',
+        status: "cancelled",
       };
     }
-    if (outcome === 'empty-bailed' || !state.getInterruptions().length) {
+    if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredOutput) {
-        throw new AgentOutputValidationError('Agent 未返回符合 Schema 的最终结构化结果');
+        throw new AgentOutputValidationError(
+          "Agent 未返回符合 Schema 的最终结构化结果",
+        );
       }
       const verifiedArtifacts = await verifyRequiredActions();
       const canonicalOutput: IndustrialAgentOutput = {
@@ -1056,20 +1173,29 @@ export async function runAgent(
           })),
         ],
       };
-      const projected = projectAgentOutput(industrialAgentOutputDefinition, canonicalOutput);
+      const projected = projectAgentOutput(
+        industrialAgentOutputDefinition,
+        canonicalOutput,
+      );
       const result = createAgentResult({
-        status: 'completed',
+        status: "completed",
         output: canonicalOutput,
         usage,
         diagnostics: projected.diagnostics,
         artifacts: projected.artifacts,
       });
-      return { result, output: structuredOutput.message, usage, status: 'completed' };
+      return {
+        result,
+        output: structuredOutput.message,
+        usage,
+        status: "completed",
+      };
     }
   }
 }
 
 export function validateConfig(cfg: AgentConfig): string | null {
-  if (!cfg.apiKey) return '尚未配置 API Key:点击输入框右下角的 ⚙ 齿轮,在设置面板里填写 Base URL / API Key / Model(配置一次即可)';
+  if (!cfg.apiKey)
+    return "尚未配置 API Key:点击输入框右下角的 ⚙ 齿轮,在设置面板里填写 Base URL / API Key / Model(配置一次即可)";
   return null;
 }

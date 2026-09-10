@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { JsonFileSession, JsonRunStore, runAgent } from './agent.testbundle.mjs';
+import { AgentEventFactory, JsonFileSession, JsonRunStore, runAgent } from './agent.testbundle.mjs';
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-resume-test-'));
 const sessionFile = path.join(dir, 'session.json');
@@ -13,12 +13,20 @@ const baseConfig = {
   exportDir: path.join(dir, 'exports'),
   workspaceRoot: dir,
 };
+const makeProtocol = (runId) => ({
+  runId,
+  operationId: runId,
+  eventFactory: new AgentEventFactory(runId, runId),
+  onEvent: () => {},
+});
 
 // First process: stop on approval and persist the SDK-native RunState.
 const session1 = new JsonFileSession(sessionFile);
 const store1 = new JsonRunStore(runFile);
 const record = await store1.begin('把程序导出为文件', baseConfig, 0, 'operation-resume');
-const first = await runAgent(baseConfig, session1, record.userText, () => {}, {
+const resumeProtocol = makeProtocol('resume');
+const first = await runAgent(baseConfig, session1, record.userText, {
+  protocol: resumeProtocol,
   onCheckpoint: async (checkpoint) => {
     record.status = 'awaiting_approval';
     record.state = checkpoint.state;
@@ -45,8 +53,11 @@ const resumed = await runAgent(
   },
   session2,
   restored.userText,
-  () => {},
-  { initialState: restored.state, decisions: { [approval.id]: true } },
+  {
+    initialState: restored.state,
+    decisions: { [approval.id]: true },
+    protocol: resumeProtocol,
+  },
 );
 if (resumed.status !== 'completed') throw new Error(`resume returned ${resumed.status}`);
 const exported = await fs.readdir(baseConfig.exportDir);
@@ -76,7 +87,10 @@ if (duplicateExecutions !== 0) throw new Error('durable side effect was repeated
 const cancelSession = new JsonFileSession(path.join(dir, 'cancel-session.json'));
 const controller = new AbortController();
 setTimeout(() => controller.abort(), 10);
-const cancelled = await runAgent(baseConfig, cancelSession, '你好', () => {}, { signal: controller.signal });
+const cancelled = await runAgent(baseConfig, cancelSession, '你好', {
+  signal: controller.signal,
+  protocol: makeProtocol('cancel'),
+});
 if (cancelled.status !== 'cancelled') throw new Error(`cancel returned ${cancelled.status}`);
 
 console.log('agent resume tests passed: durable RunState resume, exactly-once effect, stream cancellation');

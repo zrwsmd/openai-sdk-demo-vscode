@@ -14,7 +14,7 @@ import { JsonAuditSink } from '../observability/audit';
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'stop'} / {type:'retry'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
- *   host → webview: {type:'user'|'delta'|'tool'|'toolResult'|'done'|'error'|'busy'|'idle'|'cleared'}
+ *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, hasKey} / {type:'settingsSaved', model}

@@ -17,7 +17,7 @@ async function fixture(executeAgent) {
 
 // Cancel rolls the partial Session turn back and exposes a retryable terminal run.
 {
-  const test = await fixture(async (_cfg, session, userText, _emit, options) => {
+  const test = await fixture(async (_cfg, session, userText, options) => {
     await session.addItems([{ type: 'message', role: 'user', content: userText }]);
     await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
     return { status: 'cancelled', output: '', usage };

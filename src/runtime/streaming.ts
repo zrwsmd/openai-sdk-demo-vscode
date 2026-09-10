@@ -1,5 +1,5 @@
 import { AgentEventFactory, type AgentProtocolEvent, type AgentEventSource } from '../protocol/events';
-import { parseToolResult, type ToolResult } from '../protocol/results';
+import { parseToolResult } from '../protocol/results';
 
 export interface AgentStreamAdapterOptions {
   runId: string;
@@ -14,15 +14,6 @@ export interface AgentStreamAdapterOptions {
 export interface AgentStreamAdapterResult {
   output: string;
   usage: { inputTokens: number; outputTokens: number; requests: number };
-}
-
-export type AgentStreamLegacyEvent =
-  | { type: 'delta'; text: string }
-  | { type: 'tool'; name: string; callId?: string; args?: string }
-  | { type: 'tool_result'; name: string; ok: boolean; summary: string; callId?: string; result?: ToolResult };
-
-export interface AgentStreamAdapterHooks {
-  onLegacyEvent?: (event: AgentStreamLegacyEvent) => void;
 }
 
 /**
@@ -47,12 +38,12 @@ export class AgentStreamAdapter {
     return this.factory.nextSequence;
   }
 
-  async consume(stream: AsyncIterable<any>, hooks: AgentStreamAdapterHooks = {}): Promise<AgentStreamAdapterResult> {
+  async consume(stream: AsyncIterable<any>): Promise<AgentStreamAdapterResult> {
     let output = '';
     let summary = { inputTokens: 0, outputTokens: 0, requests: 0 };
     try {
       for await (const event of stream) {
-        const text = this.handleEvent(event, hooks);
+        const text = this.handleEvent(event);
         if (text) output += text;
       }
     } finally {
@@ -71,10 +62,10 @@ export class AgentStreamAdapter {
     return { output, usage: summary };
   }
 
-  private handleEvent(event: any, hooks: AgentStreamAdapterHooks): string {
+  private handleEvent(event: any): string {
     if (!event || typeof event !== 'object') return '';
     if (event.type === 'raw_model_stream_event') {
-      return this.handleRawModelEvent(event.data, hooks);
+      return this.handleRawModelEvent(event.data);
     }
     if (event.type === 'agent_updated_stream_event') {
       const agentName = agentNameOf(event.agent);
@@ -83,23 +74,22 @@ export class AgentStreamAdapter {
       return '';
     }
     if (event.type === 'run_item_stream_event') {
-      this.handleRunItemEvent(event, hooks);
+      this.handleRunItemEvent(event);
     }
     return '';
   }
 
-  private handleRawModelEvent(data: any, hooks: AgentStreamAdapterHooks): string {
+  private handleRawModelEvent(data: any): string {
     const type = data?.type;
     if (type !== 'output_text_delta' && type !== 'response.output_text.delta') return '';
     const text = typeof data?.delta === 'string' ? data.delta : '';
     if (!text) return '';
     if (this.options.structuredOutput) return text;
     this.emit('text.delta', 'model', { text, itemId: data.itemId ?? data.item_id });
-    hooks.onLegacyEvent?.({ type: 'delta', text });
     return text;
   }
 
-  private handleRunItemEvent(event: any, hooks: AgentStreamAdapterHooks): void {
+  private handleRunItemEvent(event: any): void {
     const item = event.item ?? {};
     const raw = item.rawItem ?? {};
     const itemType = item.type;
@@ -113,12 +103,6 @@ export class AgentStreamAdapter {
         callId,
         arguments: argumentsOf(item),
         serverId: serverIdOf(raw),
-      });
-      hooks.onLegacyEvent?.({
-        type: 'tool',
-        name,
-        callId,
-        args: argumentsOf(item),
       });
       return;
     }
@@ -135,14 +119,6 @@ export class AgentStreamAdapter {
         summary: summary.text,
         ...(parsed ? { result: parsed } : {}),
         serverId: serverIdOf(raw),
-      });
-      hooks.onLegacyEvent?.({
-        type: 'tool_result',
-        name,
-        ok: summary.ok,
-        summary: summary.text,
-        callId,
-        result: parsed as ToolResult | undefined,
       });
       return;
     }

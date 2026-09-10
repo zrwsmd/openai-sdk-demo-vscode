@@ -329,10 +329,7 @@ function finishApprovalCards(className) {
   }
 }
 
-// Stable protocol events are additive to the legacy host messages. Text and
-// tool events remain rendered by their existing path for backward compatibility;
-// lifecycle events use this path so future hosts can stream without knowing the
-// SDK's raw event names.
+// Agent output and tool lifecycle are rendered from the protocol event stream.
 function handleProtocolEvent(event) {
   if (!event || typeof event !== 'object') return;
   const payload = event.payload || {};
@@ -349,9 +346,51 @@ function handleProtocolEvent(event) {
     case 'handoff.completed':
       addNote('agent-note', `已完成交接: ${payload.toAgent || 'agent'}`);
       break;
+    case 'text.delta': {
+      const text = typeof payload.text === 'string' ? payload.text : '';
+      if (agentBubble && text) {
+        if (pendingToolCount > 0) {
+          pendingAgentText += text;
+        } else {
+          agentText += text;
+          if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
+          renderRich(agentBubble, agentText);
+        }
+        scrollBottom();
+      }
+      break;
+    }
+    case 'tool.started': {
+      const name = payload.toolName || 'tool';
+      addNote('tool-note', `正在执行 · ${name}`);
+      hadToolThisTurn = true;
+      pendingToolCount += 1;
+      if (agentText) {
+        pendingAgentText = agentText + pendingAgentText;
+        agentText = '';
+        if (agentBubble) renderRich(agentBubble, '');
+      }
+      break;
+    }
+    case 'tool.completed': {
+      const name = payload.toolName || 'tool';
+      const summary = typeof payload.summary === 'string'
+        ? payload.summary
+        : JSON.stringify(payload.result ?? '');
+      addToolResult(name, payload.ok === true, summary);
+      pendingToolCount = Math.max(0, pendingToolCount - 1);
+      flushPendingAgentText();
+      break;
+    }
     case 'run.completed': {
       const result = payload.result;
       if (result && typeof result === 'object') {
+        const output = result.output;
+        const message = output && typeof output === 'object' ? output.message : undefined;
+        if (typeof message === 'string') {
+          if (pendingToolCount > 0) pendingFinalText = message;
+          else renderAgentText(message);
+        }
         const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
         const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
         if (diagnostics.length) addNote('tool-note', `结构化结果包含 ${diagnostics.length} 条诊断信息`);
@@ -366,16 +405,13 @@ function handleProtocolEvent(event) {
       break;
     }
     case 'run.failed':
-      // The legacy error event owns the detailed error bubble.
+      // The host error control message owns the detailed error bubble.
       break;
     case 'run.cancelled':
-      // The legacy cancelled event owns the retry state and controls.
+      // The host cancelled control message owns the retry state and controls.
       break;
     case 'approval.requested':
     case 'approval.resolved':
-    case 'text.delta':
-    case 'tool.started':
-    case 'tool.completed':
     case 'usage.updated':
     case 'run.started':
     case 'run.progress':
@@ -438,42 +474,7 @@ window.addEventListener('message', (event) => {
       agentBubble.classList.add('streaming');
       break;
     }
-    case 'delta':
-      if (agentBubble) {
-        if (pendingToolCount > 0) {
-          pendingAgentText += msg.text;
-        } else {
-          agentText += msg.text;
-          if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
-          renderRich(agentBubble, agentText);
-        }
-        scrollBottom();
-      }
-      break;
-    case 'tool':
-      addNote('tool-note', `正在执行 · ${msg.name}`);
-      hadToolThisTurn = true;
-      pendingToolCount += 1;
-      if (agentText) {
-        pendingAgentText = agentText + pendingAgentText;
-        agentText = '';
-        if (agentBubble) renderRich(agentBubble, '');
-      }
-      break;
-    case 'toolResult':
-      // 工具执行回执:即使网关在工具后返回空文本,用户也能看到成败
-      addToolResult(msg.name, msg.ok === true, msg.summary);
-      pendingToolCount = Math.max(0, pendingToolCount - 1);
-      flushPendingAgentText();
-      break;
     case 'done': {
-      const structuredMessage = msg.result?.output && typeof msg.result.output === 'object'
-        ? msg.result.output.message
-        : undefined;
-      if (typeof structuredMessage === 'string') {
-        if (pendingToolCount > 0) pendingFinalText = structuredMessage;
-        else renderAgentText(structuredMessage);
-      }
       flushPendingAgentText();
       const waitingForToolResult = pendingToolCount > 0;
       const empty = !agentText && !waitingForToolResult;

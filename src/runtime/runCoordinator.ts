@@ -3,7 +3,6 @@ import {
   validateConfig,
   MaxTurnsExceededError,
   MAX_TURNS,
-  type AgentEvent,
   type AgentRunOptions,
 } from './agent';
 import type { AgentInputItem, Session } from '@openai/agents';
@@ -14,7 +13,6 @@ import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 
 export type RuntimeEvent =
-  | ({ type: AgentEvent['type']; runId: string } & Record<string, unknown>)
   | { type: 'agentEvent'; event: AgentProtocolEvent }
   | ({ type: string } & Record<string, unknown>);
 
@@ -296,7 +294,6 @@ export class RunCoordinator {
         },
         this.session,
         run.userText,
-        (event) => this.forwardAgentEvent(run.id, event),
         {
           ...options,
           signal: controller.signal,
@@ -358,11 +355,11 @@ export class RunCoordinator {
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
         const agentResult = result.result;
-        this.emit({ type: 'done', usage: result.usage, result: agentResult, canRetry: true });
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.completed',
           payload: { result: agentResult },
         }));
+        this.emit({ type: 'done', usage: result.usage, canRetry: true });
       }
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
@@ -407,18 +404,11 @@ export class RunCoordinator {
     }
   }
 
-  private forwardAgentEvent(runId: string, event: AgentEvent): void {
-    if (event.type === 'delta') {
-      this.liveOutput += event.text;
-      this.emit({ type: 'delta', text: event.text, runId });
-    } else if (event.type === 'tool') this.emit({ type: 'tool', name: event.name, runId });
-    else {
-      this.writeLog(`[run:${runId}] ${event.name} -> ${event.ok ? 'ok' : 'fail'}: ${event.summary.slice(0, 300)}`);
-      this.emit({ ...event, type: 'toolResult', runId });
-    }
-  }
-
   private emitProtocol(event: AgentProtocolEvent): void {
+    if (event.type === 'text.delta') {
+      const payload = event.payload as { text?: unknown };
+      if (typeof payload.text === 'string') this.liveOutput += payload.text;
+    }
     this.emit({ type: 'agentEvent', event });
   }
 
