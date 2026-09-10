@@ -32,6 +32,63 @@ const mcpEvent = createAgentEvent({
 assert.equal(mcpEvent.source, 'mcp');
 assert.equal(agentEventSchema.parse(mcpEvent).payload.serverId, 'plc-sim');
 
+const reasoningEvent = createAgentEvent({
+  type: 'reasoning.updated',
+  runId: 'run-1',
+  sequence: 5,
+  payload: {
+    itemId: 'reasoning-1',
+    status: 'in_progress',
+    characterCount: 18,
+    redacted: true,
+  },
+});
+assert.equal(reasoningEvent.payload.redacted, true);
+assert.equal(reasoningEvent.payload.summary, undefined);
+
+const toolUpdate = createAgentEvent({
+  type: 'tool.updated',
+  runId: 'run-1',
+  sequence: 6,
+  source: 'tool',
+  payload: {
+    toolName: 'shell',
+    kind: 'shell',
+    itemType: 'shell_call',
+    status: 'in_progress',
+    commandsDelta: 'echo ready',
+  },
+});
+assert.equal(agentEventSchema.parse(toolUpdate).payload.kind, 'shell');
+
+const inputEvent = createAgentEvent({
+  type: 'run.input',
+  runId: 'run-1',
+  sequence: 7,
+  payload: { itemId: 'input-1', itemType: 'input_item', status: 'completed' },
+});
+const compactionEvent = createAgentEvent({
+  type: 'context.compacted',
+  runId: 'run-1',
+  sequence: 8,
+  payload: { itemId: 'compact-1', itemType: 'compaction', status: 'completed' },
+});
+const observedEvent = createAgentEvent({
+  type: 'item.observed',
+  runId: 'run-1',
+  sequence: 9,
+  payload: { itemType: 'unknown', itemId: 'future-1' },
+});
+const modelEvent = createAgentEvent({
+  type: 'model.event',
+  runId: 'run-1',
+  sequence: 10,
+  payload: { eventType: 'response.future.event', category: 'unknown' },
+});
+for (const event of [reasoningEvent, toolUpdate, inputEvent, compactionEvent, observedEvent, modelEvent]) {
+  parseAgentEvent(event);
+}
+
 const events = new AgentEventFactory('run-2', 'op-2', 7);
 assert.equal(events.next({ type: 'agent.started', payload: { agentName: 'Planner' } }).sequence, 7);
 assert.equal(events.next({ type: 'text.delta', payload: { text: '开始' } }).sequence, 8);
