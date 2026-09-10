@@ -5,6 +5,13 @@ import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
 import { JsonAuditSink } from '../observability/audit';
+import {
+  isAgentApiFormat,
+  resolveApiFormat,
+  type AgentApiFormat,
+  type AgentApiFormatSetting,
+  type AgentProvider,
+} from '../runtime/modelAdapter';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
@@ -89,21 +96,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */
   async getConfig() {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
-    const saved = this.context.globalState.get<{ baseUrl?: string; model?: string }>('settings') ?? {};
+    const saved = this.context.globalState.get<{
+      baseUrl?: string;
+      model?: string;
+      apiFormat?: AgentApiFormat;
+    }>('settings') ?? {};
     const savedKey = (await this.context.secrets.get('apiKey')) ?? '';
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
+    const baseUrl = (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim();
+    const provider = cfg.get<AgentProvider>('provider') ?? 'openai';
+    const configuredApiFormat =
+      saved.apiFormat ?? cfg.get<AgentApiFormatSetting>('apiFormat') ?? 'auto';
     return {
-      baseUrl: (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim(),
+      baseUrl,
       apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
       model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
+      provider,
+      apiFormat: resolveApiFormat(baseUrl, configuredApiFormat),
       orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
       policyContext: {
         allowedCommands,
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
-      savedInPlugin: !!(saved.baseUrl || saved.model || savedKey),
+      savedInPlugin: !!(saved.baseUrl || saved.model || saved.apiFormat || savedKey),
     };
   }
 
@@ -113,20 +130,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       type: 'settings',
       baseUrl: cfg.baseUrl,
       model: cfg.model,
+      provider: cfg.provider,
+      apiFormat: cfg.apiFormat,
       hasKey: !!cfg.apiKey,
       source: cfg.savedInPlugin ? 'plugin' : 'other',
     });
   }
 
-  private async saveSettings(msg: { baseUrl?: string; apiKey?: string; model?: string }): Promise<void> {
+  private async saveSettings(msg: {
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    apiFormat?: AgentApiFormat;
+  }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
-    await this.context.globalState.update('settings', { baseUrl, model });
+    const apiFormat = isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined;
+    await this.context.globalState.update('settings', {
+      baseUrl,
+      model,
+      ...(apiFormat ? { apiFormat } : {}),
+    });
     if (msg.apiKey) {
       await this.context.secrets.store('apiKey', msg.apiKey.trim());
     }
     void this.sendSettingsToWebview();
-    this.post({ type: 'settingsSaved', model });
+    this.post({ type: 'settingsSaved', model, apiFormat });
   }
 
   private async send(text: string): Promise<void> {
@@ -135,6 +164,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const config: DurableRunConfig = {
       baseUrl: live.baseUrl,
       model: live.model,
+      provider: live.provider,
+      apiFormat: live.apiFormat,
       exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
@@ -178,10 +209,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <!-- 设置面板(齿轮打开) -->
   <div id="settings" class="settings hidden">
     <div class="settings-card">
-      <div class="settings-title">模型配置 <span class="settings-sub">OpenAI Compatible · 保存后全局生效</span></div>
+      <div class="settings-title">模型配置 <span class="settings-sub">OpenAI API · 保存后全局生效</span></div>
       <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
       <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
       <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+      <label>API Format<select id="set-format">
+        <option value="chat_completions">OpenAI Chat Completions</option>
+        <option value="responses">OpenAI Responses</option>
+      </select></label>
       <div class="settings-actions">
         <button id="set-save" class="btn primary">保存</button>
         <button id="set-cancel" class="btn">取消</button>

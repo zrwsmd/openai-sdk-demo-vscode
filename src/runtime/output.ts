@@ -23,16 +23,21 @@ const industrialArtifactSchema = z.object({
   content: z.string().nullable(),
 }).strict();
 
+const outputDataSchema = z.object({}).strict().nullable();
+
 /**
  * The product-level final output contract used by the industrial Agent.
  * `message` remains suitable for the chat surface while diagnostics and
  * artifacts give non-UI hosts typed data to consume.
+ * Tool-specific payloads are emitted through protocol tool results; keep the
+ * final `data` field closed so strict provider schemas do not accept unknown
+ * untyped branches.
  */
 export const industrialAgentOutputSchema = z.object({
   message: z.string(),
   diagnostics: z.array(industrialDiagnosticSchema),
   artifacts: z.array(industrialArtifactSchema),
-  data: z.unknown().nullable(),
+  data: outputDataSchema,
 });
 
 export type IndustrialAgentOutput = z.infer<typeof industrialAgentOutputSchema>;

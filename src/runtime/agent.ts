@@ -68,6 +68,12 @@ import {
   projectAgentOutput,
   AgentOutputValidationError,
 } from "./output";
+import {
+  createModelAdapter,
+  type AgentApiFormat,
+  type AgentProvider,
+  type ModelAdapter,
+} from "./modelAdapter";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -84,6 +90,10 @@ export interface AgentConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Provider identity. The first supported provider is OpenAI. */
+  provider?: AgentProvider;
+  /** Explicit API wire format; omitted/auto preserves the historical route. */
+  apiFormat?: AgentApiFormat | "auto";
   /** export_st_program 工具的落盘目录 */
   exportDir: string;
   /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
@@ -949,8 +959,7 @@ function makeLoggingFetch(): unknown {
 
 const modelCache = new Map<string, GatewayGuardedModel>();
 
-function buildModel(cfg: AgentConfig): string | GatewayGuardedModel {
-  if (!cfg.baseUrl) return cfg.model; // 无网关:走官方默认(Responses API)
+function buildChatCompletionsModel(cfg: AgentConfig): GatewayGuardedModel {
   const key = `${cfg.baseUrl}|${cfg.apiKey}|${cfg.model}`;
   let m = modelCache.get(key);
   if (!m) {
@@ -974,12 +983,25 @@ export type TurnUsage = UsageSummary;
 /** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
 export const MAX_TURNS = 10;
 
-/**
- * Product-facing execution entry point. The returned `state` is an SDK-native
- * RunState snapshot and is safe to persist with the host's run store. A state
- * is only returned for a pending approval; completed and cancelled runs cannot
- * be resumed as if they were still active.
- */
+function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
+  return createModelAdapter(cfg, {
+    fetchImpl: makeLoggingFetch() as typeof fetch,
+    createChatCompletionsModel: () => {
+      // Keep the existing guarded gateway implementation unchanged. An
+      // explicit Chat Completions selection without a custom endpoint uses
+      // the SDK model directly and is outside the gateway watchdog path.
+      if (!cfg.baseUrl) {
+        const client = new OpenAI({
+          apiKey: cfg.apiKey,
+          fetch: makeLoggingFetch() as never,
+        });
+        return new OpenAIChatCompletionsModel(client, cfg.model);
+      }
+      return buildChatCompletionsModel(cfg);
+    },
+  });
+}
+
 export async function runAgent(
   cfg: AgentConfig,
   session: Session,
@@ -996,7 +1018,8 @@ export async function runAgent(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
   );
-  const model = buildModel(cfg);
+  const modelAdapter = buildModelAdapter(cfg);
+  const model = modelAdapter.model;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   if (
     model instanceof GatewayGuardedModel &&

@@ -14,3 +14,4 @@ export * from '../src/runtime/streaming';
 export * from '../src/runtime/output';
 export * from '../src/policy/actionPolicy';
 export * from '../src/workspace/workspaceScope';
+export * from '../src/runtime/modelAdapter';

@@ -79,11 +79,169 @@ function endWithNamedToolCall(res, model, name, args) {
   res.end();
 }
 
+function responseItemMessage(id, text, status = 'completed') {
+  return {
+    type: 'message',
+    id,
+    status,
+    role: 'assistant',
+    content: [{ type: 'output_text', text, annotations: [] }],
+  };
+}
+
+function responseItemFunctionCall(id, callId, name, args, status = 'completed') {
+  return {
+    type: 'function_call',
+    id,
+    call_id: callId,
+    name,
+    arguments: args,
+    status,
+  };
+}
+
+function responseObject(model, id, output, usage, status = 'completed') {
+  return {
+    id,
+    object: 'response',
+    created_at: 1,
+    status,
+    model,
+    output,
+    usage: {
+      input_tokens: usage?.input_tokens ?? 120,
+      output_tokens: usage?.output_tokens ?? 34,
+      total_tokens: usage?.total_tokens ?? 154,
+    },
+  };
+}
+
+async function streamResponsesText(res, model, text) {
+  const responseId = `resp_mock_${++seq}`;
+  const itemId = `msg_mock_${++seq}`;
+  const item = responseItemMessage(itemId, text);
+  const response = responseObject(model, responseId, [item], {
+    input_tokens: 120,
+    output_tokens: 34,
+    total_tokens: 154,
+  });
+  const inProgress = responseObject(model, responseId, [], undefined, 'in_progress');
+  sse(res, { type: 'response.created', response: inProgress });
+  sse(res, {
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: responseItemMessage(itemId, '', 'in_progress'),
+  });
+  sse(res, {
+    type: 'response.content_part.added',
+    item_id: itemId,
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'output_text', text: '', annotations: [] },
+  });
+  for (const ch of text) {
+    sse(res, {
+      type: 'response.output_text.delta',
+      item_id: itemId,
+      output_index: 0,
+      content_index: 0,
+      delta: ch,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  sse(res, {
+    type: 'response.output_text.done',
+    item_id: itemId,
+    output_index: 0,
+    content_index: 0,
+    text,
+  });
+  sse(res, {
+    type: 'response.content_part.done',
+    item_id: itemId,
+    output_index: 0,
+    content_index: 0,
+    part: { type: 'output_text', text, annotations: [] },
+  });
+  sse(res, { type: 'response.output_item.done', output_index: 0, item });
+  sse(res, { type: 'response.completed', response });
+  res.end();
+}
+
+async function streamResponsesTool(res, model, name, args) {
+  const responseId = `resp_mock_${++seq}`;
+  const itemId = `fc_mock_${++seq}`;
+  const callId = `call_resp_${++seq}`;
+  const item = responseItemFunctionCall(itemId, callId, name, args);
+  const response = responseObject(model, responseId, [item], {
+    input_tokens: 90,
+    output_tokens: 12,
+    total_tokens: 102,
+  });
+  const inProgress = responseObject(model, responseId, [], undefined, 'in_progress');
+  sse(res, { type: 'response.created', response: inProgress });
+  sse(res, {
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: responseItemFunctionCall(itemId, callId, name, '', 'in_progress'),
+  });
+  sse(res, {
+    type: 'response.function_call_arguments.delta',
+    item_id: itemId,
+    output_index: 0,
+    delta: args,
+  });
+  sse(res, {
+    type: 'response.function_call_arguments.done',
+    item_id: itemId,
+    output_index: 0,
+    arguments: args,
+  });
+  sse(res, { type: 'response.output_item.done', output_index: 0, item });
+  sse(res, { type: 'response.completed', response });
+  res.end();
+}
+
+async function streamResponsesStructuredText(res, model, message) {
+  await streamResponsesText(res, model, JSON.stringify({
+    message,
+    diagnostics: [],
+    artifacts: [],
+    data: null,
+  }));
+}
+
+async function handleResponsesRequest(reqBody, res) {
+  const model = reqBody.model || 'mock-responses';
+  const input = Array.isArray(reqBody.input) ? reqBody.input : [];
+  const serializedInput = JSON.stringify(input);
+  const hasToolOutput = input.some((item) => item?.type === 'function_call_output');
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  if (!hasToolOutput && serializedInput.includes('读取')) {
+    await streamResponsesTool(
+      res,
+      model,
+      'read_file',
+      JSON.stringify({ path: 'lk.txt' }),
+    );
+    return;
+  }
+  if (hasToolOutput && serializedInput.includes('读取')) {
+    await streamResponsesStructuredText(res, model, '已通过 Responses API 读取文件内容。');
+    return;
+  }
+  await streamResponsesStructuredText(res, model, 'Responses API 已连通。');
+}
+
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', async () => {
     const req_body = JSON.parse(body || '{}');
+    if (req.url?.endsWith('/responses')) {
+      await handleResponsesRequest(req_body, res);
+      return;
+    }
     const model = req_body.model || 'mock';
     const messages = req_body.messages || [];
     const last = messages[messages.length - 1] || {};

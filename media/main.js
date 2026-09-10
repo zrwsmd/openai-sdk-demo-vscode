@@ -12,6 +12,7 @@ const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
+const setFormatEl = document.getElementById('set-format');
 const setSaveEl = document.getElementById('set-save');
 const setCancelEl = document.getElementById('set-cancel');
 
@@ -231,6 +232,7 @@ setSaveEl.addEventListener('click', () => {
     baseUrl: setBaseEl.value,
     apiKey: setKeyEl.value, // 留空 = 不修改已保存的 key
     model: setModelEl.value,
+    apiFormat: setFormatEl.value,
   });
 });
 
@@ -617,6 +619,7 @@ window.addEventListener('message', (event) => {
       hasSavedKey = !!msg.hasKey;
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
+      setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
       updateModelChip(msg.model);

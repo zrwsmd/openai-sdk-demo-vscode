@@ -110,6 +110,26 @@ const assertClosedObjects = (value) => {
   for (const child of Object.values(value)) assertClosedObjects(child);
 };
 assertClosedObjects(outputFormat.schema);
+const assertTypedSchemaBranches = (value, path = 'schema') => {
+  if (!value || typeof value !== 'object') return;
+  const hasCombiner = ['anyOf', 'oneOf', 'allOf'].some((key) => Array.isArray(value[key]));
+  const hasTypedForm = ['type', '$ref', 'const', 'enum'].some((key) => Object.hasOwn(value, key));
+  assert.ok(hasTypedForm || hasCombiner, `${path} must declare a JSON Schema type or combiner`);
+  for (const key of ['anyOf', 'oneOf', 'allOf']) {
+    if (!Array.isArray(value[key])) continue;
+    value[key].forEach((child, index) => assertTypedSchemaBranches(child, `${path}.${key}[${index}]`));
+  }
+  if (value.properties && typeof value.properties === 'object') {
+    for (const [key, child] of Object.entries(value.properties)) {
+      assertTypedSchemaBranches(child, `${path}.properties.${key}`);
+    }
+  }
+  if (value.items && typeof value.items === 'object') assertTypedSchemaBranches(value.items, `${path}.items`);
+  if (value.additionalProperties && typeof value.additionalProperties === 'object') {
+    assertTypedSchemaBranches(value.additionalProperties, `${path}.additionalProperties`);
+  }
+};
+assertTypedSchemaBranches(outputFormat.schema);
 const structuredTeam = createIndustrialAgentTeam('gpt-4o-mini', []);
 const parsedPlannerOutput = structuredTeam.planner.outputType.parse(structuredValue);
 assert.equal(parsedPlannerOutput.message, '程序已校验');

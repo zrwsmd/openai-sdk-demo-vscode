@@ -5,6 +5,7 @@ import type { ApprovalRequest, TurnUsage } from './agent';
 import { EffectRecoveryRequiredError } from './errors';
 import { parseAgentResult, type AgentResult } from '../protocol/results';
 import type { ToolPolicyOverrides } from '../tools/toolContract';
+import type { AgentApiFormat, AgentProvider } from './modelAdapter';
 
 export type DurableRunStatus =
   | 'running'
@@ -16,6 +17,9 @@ export type DurableRunStatus =
 export interface DurableRunConfig {
   baseUrl: string;
   model: string;
+  /** Resolved provider/format are persisted so retry uses the same endpoint. */
+  provider?: AgentProvider;
+  apiFormat?: AgentApiFormat;
   exportDir: string;
   workspaceRoot: string;
   workspaceRoots?: string[];
@@ -170,6 +174,9 @@ export class JsonRunStore implements RunStore {
       !run.config ||
       typeof run.config.baseUrl !== 'string' ||
       typeof run.config.model !== 'string' ||
+      (run.config.provider !== undefined && run.config.provider !== 'openai') ||
+      (run.config.apiFormat !== undefined &&
+        !['chat_completions', 'responses'].includes(run.config.apiFormat)) ||
       typeof run.config.exportDir !== 'string' ||
       typeof run.config.workspaceRoot !== 'string' ||
       (run.config.workspaceRoots !== undefined &&

@@ -310,7 +310,8 @@ body { display: flex; flex-direction: column; }
   color: var(--muted);
   margin-bottom: 10px;
 }
-.settings-card input {
+.settings-card input,
+.settings-card select {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -322,7 +323,8 @@ body { display: flex; flex-direction: column; }
   font: inherit;
   outline: none;
 }
-.settings-card input:focus { border-color: var(--accent); }
+.settings-card input:focus,
+.settings-card select:focus { border-color: var(--accent); }
 
 .settings-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .btn {
