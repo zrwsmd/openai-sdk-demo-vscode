@@ -17,6 +17,9 @@ import {
   toolResult,
   DefaultActionPolicy,
   WorkspaceScope,
+  apiKeySecretKey,
+  getStoredApiProfile,
+  saveStoredApiProfile,
 } from './agent.testbundle.mjs';
 
 const policy = new DefaultToolPolicy();
@@ -137,6 +140,28 @@ const parsedExecutorOutput = structuredTeam.executor.outputType.parse(structured
 assert.equal(parsedExecutorOutput.message, '程序已校验');
 assert.equal(structuredTeam.planner.outputType, industrialAgentOutputDefinition.schema);
 assert.equal(structuredTeam.executor.outputType, industrialAgentOutputDefinition.schema);
+
+const chatProfile = saveStoredApiProfile(
+  undefined,
+  'chat_completions',
+  { baseUrl: 'https://chat.example/v1', model: 'chat-model' },
+);
+const bothProfiles = saveStoredApiProfile(
+  chatProfile,
+  'responses',
+  { baseUrl: 'https://responses.example/v1', model: 'responses-model' },
+);
+assert.equal(bothProfiles.activeApiFormat, 'responses');
+assert.deepEqual(getStoredApiProfile(bothProfiles, 'chat_completions'), {
+  baseUrl: 'https://chat.example/v1',
+  model: 'chat-model',
+});
+assert.deepEqual(getStoredApiProfile(bothProfiles, 'responses'), {
+  baseUrl: 'https://responses.example/v1',
+  model: 'responses-model',
+});
+assert.equal(apiKeySecretKey('openai', 'chat_completions'), 'apiKey.openai.chat_completions');
+assert.equal(apiKeySecretKey('openai', 'responses'), 'apiKey.openai.responses');
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-write-'));
 try {

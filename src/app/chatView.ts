@@ -12,19 +12,32 @@ import {
   type AgentApiFormatSetting,
   type AgentProvider,
 } from '../runtime/modelAdapter';
+import {
+  API_SETTINGS_STATE_KEY,
+  LEGACY_API_KEY_SECRET_KEY,
+  LEGACY_SETTINGS_STATE_KEY,
+  apiKeySecretKey,
+  getStoredApiProfile,
+  hasStoredApiProfiles,
+  readLegacyApiSettings,
+  readStoredApiSettings,
+  saveStoredApiProfile,
+} from './settingsProfiles';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
- * 配置持久化:baseUrl/model 存 globalState,apiKey 存 SecretStorage(OS 级加密)。
+ * 配置持久化:每个 provider/API format 独立保存 baseUrl/model，apiKey 存 SecretStorage(OS 级加密)。
  * 会话持久化:对话历史存 workspace storage/session.json(SDK Session 接口),无工作区回退 globalStorage。
  * 消息协议:
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'stop'} / {type:'retry'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
- *                   {type:'getSettings'} / {type:'saveSettings', baseUrl, apiKey, model}
+ *                   {type:'getSettings', apiFormat?, requestId?}
+ *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
- *                   {type:'settings', baseUrl, model, hasKey} / {type:'settingsSaved', model}
+ *                   {type:'settings', baseUrl, model, apiFormat, hasKey, requestId?}
+ *                   {type:'settingsSaved', model, apiFormat} / {type:'settingsError', message}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -71,7 +84,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === 'retry') {
         void this.retry();
       } else if (msg.type === 'getSettings') {
-        void this.sendSettingsToWebview();
+        void this.sendSettingsToWebview(
+          isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined,
+          Number.isInteger(msg.requestId) ? msg.requestId : undefined,
+        );
       } else if (msg.type === 'saveSettings') {
         void this.saveSettings(msg);
       }
@@ -94,47 +110,98 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */
-  async getConfig() {
+  async getConfig(requestedApiFormat?: AgentApiFormat) {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
-    const saved = this.context.globalState.get<{
-      baseUrl?: string;
-      model?: string;
-      apiFormat?: AgentApiFormat;
-    }>('settings') ?? {};
-    const savedKey = (await this.context.secrets.get('apiKey')) ?? '';
+    const savedProfiles = readStoredApiSettings(
+      this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY),
+    );
+    const legacy = readLegacyApiSettings(
+      this.context.globalState.get<unknown>(LEGACY_SETTINGS_STATE_KEY),
+    );
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
-    const baseUrl = (saved.baseUrl || cfg.get<string>('baseUrl') || process.env.OPENAI_BASE_URL || '').trim();
     const provider = cfg.get<AgentProvider>('provider') ?? 'openai';
-    const configuredApiFormat =
-      saved.apiFormat ?? cfg.get<AgentApiFormatSetting>('apiFormat') ?? 'auto';
+    const configuredApiFormat: AgentApiFormatSetting =
+      savedProfiles.activeApiFormat
+      ?? legacy.apiFormat
+      ?? cfg.get<AgentApiFormatSetting>('apiFormat')
+      ?? 'auto';
+    const configuredBaseUrl = (
+      legacy.baseUrl
+      || cfg.get<string>('baseUrl')
+      || process.env.OPENAI_BASE_URL
+      || ''
+    ).trim();
+    const apiFormat = requestedApiFormat
+      ?? resolveApiFormat(configuredBaseUrl, configuredApiFormat);
+    const storedProfile = getStoredApiProfile(savedProfiles, apiFormat);
+    const legacyHasValues = !!legacy.baseUrl || !!legacy.model || !!legacy.apiFormat;
+    const legacyFormat = resolveApiFormat(
+      legacy.baseUrl ?? configuredBaseUrl,
+      legacy.apiFormat ?? 'auto',
+    );
+    const useLegacyProfile = !hasStoredApiProfiles(savedProfiles)
+      && legacyHasValues
+      && legacyFormat === apiFormat;
+    const defaultModel = (
+      cfg.get<string>('model')
+      || process.env.AGENT_MODEL
+      || 'gpt-4o-mini'
+    ).trim();
+    const baseUrl = storedProfile?.baseUrl
+      ?? (useLegacyProfile ? legacy.baseUrl : undefined)
+      ?? (hasStoredApiProfiles(savedProfiles) ? '' : configuredBaseUrl)
+      ?? '';
+    const model = storedProfile?.model
+      || (useLegacyProfile ? legacy.model : undefined)
+      || defaultModel;
+    const formatKey = apiKeySecretKey(provider, apiFormat);
+    const formatKeyValue = await this.context.secrets.get(formatKey);
+    const legacyKeyValue = await this.context.secrets.get(LEGACY_API_KEY_SECRET_KEY);
+    const legacyKeyApplies = !hasStoredApiProfiles(savedProfiles)
+      || (legacyHasValues && legacyFormat === apiFormat);
     return {
       baseUrl,
-      apiKey: (savedKey || cfg.get<string>('apiKey') || process.env.OPENAI_API_KEY || '').trim(),
-      model: (saved.model || cfg.get<string>('model') || process.env.AGENT_MODEL || 'gpt-4o-mini').trim(),
+      apiKey: (
+        formatKeyValue
+        || (legacyKeyApplies ? legacyKeyValue : undefined)
+        || cfg.get<string>('apiKey')
+        || process.env.OPENAI_API_KEY
+        || ''
+      ).trim(),
+      model,
       provider,
-      apiFormat: resolveApiFormat(baseUrl, configuredApiFormat),
+      apiFormat,
       orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
       policyContext: {
         allowedCommands,
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
-      savedInPlugin: !!(saved.baseUrl || saved.model || saved.apiFormat || savedKey),
+      savedInPlugin: !!storedProfile || useLegacyProfile || !!formatKeyValue,
     };
   }
 
-  private async sendSettingsToWebview(): Promise<void> {
-    const cfg = await this.getConfig();
-    this.post({
-      type: 'settings',
-      baseUrl: cfg.baseUrl,
-      model: cfg.model,
-      provider: cfg.provider,
-      apiFormat: cfg.apiFormat,
-      hasKey: !!cfg.apiKey,
-      source: cfg.savedInPlugin ? 'plugin' : 'other',
-    });
+  private async sendSettingsToWebview(
+    requestedApiFormat?: AgentApiFormat,
+    requestId?: number,
+  ): Promise<void> {
+    try {
+      const cfg = await this.getConfig(requestedApiFormat);
+      this.post({
+        type: 'settings',
+        baseUrl: cfg.baseUrl,
+        model: cfg.model,
+        provider: cfg.provider,
+        apiFormat: cfg.apiFormat,
+        hasKey: !!cfg.apiKey,
+        source: cfg.savedInPlugin ? 'plugin' : 'other',
+        ...(requestId === undefined ? {} : { requestId }),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `读取模型配置失败: ${message}` });
+    }
   }
 
   private async saveSettings(msg: {
@@ -146,16 +213,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
     const apiFormat = isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined;
-    await this.context.globalState.update('settings', {
-      baseUrl,
-      model,
-      ...(apiFormat ? { apiFormat } : {}),
-    });
-    if (msg.apiKey) {
-      await this.context.secrets.store('apiKey', msg.apiKey.trim());
+    if (!apiFormat) {
+      this.post({ type: 'settingsError', message: '未选择有效的 API Format' });
+      return;
     }
-    void this.sendSettingsToWebview();
-    this.post({ type: 'settingsSaved', model, apiFormat });
+    try {
+      const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
+      await this.context.globalState.update(
+        API_SETTINGS_STATE_KEY,
+        saveStoredApiProfile(current, apiFormat, { baseUrl, model }),
+      );
+      if (msg.apiKey?.trim()) {
+        const provider = (await this.getConfig(apiFormat)).provider;
+        await this.context.secrets.store(
+          apiKeySecretKey(provider, apiFormat),
+          msg.apiKey.trim(),
+        );
+      }
+      this.post({ type: 'settingsSaved', model, apiFormat });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
+    }
   }
 
   private async send(text: string): Promise<void> {

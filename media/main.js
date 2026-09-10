@@ -20,6 +20,8 @@ let hasSavedKey = false;
 let runtimeMode = 'idle';
 let currentRunId = null;
 let canRetry = false;
+let settingsRequestId = 0;
+let settingsSavePending = false;
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -206,12 +208,19 @@ function autoGrow() {
 // ---------- 设置面板 ----------
 
 function openSettings() {
-  vscode.postMessage({ type: 'getSettings' }); // host 回 'settings' 时填充表单
   settingsEl.classList.remove('hidden');
+  settingsSavePending = false;
+  requestSettings(setFormatEl.value);
   setBaseEl.focus();
 }
 
+function requestSettings(apiFormat) {
+  const requestId = ++settingsRequestId;
+  vscode.postMessage({ type: 'getSettings', apiFormat, requestId });
+}
+
 function closeSettings() {
+  settingsSavePending = false;
   settingsEl.classList.add('hidden');
   inputEl.focus();
 }
@@ -222,11 +231,15 @@ setCancelEl.addEventListener('click', closeSettings);
 settingsEl.addEventListener('click', (e) => {
   if (e.target === settingsEl) closeSettings(); // 点遮罩关闭
 });
+setFormatEl.addEventListener('change', () => {
+  requestSettings(setFormatEl.value);
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !settingsEl.classList.contains('hidden')) closeSettings();
 });
 
 setSaveEl.addEventListener('click', () => {
+  settingsSavePending = true;
   vscode.postMessage({
     type: 'saveSettings',
     baseUrl: setBaseEl.value,
@@ -616,6 +629,7 @@ window.addEventListener('message', (event) => {
       setRuntimeMode(runtimeMode);
       break;
     case 'settings':
+      if (msg.requestId !== undefined && msg.requestId !== settingsRequestId) break;
       hasSavedKey = !!msg.hasKey;
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
@@ -624,7 +638,13 @@ window.addEventListener('message', (event) => {
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
       updateModelChip(msg.model);
       break;
+    case 'settingsError':
+      settingsSavePending = false;
+      addNote('error-note', msg.message || '保存模型配置失败');
+      break;
     case 'settingsSaved':
+      if (!settingsSavePending) break;
+      settingsSavePending = false;
       closeSettings();
       updateModelChip(msg.model);
       addNote('tool-note', msg.model ? `已保存模型配置:${msg.model}` : '已保存模型配置');
@@ -634,5 +654,5 @@ window.addEventListener('message', (event) => {
 
 // 启动时拉一次配置让模型标签显示真实值;先给个欢迎提示,
 // 随后 host 会随 'history' 消息回放持久化历史(有历史时欢迎提示被替换)
-vscode.postMessage({ type: 'getSettings' });
+requestSettings();
 showWelcomeHint();
