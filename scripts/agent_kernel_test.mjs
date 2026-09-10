@@ -95,6 +95,7 @@ async function runTestTurn(userText, decide) {
 // [5] needsApproval-允许:export_st_program 先弹审批 → 批准后文件落盘
 {
   const asked = [];
+  const capabilityLogStart = diagLines.length;
   const approveAll = async (name, args) => {
     asked.push({ name, args });
     return true;
@@ -105,6 +106,19 @@ async function runTestTurn(userText, decide) {
   if (asked.length !== 1 || asked[0].name !== 'export_st_program' || !asked[0].args.includes('PROGRAM'))
     throw new Error('场景5 审批请求参数不符合预期');
   if (!files.includes('StarDelta.st')) throw new Error('场景5 批准后未落盘');
+  const capabilityRequests = diagLines
+    .slice(capabilityLogStart)
+    .filter((line) => line.includes('[req]'));
+  if (!capabilityRequests.some((line) => line.includes('format=json_schema') && !line.includes('choice=-'))) {
+    throw new Error('场景5 首次工具请求没有尝试 response_format + tool_choice');
+  }
+  if (!capabilityRequests.some((line) => line.includes('format=json_schema') && line.includes('choice=-'))) {
+    throw new Error('场景5 工具完成后的最终请求没有恢复结构化输出');
+  }
+  if (process.env.MOCK_REJECT_COMBINED === '1'
+    && !capabilityRequests.some((line) => line.includes('format=-') && !line.includes('choice=-'))) {
+    throw new Error('场景5 网关组合能力冲突后没有降级工具请求');
+  }
 }
 
 // [6] needsApproval-拒绝:不落盘
@@ -140,12 +154,31 @@ async function runTestTurn(userText, decide) {
 // [8] 新会话:clearSession 后文件清空
 {
   await fs.writeFile(path.join(dir, 'lk.txt'), '你好', 'utf8');
+  const capabilityLogStart = diagLines.length;
   const r = await runTestTurn('读取 lk.txt 文件里面的内容', noApproval);
   const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
   const toolResults = r.events.filter((e) => e.type === 'tool.completed');
+  const readResult = toolResults.find((e) => e.payload.toolName === 'read_file');
   console.log('[8] 读取文件:工具链 =', toolCalls.join(','), '| 成功回执 =', toolResults.some((e) => e.payload.toolName === 'read_file' && e.payload.ok), '| 输出 =', r.output);
   if (toolCalls.join(',') !== 'read_file' || !toolResults.some((e) => e.payload.toolName === 'read_file' && e.payload.ok)) {
     throw new Error('读取文件未通过 read_file 成功完成');
+  }
+  if (
+    readResult?.payload.result?.ok !== true ||
+    readResult.payload.result?.data?.content !== '你好'
+  ) {
+    throw new Error('读取文件未透出结构化工具结果，UI 无法稳定格式化');
+  }
+  if (
+    process.env.MOCK_IGNORE_COMBINED === '1' &&
+    !diagLines
+      .slice(capabilityLogStart)
+      .some(
+        (line) =>
+          line.includes('format=-') && line.includes('choice='),
+      )
+  ) {
+    throw new Error('场景8 网关忽略组合参数后没有重试纯工具请求');
   }
 }
 

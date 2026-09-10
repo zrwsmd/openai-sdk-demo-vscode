@@ -70,15 +70,25 @@ function toolArgsSummary(name, args) {
   return '';
 }
 
-function formatToolResult(name, summary) {
-  const parsed = parseJsonValue(summary);
+function formatToolResult(name, summary, result) {
+  const parsed = result && typeof result === 'object'
+    ? result
+    : parseJsonValue(summary);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { headline: summary || '工具返回空结果', detail: '' };
+    const text = typeof summary === 'string' ? summary.trim() : '';
+    return {
+      headline: text && !/^[\[{]/.test(text) ? text : '工具执行成功',
+      detail: '',
+    };
   }
   if (parsed.ok === false) {
     return { headline: parsed.error ? `执行失败：${parsed.error}` : '执行失败', detail: parsed };
   }
   const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : {};
+  if (name === 'read_file') {
+    const lines = typeof data.totalLines === 'number' ? ` · ${data.totalLines} 行` : '';
+    return { headline: `已读取文件${lines}`, detail: parsed };
+  }
   if (name === 'write_file' && typeof data.file === 'string') {
     return {
       headline: `已写入 ${data.file}${typeof data.bytes === 'number' ? ` · ${data.bytes} 字节` : ''}`,
@@ -94,7 +104,7 @@ function formatToolResult(name, summary) {
   return { headline: '工具执行成功', detail: parsed };
 }
 
-function addToolResult(name, ok, summary) {
+function addToolResult(name, ok, summary, result) {
   const note = document.createElement('div');
   note.className = `tool-result ${ok ? 'success' : 'failure'}`;
   const icon = document.createElement('span');
@@ -102,7 +112,7 @@ function addToolResult(name, ok, summary) {
   icon.textContent = ok ? '✓' : '!';
   const body = document.createElement('div');
   body.className = 'tool-result-body';
-  const formatted = formatToolResult(name, summary);
+  const formatted = formatToolResult(name, summary, result);
   if (!ok) formatted.headline = formatted.headline.startsWith('执行失败')
     ? formatted.headline
     : `执行失败：${formatted.headline}`;
@@ -377,7 +387,7 @@ function handleProtocolEvent(event) {
       const summary = typeof payload.summary === 'string'
         ? payload.summary
         : JSON.stringify(payload.result ?? '');
-      addToolResult(name, payload.ok === true, summary);
+      addToolResult(name, payload.ok === true, summary, payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
       break;

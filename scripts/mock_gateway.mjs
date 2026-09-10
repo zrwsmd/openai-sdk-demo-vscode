@@ -8,6 +8,8 @@
 import http from 'node:http';
 
 const REPLY = '你好!我是 PLC 编程助手(插件内核验证),请告诉我你的控制任务。';
+const rejectCombined = process.env.MOCK_REJECT_COMBINED === '1';
+const ignoreCombinedToolChoice = process.env.MOCK_IGNORE_COMBINED === '1';
 const ST_CODE = [
   'PROGRAM StarDelta',
   '  VAR',
@@ -90,12 +92,33 @@ const server = http.createServer((req, res) => {
     const userText = (lastUser && lastUser.content) || '';
     console.log(`[mock] model=${model} tools=${(req_body.tools || []).length} stream=${req_body.stream} msgs=${messages.length} last_role=${last.role}`);
 
+    if (rejectCombined && req_body.response_format && req_body.tool_choice) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          message: 'response_format is not supported together with tool_choice',
+          type: 'invalid_request_error',
+          code: 'unsupported_combination',
+        },
+      }));
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     sse(res, chunk(model, { role: 'assistant' }));
 
     if (userText.includes('循环')) {
       // 死循环模式:无论是否收到工具结果,都再次请求工具 → 应被 maxTurns 截停
       endWithToolCall(res, model);
+    } else if (
+      ignoreCombinedToolChoice &&
+      req_body.response_format &&
+      req_body.tool_choice &&
+      userText.includes('读取') &&
+      last.role !== 'tool'
+    ) {
+      // 模拟部分网关:HTTP 200 接受组合参数,但忽略 tool_choice 直接返回结构化正文。
+      await streamStructuredText(res, model, '网关忽略了本次工具选择。');
     } else if (userText.includes('导出') && last.role !== 'tool') {
       // 审批场景:请求 needsApproval 工具 export_st_program
       sse(res, toolCallChunk(model, 'export_st_program', JSON.stringify({ code: ST_CODE })));
@@ -126,11 +149,17 @@ const server = http.createServer((req, res) => {
       res.write('data: [DONE]\n\n');
       res.end();
     } else if (last.role === 'tool' && userText.includes('导出')) {
-      await streamText(res, model, '好的,已按你的要求导出为 .st 文件。');
+      const text = '好的,已按你的要求导出为 .st 文件。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('读取')) {
-      await streamText(res, model, '已读取 lk.txt 文件内容。');
+      const text = '已读取 lk.txt 文件内容。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('rr.txt')) {
-      await streamText(res, model, '已写入 rr.txt 文件。');
+      const text = '已写入 rr.txt 文件。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
     } else if (last.role === 'tool') {
       await streamStructuredText(res, model, `已通过变量表和校验,星三角程序如下:\n\`\`\`\n${ST_CODE}\n\`\`\``);
     } else if (userText.includes('星三角')) {

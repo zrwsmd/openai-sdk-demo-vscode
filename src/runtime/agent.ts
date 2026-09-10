@@ -581,9 +581,12 @@ export async function verifyWorkspaceWrite(
  * 看门狗追不上响应飞快的网关(实测 10 连发仅 84ms),所以在模型层同步归因:
  * 一次响应若既无内容增量、最终 output 也为空 → 记 1 次空回复;连续 2 次即抛错截停。
  */
-class GatewayGuardedModel extends OpenAIChatCompletionsModel {
+export type GatewayStructuredToolChoiceSupport = 'unknown' | 'supported' | 'unsupported';
+
+export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   private emptyStreak = 0;
   private requiredToolOnce?: RequiredAgentTool;
+  private structuredToolChoiceSupport: GatewayStructuredToolChoiceSupport = 'unknown';
 
   /** 每轮用户消息开始时清零,避免跨轮误伤 */
   resetEmptyStreak(): void {
@@ -595,21 +598,104 @@ class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     this.requiredToolOnce = toolName;
   }
 
+  get structuredToolChoiceCapability(): GatewayStructuredToolChoiceSupport {
+    return this.structuredToolChoiceSupport;
+  }
+
+  private async *streamWithCapabilityNegotiation(
+    effectiveRequest: any,
+    fallbackRequest: any,
+    shouldNegotiate: boolean,
+    requiredTool?: RequiredAgentTool,
+  ): AsyncGenerator<any> {
+    if (!shouldNegotiate) {
+      for await (const ev of super.getStreamedResponse(
+        effectiveRequest,
+      ) as AsyncIterable<any>) {
+        yield ev;
+      }
+      return;
+    }
+
+    let sawEvent = false;
+    let sawRequiredTool = false;
+    const bufferedEvents: any[] = [];
+    try {
+      for await (const ev of super.getStreamedResponse(
+        effectiveRequest,
+      ) as AsyncIterable<any>) {
+        sawEvent = true;
+        if (!sawRequiredTool) {
+          bufferedEvents.push(ev);
+          sawRequiredTool =
+            requiredTool !== undefined &&
+            hasRequiredToolCallEvent(ev, requiredTool);
+          if (sawRequiredTool) {
+            for (const bufferedEvent of bufferedEvents) yield bufferedEvent;
+            bufferedEvents.length = 0;
+          }
+        } else {
+          yield ev;
+        }
+      }
+
+      if (!sawRequiredTool) {
+        this.structuredToolChoiceSupport = 'unsupported';
+        agentLog(
+          '[capability] gateway accepted response_format + tool_choice but did not produce the required tool call; retrying without response_format',
+        );
+        for await (const ev of super.getStreamedResponse(
+          fallbackRequest,
+        ) as AsyncIterable<any>) {
+          yield ev;
+        }
+        return;
+      }
+
+      if (sawEvent && this.structuredToolChoiceSupport === 'unknown') {
+        this.structuredToolChoiceSupport = 'supported';
+        agentLog('[capability] gateway supports response_format + tool_choice');
+      }
+      for (const bufferedEvent of bufferedEvents) yield bufferedEvent;
+    } catch (error) {
+      if (!shouldNegotiate || sawEvent || !isStructuredToolChoiceConflict(error)) {
+        throw error;
+      }
+      this.structuredToolChoiceSupport = 'unsupported';
+      agentLog('[capability] gateway rejected response_format + tool_choice; retrying tool request without response_format');
+      for await (const ev of super.getStreamedResponse(
+        fallbackRequest,
+      ) as AsyncIterable<any>) {
+        yield ev;
+      }
+    }
+  }
+
   async *getStreamedResponse(request: any): AsyncGenerator<any> {
     const requiredTool = this.requiredToolOnce;
     this.requiredToolOnce = undefined;
-    const effectiveRequest = requiredTool
+    const forcedRequest = requiredTool
       ? {
           ...request,
           modelSettings: {
-            ...request.modelSettings,
+            ...(request.modelSettings ?? {}),
             toolChoice: requiredTool,
           },
         }
       : request;
+    const shouldNegotiate = Boolean(
+      requiredTool && hasStructuredOutput(request.outputType),
+    );
+    const effectiveRequest =
+      shouldNegotiate && this.structuredToolChoiceSupport === 'unsupported'
+        ? withoutStructuredOutput(forcedRequest)
+        : forcedRequest;
     let sawOutput = false;
-    for await (const ev of super.getStreamedResponse(
+    for await (const ev of this.streamWithCapabilityNegotiation(
       effectiveRequest,
+      withoutStructuredOutput(forcedRequest),
+      shouldNegotiate,
+      requiredTool,
     ) as AsyncIterable<any>) {
       // chat_completions 下 SDK 只透出 response_started/model/output_text_delta,没有终结的
       // model_response 事件,所以直接看原始 chunk 的 delta:有正文或 tool_calls 就不算空回复
@@ -627,6 +713,79 @@ class GatewayGuardedModel extends OpenAIChatCompletionsModel {
       throw new EmptyGatewayResponseError();
     }
   }
+}
+
+function hasStructuredOutput(outputType: unknown): boolean {
+  return outputType !== undefined && outputType !== null && outputType !== 'text';
+}
+
+function withoutStructuredOutput(request: any): any {
+  return {
+    ...request,
+    outputType: 'text',
+  };
+}
+
+function hasRequiredToolCallEvent(
+  event: any,
+  requiredTool: RequiredAgentTool,
+): boolean {
+  const raw = event?.event ?? event?.data;
+  const choices = Array.isArray(raw?.choices) ? raw.choices : [];
+  for (const choice of choices) {
+    const toolCalls = Array.isArray(choice?.delta?.tool_calls)
+      ? choice.delta.tool_calls
+      : [];
+    if (
+      toolCalls.some(
+        (call: any) =>
+          call?.function?.name === requiredTool || call?.name === requiredTool,
+      )
+    ) {
+      return true;
+    }
+  }
+
+  const output = event?.response?.output ?? event?.data?.response?.output;
+  return (
+    Array.isArray(output) &&
+    output.some(
+      (item: any) =>
+        (item?.type === 'function_call' || item?.type === 'tool_call') &&
+        item?.name === requiredTool,
+    )
+  );
+}
+
+function isStructuredToolChoiceConflict(error: unknown): boolean {
+  const value = error as {
+    status?: unknown;
+    message?: unknown;
+    error?: { message?: unknown; code?: unknown };
+    body?: { error?: { message?: unknown; code?: unknown } };
+    response?: { data?: { error?: { message?: unknown; code?: unknown } } };
+  };
+  const status = typeof value?.status === 'number' ? value.status : undefined;
+  const text = [
+    value?.message,
+    value?.error?.message,
+    value?.error?.code,
+    value?.body?.error?.message,
+    value?.body?.error?.code,
+    value?.response?.data?.error?.message,
+    value?.response?.data?.error?.code,
+  ]
+    .filter((part): part is string => typeof part === 'string')
+    .join(' ')
+    .toLowerCase();
+  if (status !== undefined && status !== 400 && status !== 422) return false;
+  const mentionsFormat =
+    /response[_ ]?format|json[_ -]?schema|structured output/.test(text);
+  const mentionsToolChoice =
+    /tool[_ ]?choice|function call|tool call|tools/.test(text);
+  const describesConflict =
+    /not supported|unsupported|cannot|can't|invalid|incompatible|conflict|not allowed|does not allow|only/.test(text);
+  return mentionsFormat && mentionsToolChoice && describesConflict;
 }
 
 // ---------- 网关原始报文诊断(写入 "PLC Agent" 输出面板) ----------
@@ -829,7 +988,7 @@ export async function runAgent(
 ): Promise<AgentRunResult> {
   const actionPolicy = cfg.actionPolicy ?? new DefaultActionPolicy();
   const requiredTool = actionPolicy.requiredToolFor(userText);
-  const forceToolChoice =
+  const requestedToolChoice =
     requiredTool && !options.initialState
       ? { toolChoice: requiredTool }
       : undefined;
@@ -839,8 +998,6 @@ export async function runAgent(
   );
   const model = buildModel(cfg);
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
-  const gatewayActionTurn =
-    model instanceof GatewayGuardedModel && requiredTool !== undefined;
   if (
     model instanceof GatewayGuardedModel &&
     requiredTool &&
@@ -848,12 +1005,17 @@ export async function runAgent(
   ) {
     model.requireToolOnce(requiredTool);
   }
+  // The gateway model negotiates the first tool request itself. Keeping
+  // toolChoice off the Agent settings makes it one-shot, so the post-tool
+  // final turn can use structured output without a tool-choice conflict.
+  const forceToolChoice =
+    model instanceof GatewayGuardedModel ? undefined : requestedToolChoice;
   const tools = buildTools(cfg, requiredTool);
   const agent =
     cfg.orchestration === "team"
       ? (() => {
           const team = createIndustrialAgentTeam(model, tools, {
-            executorStructuredOutput: !gatewayActionTurn,
+            executorStructuredOutput: true,
             executorModelSettings: forceToolChoice,
           });
           // Explicit side effects bypass planning and enter the controlled executor
@@ -866,12 +1028,9 @@ export async function runAgent(
           instructions: SYSTEM_PROMPT,
           tools,
           ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
-          // Some OpenAI-compatible gateways cannot honor response_format and
-          // tool_choice in the same request. Action turns use text internally;
-          // the host still creates the canonical structured result below.
-          ...(gatewayActionTurn
-            ? {}
-            : { outputType: industrialAgentOutputDefinition.schema }),
+          // Gateway capability negotiation happens inside GatewayGuardedModel;
+          // the Agent keeps the canonical structured output contract.
+          outputType: industrialAgentOutputDefinition.schema,
         });
 
   const runner = new Runner();
@@ -984,7 +1143,7 @@ export async function runAgent(
   const protocolAdapter = new AgentStreamAdapter({
     runId: options.protocol.runId,
     operationId: options.protocol.operationId,
-    structuredOutput: !gatewayActionTurn,
+    structuredOutput: true,
     eventFactory: options.protocol.eventFactory,
     emit: (event) => {
       observeProtocolEvent(event);
@@ -1009,17 +1168,7 @@ export async function runAgent(
       usage.outputTokens = stream.state.usage.outputTokens;
     }
     if (stream.finalOutput !== undefined) {
-      structuredOutput = gatewayActionTurn
-        ? {
-            message:
-              typeof stream.finalOutput === "string"
-                ? stream.finalOutput
-                : String(stream.finalOutput ?? ""),
-            diagnostics: [],
-            artifacts: [],
-            data: null,
-          }
-        : parseIndustrialAgentOutput(stream.finalOutput);
+      structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
       const projected = projectAgentOutput(
         industrialAgentOutputDefinition,
         structuredOutput,
@@ -1130,9 +1279,14 @@ export async function runAgent(
     state = stream.state;
 
     // A gateway may complete a successful action without a final text turn.
-    // The action result is still valid; keep the canonical result structured
-    // and let the UI show the tool receipt instead of failing Schema parsing.
-    if (!structuredOutput && gatewayActionTurn) {
+    // Keep the existing action result fallback for that explicit empty-response
+    // path; normal completed turns must still pass schema validation above.
+    if (
+      !structuredOutput &&
+      outcome === "empty-bailed" &&
+      model instanceof GatewayGuardedModel &&
+      requiredTool !== undefined
+    ) {
       structuredOutput = {
         message: output,
         diagnostics: [],
