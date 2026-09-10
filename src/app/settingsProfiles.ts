@@ -1,5 +1,6 @@
 import {
   isAgentApiFormat,
+  isAgentProvider,
   type AgentApiFormat,
   type AgentProvider,
 } from '../runtime/modelAdapter';
@@ -14,8 +15,11 @@ export interface ApiSettingsProfile {
 }
 
 export interface StoredApiSettings {
+  activeProvider?: AgentProvider;
   activeApiFormat?: AgentApiFormat;
-  profiles: Partial<Record<AgentApiFormat, ApiSettingsProfile>>;
+  profiles: Partial<
+    Record<AgentProvider, Partial<Record<AgentApiFormat, ApiSettingsProfile>>>
+  >;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -42,15 +46,52 @@ function normalizeProfile(value: unknown): ApiSettingsProfile | undefined {
 export function readStoredApiSettings(value: unknown): StoredApiSettings {
   if (!isRecord(value)) return { profiles: {} };
 
-  const profiles: Partial<Record<AgentApiFormat, ApiSettingsProfile>> = {};
+  const profiles: StoredApiSettings['profiles'] = {};
   if (isRecord(value.profiles)) {
-    for (const format of ['chat_completions', 'responses'] as const) {
+    for (const provider of ['openai', 'anthropic'] as const) {
+      const providerValue = value.profiles[provider];
+      if (!isRecord(providerValue)) continue;
+      const providerProfiles: Partial<
+        Record<AgentApiFormat, ApiSettingsProfile>
+      > = {};
+      for (const format of [
+        'chat_completions',
+        'responses',
+        'messages',
+      ] as const) {
+        const profile = normalizeProfile(providerValue[format]);
+        if (profile) providerProfiles[format] = profile;
+      }
+      if (Object.keys(providerProfiles).length) {
+        profiles[provider] = providerProfiles;
+      }
+    }
+
+    // Migrate the previous format-only shape into the OpenAI namespace.
+    const legacyOpenAiProfiles: Partial<
+      Record<AgentApiFormat, ApiSettingsProfile>
+    > = { ...(profiles.openai ?? {}) };
+    for (const format of [
+      'chat_completions',
+      'responses',
+      'messages',
+    ] as const) {
       const profile = normalizeProfile(value.profiles[format]);
-      if (profile) profiles[format] = profile;
+      if (profile && !legacyOpenAiProfiles[format]) {
+        legacyOpenAiProfiles[format] = profile;
+      }
+    }
+    if (Object.keys(legacyOpenAiProfiles).length) {
+      profiles.openai = legacyOpenAiProfiles;
     }
   }
 
   return {
+    ...(isAgentProvider(value.activeProvider)
+      ? { activeProvider: value.activeProvider }
+      : isAgentApiFormat(value.activeApiFormat)
+        ? { activeProvider: 'openai' as const }
+        : {}),
     ...(isAgentApiFormat(value.activeApiFormat)
       ? { activeApiFormat: value.activeApiFormat }
       : {}),
@@ -74,29 +115,38 @@ export function readLegacyApiSettings(value: unknown): {
 }
 
 export function hasStoredApiProfiles(settings: StoredApiSettings): boolean {
-  return Object.keys(settings.profiles).length > 0;
+  return Object.values(settings.profiles).some(
+    (profiles) => !!profiles && Object.keys(profiles).length > 0,
+  );
 }
 
 export function getStoredApiProfile(
   settings: StoredApiSettings,
+  provider: AgentProvider,
   format: AgentApiFormat,
 ): ApiSettingsProfile | undefined {
-  return settings.profiles[format];
+  return settings.profiles[provider]?.[format];
 }
 
 export function saveStoredApiProfile(
   current: unknown,
+  provider: AgentProvider,
   format: AgentApiFormat,
   profile: ApiSettingsProfile,
 ): StoredApiSettings {
   const settings = readStoredApiSettings(current);
+  const providerProfiles = settings.profiles[provider] ?? {};
   return {
+    activeProvider: provider,
     activeApiFormat: format,
     profiles: {
       ...settings.profiles,
-      [format]: {
-        baseUrl: profile.baseUrl.trim().replace(/\/+$/, ''),
-        model: profile.model.trim(),
+      [provider]: {
+        ...providerProfiles,
+        [format]: {
+          baseUrl: profile.baseUrl.trim().replace(/\/+$/, ''),
+          model: profile.model.trim(),
+        },
       },
     },
   };

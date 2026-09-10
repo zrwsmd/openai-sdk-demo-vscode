@@ -5,7 +5,12 @@ import type { ApprovalRequest, TurnUsage } from './agent';
 import { EffectRecoveryRequiredError } from './errors';
 import { parseAgentResult, type AgentResult } from '../protocol/results';
 import type { ToolPolicyOverrides } from '../tools/toolContract';
-import type { AgentApiFormat, AgentProvider } from './modelAdapter';
+import {
+  isAgentApiFormat,
+  isAgentProvider,
+  type AgentApiFormat,
+  type AgentProvider,
+} from './modelAdapter';
 
 export type DurableRunStatus =
   | 'running'
@@ -174,9 +179,10 @@ export class JsonRunStore implements RunStore {
       !run.config ||
       typeof run.config.baseUrl !== 'string' ||
       typeof run.config.model !== 'string' ||
-      (run.config.provider !== undefined && run.config.provider !== 'openai') ||
-      (run.config.apiFormat !== undefined &&
-        !['chat_completions', 'responses'].includes(run.config.apiFormat)) ||
+      (run.config.provider !== undefined && !isAgentProvider(run.config.provider)) ||
+      (run.config.apiFormat !== undefined && !isAgentApiFormat(run.config.apiFormat)) ||
+      (run.config.provider === 'anthropic' && run.config.apiFormat !== 'messages') ||
+      (run.config.provider === 'openai' && run.config.apiFormat === 'messages') ||
       typeof run.config.exportDir !== 'string' ||
       typeof run.config.workspaceRoot !== 'string' ||
       (run.config.workspaceRoots !== undefined &&

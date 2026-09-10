@@ -19,6 +19,7 @@ import {
   WorkspaceScope,
   apiKeySecretKey,
   getStoredApiProfile,
+  readStoredApiSettings,
   saveStoredApiProfile,
 } from './agent.testbundle.mjs';
 
@@ -143,25 +144,59 @@ assert.equal(structuredTeam.executor.outputType, industrialAgentOutputDefinition
 
 const chatProfile = saveStoredApiProfile(
   undefined,
+  'openai',
   'chat_completions',
   { baseUrl: 'https://chat.example/v1', model: 'chat-model' },
 );
 const bothProfiles = saveStoredApiProfile(
   chatProfile,
+  'openai',
   'responses',
   { baseUrl: 'https://responses.example/v1', model: 'responses-model' },
 );
 assert.equal(bothProfiles.activeApiFormat, 'responses');
-assert.deepEqual(getStoredApiProfile(bothProfiles, 'chat_completions'), {
+assert.equal(bothProfiles.activeProvider, 'openai');
+assert.deepEqual(getStoredApiProfile(bothProfiles, 'openai', 'chat_completions'), {
   baseUrl: 'https://chat.example/v1',
   model: 'chat-model',
 });
-assert.deepEqual(getStoredApiProfile(bothProfiles, 'responses'), {
+assert.deepEqual(getStoredApiProfile(bothProfiles, 'openai', 'responses'), {
   baseUrl: 'https://responses.example/v1',
   model: 'responses-model',
 });
+const anthropicProfile = saveStoredApiProfile(
+  bothProfiles,
+  'anthropic',
+  'messages',
+  { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-test' },
+);
+assert.equal(anthropicProfile.activeProvider, 'anthropic');
+assert.equal(anthropicProfile.activeApiFormat, 'messages');
+assert.deepEqual(getStoredApiProfile(anthropicProfile, 'openai', 'responses'), {
+  baseUrl: 'https://responses.example/v1',
+  model: 'responses-model',
+});
+assert.deepEqual(getStoredApiProfile(anthropicProfile, 'anthropic', 'messages'), {
+  baseUrl: 'https://api.anthropic.com/v1',
+  model: 'claude-test',
+});
+const migratedProfiles = readStoredApiSettings({
+  activeApiFormat: 'chat_completions',
+  profiles: {
+    chat_completions: {
+      baseUrl: 'https://legacy.example/v1',
+      model: 'legacy-model',
+    },
+  },
+});
+assert.equal(migratedProfiles.activeProvider, 'openai');
+assert.deepEqual(getStoredApiProfile(migratedProfiles, 'openai', 'chat_completions'), {
+  baseUrl: 'https://legacy.example/v1',
+  model: 'legacy-model',
+});
 assert.equal(apiKeySecretKey('openai', 'chat_completions'), 'apiKey.openai.chat_completions');
 assert.equal(apiKeySecretKey('openai', 'responses'), 'apiKey.openai.responses');
+assert.equal(apiKeySecretKey('anthropic', 'messages'), 'apiKey.anthropic.messages');
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-write-'));
 try {

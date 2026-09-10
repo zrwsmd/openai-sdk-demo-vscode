@@ -23,6 +23,27 @@ assert.equal(
   }).apiFormat,
   'responses',
 );
+assert.equal(resolveApiFormat('', undefined, 'anthropic'), 'messages');
+assert.equal(
+  resolveModelRoute({
+    provider: 'anthropic',
+    apiFormat: 'messages',
+    baseUrl: 'http://mock',
+    apiKey: 'mock-key',
+    model: 'mock-anthropic',
+  }).apiFormat,
+  'messages',
+);
+assert.throws(
+  () => resolveModelRoute({
+    provider: 'anthropic',
+    apiFormat: 'responses',
+    baseUrl: 'http://mock',
+    apiKey: 'mock-key',
+    model: 'mock-anthropic',
+  }),
+  /Messages/,
+);
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-responses-test-'));
 const port = process.env.MOCK_GATEWAY_PORT || '8790';

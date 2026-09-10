@@ -12,6 +12,7 @@ const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
+const setProviderEl = document.getElementById('set-provider');
 const setFormatEl = document.getElementById('set-format');
 const setSaveEl = document.getElementById('set-save');
 const setCancelEl = document.getElementById('set-cancel');
@@ -210,13 +211,16 @@ function autoGrow() {
 function openSettings() {
   settingsEl.classList.remove('hidden');
   settingsSavePending = false;
-  requestSettings(setFormatEl.value);
+  requestSettings();
   setBaseEl.focus();
 }
 
-function requestSettings(apiFormat) {
+function requestSettings(provider, apiFormat) {
   const requestId = ++settingsRequestId;
-  vscode.postMessage({ type: 'getSettings', apiFormat, requestId });
+  const message = { type: 'getSettings', requestId };
+  if (provider) message.provider = provider;
+  if (apiFormat) message.apiFormat = apiFormat;
+  vscode.postMessage(message);
 }
 
 function closeSettings() {
@@ -231,8 +235,25 @@ setCancelEl.addEventListener('click', closeSettings);
 settingsEl.addEventListener('click', (e) => {
   if (e.target === settingsEl) closeSettings(); // 点遮罩关闭
 });
+function syncFormatOptions(provider) {
+  const anthropic = provider === 'anthropic';
+  for (const option of setFormatEl.options) {
+    option.disabled = anthropic
+      ? option.value !== 'messages'
+      : option.value === 'messages';
+  }
+}
+setProviderEl.addEventListener('change', () => {
+  if (setProviderEl.value === 'anthropic') {
+    setFormatEl.value = 'messages';
+  } else if (setFormatEl.value === 'messages') {
+    setFormatEl.value = 'chat_completions';
+  }
+  syncFormatOptions(setProviderEl.value);
+  requestSettings(setProviderEl.value, setFormatEl.value);
+});
 setFormatEl.addEventListener('change', () => {
-  requestSettings(setFormatEl.value);
+  requestSettings(setProviderEl.value, setFormatEl.value);
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !settingsEl.classList.contains('hidden')) closeSettings();
@@ -245,6 +266,7 @@ setSaveEl.addEventListener('click', () => {
     baseUrl: setBaseEl.value,
     apiKey: setKeyEl.value, // 留空 = 不修改已保存的 key
     model: setModelEl.value,
+    provider: setProviderEl.value,
     apiFormat: setFormatEl.value,
   });
 });
@@ -633,7 +655,9 @@ window.addEventListener('message', (event) => {
       hasSavedKey = !!msg.hasKey;
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
+      setProviderEl.value = msg.provider || (msg.apiFormat === 'messages' ? 'anthropic' : 'openai');
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
+      syncFormatOptions(setProviderEl.value);
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
       updateModelChip(msg.model);

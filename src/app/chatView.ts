@@ -7,6 +7,7 @@ import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
 import { JsonAuditSink } from '../observability/audit';
 import {
   isAgentApiFormat,
+  isAgentProvider,
   resolveApiFormat,
   type AgentApiFormat,
   type AgentApiFormatSetting,
@@ -18,7 +19,6 @@ import {
   LEGACY_SETTINGS_STATE_KEY,
   apiKeySecretKey,
   getStoredApiProfile,
-  hasStoredApiProfiles,
   readLegacyApiSettings,
   readStoredApiSettings,
   saveStoredApiProfile,
@@ -85,6 +85,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.retry();
       } else if (msg.type === 'getSettings') {
         void this.sendSettingsToWebview(
+          isAgentProvider(msg.provider) ? msg.provider : undefined,
           isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined,
           Number.isInteger(msg.requestId) ? msg.requestId : undefined,
         );
@@ -110,7 +111,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */
-  async getConfig(requestedApiFormat?: AgentApiFormat) {
+  async getConfig(
+    requestedProvider?: AgentProvider,
+    requestedApiFormat?: AgentApiFormat,
+  ) {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
     const savedProfiles = readStoredApiSettings(
       this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY),
@@ -120,37 +124,65 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
-    const provider = cfg.get<AgentProvider>('provider') ?? 'openai';
+    const configuredProvider = cfg.get<unknown>('provider');
+    const provider = requestedProvider
+      ?? savedProfiles.activeProvider
+      ?? (isAgentProvider(configuredProvider) ? configuredProvider : 'openai');
+    const savedProvider = savedProfiles.activeProvider;
+    const legacyFormatSetting = provider === 'openai'
+      ? legacy.apiFormat
+      : undefined;
     const configuredApiFormat: AgentApiFormatSetting =
-      savedProfiles.activeApiFormat
-      ?? legacy.apiFormat
+      (savedProvider === provider ? savedProfiles.activeApiFormat : undefined)
+      ?? legacyFormatSetting
       ?? cfg.get<AgentApiFormatSetting>('apiFormat')
       ?? 'auto';
+    const envBaseUrl = provider === 'anthropic'
+      ? process.env.ANTHROPIC_BASE_URL
+      : process.env.OPENAI_BASE_URL;
+    const configuredBaseSetting = provider === 'openai'
+      ? cfg.get<string>('baseUrl')
+      : undefined;
     const configuredBaseUrl = (
-      legacy.baseUrl
-      || cfg.get<string>('baseUrl')
-      || process.env.OPENAI_BASE_URL
+      (provider === 'openai' ? legacy.baseUrl : undefined)
+      || configuredBaseSetting
+      || envBaseUrl
       || ''
     ).trim();
-    const apiFormat = requestedApiFormat
-      ?? resolveApiFormat(configuredBaseUrl, configuredApiFormat);
-    const storedProfile = getStoredApiProfile(savedProfiles, apiFormat);
-    const legacyHasValues = !!legacy.baseUrl || !!legacy.model || !!legacy.apiFormat;
-    const legacyFormat = resolveApiFormat(
-      legacy.baseUrl ?? configuredBaseUrl,
-      legacy.apiFormat ?? 'auto',
+    const apiFormat = resolveApiFormat(
+      configuredBaseUrl,
+      requestedApiFormat ?? configuredApiFormat,
+      provider,
     );
-    const useLegacyProfile = !hasStoredApiProfiles(savedProfiles)
+    const storedProfile = getStoredApiProfile(savedProfiles, provider, apiFormat);
+    const hasStoredProviderProfiles = Object.keys(
+      savedProfiles.profiles[provider] ?? {},
+    ).length > 0;
+    const legacyHasValues = provider === 'openai'
+      && (!!legacy.baseUrl || !!legacy.model || !!legacy.apiFormat);
+    const legacyFormat = provider === 'openai'
+      ? resolveApiFormat(
+        legacy.baseUrl ?? configuredBaseUrl,
+        legacy.apiFormat ?? 'auto',
+        'openai',
+      )
+      : undefined;
+    const useLegacyProfile = provider === 'openai'
+      && !hasStoredProviderProfiles
       && legacyHasValues
       && legacyFormat === apiFormat;
     const defaultModel = (
-      cfg.get<string>('model')
-      || process.env.AGENT_MODEL
-      || 'gpt-4o-mini'
+      (provider === 'openai' ? cfg.get<string>('model') : undefined)
+      || (provider === 'anthropic'
+        ? process.env.ANTHROPIC_MODEL
+        : process.env.AGENT_MODEL)
+      || (provider === 'anthropic'
+        ? 'claude-sonnet-4-5-20250929'
+        : 'gpt-4o-mini')
     ).trim();
     const baseUrl = storedProfile?.baseUrl
       ?? (useLegacyProfile ? legacy.baseUrl : undefined)
-      ?? (hasStoredApiProfiles(savedProfiles) ? '' : configuredBaseUrl)
+      ?? (hasStoredProviderProfiles ? '' : configuredBaseUrl)
       ?? '';
     const model = storedProfile?.model
       || (useLegacyProfile ? legacy.model : undefined)
@@ -158,15 +190,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const formatKey = apiKeySecretKey(provider, apiFormat);
     const formatKeyValue = await this.context.secrets.get(formatKey);
     const legacyKeyValue = await this.context.secrets.get(LEGACY_API_KEY_SECRET_KEY);
-    const legacyKeyApplies = !hasStoredApiProfiles(savedProfiles)
-      || (legacyHasValues && legacyFormat === apiFormat);
+    const legacyKeyApplies = provider === 'openai'
+      && (!hasStoredProviderProfiles
+      || (legacyHasValues && legacyFormat === apiFormat));
+    const envApiKey = provider === 'anthropic'
+      ? process.env.ANTHROPIC_API_KEY
+      : process.env.OPENAI_API_KEY;
+    const configuredApiKey = provider === 'openai'
+      ? cfg.get<string>('apiKey')
+      : undefined;
     return {
       baseUrl,
       apiKey: (
         formatKeyValue
         || (legacyKeyApplies ? legacyKeyValue : undefined)
-        || cfg.get<string>('apiKey')
-        || process.env.OPENAI_API_KEY
+        || configuredApiKey
+        || envApiKey
         || ''
       ).trim(),
       model,
@@ -183,11 +222,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendSettingsToWebview(
+    requestedProvider?: AgentProvider,
     requestedApiFormat?: AgentApiFormat,
     requestId?: number,
   ): Promise<void> {
     try {
-      const cfg = await this.getConfig(requestedApiFormat);
+      const cfg = await this.getConfig(requestedProvider, requestedApiFormat);
       this.post({
         type: 'settings',
         baseUrl: cfg.baseUrl,
@@ -208,29 +248,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     baseUrl?: string;
     apiKey?: string;
     model?: string;
+    provider?: AgentProvider;
     apiFormat?: AgentApiFormat;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
+    const provider = isAgentProvider(msg.provider)
+      ? msg.provider
+      : msg.apiFormat === 'messages'
+        ? 'anthropic'
+        : (await this.getConfig()).provider;
     const apiFormat = isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined;
     if (!apiFormat) {
       this.post({ type: 'settingsError', message: '未选择有效的 API Format' });
       return;
     }
     try {
+      resolveApiFormat(baseUrl, apiFormat, provider);
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
       await this.context.globalState.update(
         API_SETTINGS_STATE_KEY,
-        saveStoredApiProfile(current, apiFormat, { baseUrl, model }),
+        saveStoredApiProfile(current, provider, apiFormat, { baseUrl, model }),
       );
       if (msg.apiKey?.trim()) {
-        const provider = (await this.getConfig(apiFormat)).provider;
         await this.context.secrets.store(
           apiKeySecretKey(provider, apiFormat),
           msg.apiKey.trim(),
         );
       }
-      this.post({ type: 'settingsSaved', model, apiFormat });
+      this.post({ type: 'settingsSaved', model, provider, apiFormat });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
@@ -292,9 +338,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
       <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
       <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+      <label>Provider<select id="set-provider">
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+      </select></label>
       <label>API Format<select id="set-format">
         <option value="chat_completions">OpenAI Chat Completions</option>
         <option value="responses">OpenAI Responses</option>
+        <option value="messages">Anthropic Messages</option>
       </select></label>
       <div class="settings-actions">
         <button id="set-save" class="btn primary">保存</button>
