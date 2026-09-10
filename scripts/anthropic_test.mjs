@@ -119,6 +119,7 @@ const server = http.createServer((req, res) => {
           stopReason: 'end_turn',
           inputTokens: 12,
           outputTokens: 16,
+          inputTokensInMessageStart: false,
         });
       }
     } catch (error) {
@@ -146,7 +147,9 @@ async function streamMessage(res, model, blocks, usage) {
       stop_reason: null,
       stop_sequence: null,
       usage: {
-        input_tokens: usage.inputTokens,
+        ...(usage.inputTokensInMessageStart === false
+          ? {}
+          : { input_tokens: usage.inputTokens }),
         output_tokens: 0,
       },
     },
@@ -203,6 +206,9 @@ async function streamMessage(res, model, blocks, usage) {
     },
     usage: {
       output_tokens: usage.outputTokens,
+      ...(usage.inputTokensInMessageStart === false
+        ? { prompt_tokens: usage.inputTokens }
+        : {}),
     },
   });
   sse(res, { type: 'message_stop' });
@@ -249,6 +255,8 @@ async function runTestTurn(text) {
 try {
       const normal = await runTestTurn('你好');
       assert.equal(normal.result.status, 'completed');
+      assert.equal(normal.result.usage.inputTokens, 12);
+      assert.equal(normal.result.usage.outputTokens, 16);
       assert.match(normal.result.output, /你好，我是 Anthropic Messages 兼容模型/);
 
   await fs.writeFile(path.join(workspace, 'lk.txt'), '你好', 'utf8');

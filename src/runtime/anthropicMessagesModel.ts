@@ -398,16 +398,31 @@ async function* streamToModelEvents(
   let stopSequence: unknown = null;
   let inputTokens = 0;
   let outputTokens = 0;
+  const updateUsage = (...candidates: unknown[]): void => {
+    for (const candidate of candidates) {
+      const snapshot = anthropicUsageSnapshot(candidate);
+      if (!snapshot) continue;
+      inputTokens = mergeUsageToken(inputTokens, snapshot.inputTokens);
+      outputTokens = mergeUsageToken(outputTokens, snapshot.outputTokens);
+    }
+  };
 
   for await (const rawEvent of stream) {
     const event = rawEvent as unknown as Record<string, unknown>;
     const type = stringValue(event.type);
+    const eventMessage = isRecord(event.message) ? event.message : undefined;
+    const eventDelta = isRecord(event.delta) ? event.delta : undefined;
+    const eventData = isRecord(event.data) ? event.data : undefined;
+    updateUsage(
+      event.usage,
+      eventMessage?.usage,
+      eventDelta?.usage,
+      eventData?.usage,
+    );
 
     if (type === 'message_start') {
       const startMessage = isRecord(event.message) ? event.message : {};
       message = { ...startMessage };
-      const usage = isRecord(startMessage.usage) ? startMessage.usage : {};
-      inputTokens = anthropicInputTokens(usage);
       if (!started) {
         started = true;
         yield {
@@ -521,8 +536,6 @@ async function* streamToModelEvents(
       const delta = isRecord(event.delta) ? event.delta : {};
       stopReason = delta.stop_reason ?? stopReason;
       stopSequence = delta.stop_sequence ?? stopSequence;
-      const usage = isRecord(event.usage) ? event.usage : {};
-      outputTokens = numberValue(usage.output_tokens) ?? outputTokens;
       continue;
     }
 
@@ -668,8 +681,8 @@ function toolResultText(output: unknown): { text: string; isError: boolean } {
 
 function usageFromAnthropic(usage: unknown): ModelResponse['usage'] {
   const value = isRecord(usage) ? usage : {};
-  const inputTokens = anthropicInputTokens(value);
-  const outputTokens = numberValue(value.output_tokens) ?? 0;
+  const inputTokens = anthropicInputTokens(value) ?? 0;
+  const outputTokens = anthropicOutputTokens(value) ?? 0;
   const totalTokens = inputTokens + outputTokens;
   return {
     requests: 1,
@@ -687,12 +700,82 @@ function usageFromAnthropic(usage: unknown): ModelResponse['usage'] {
   } as unknown as ModelResponse['usage'];
 }
 
-function anthropicInputTokens(value: Record<string, unknown>): number {
-  return (
-    (numberValue(value.input_tokens) ?? 0)
-    + (numberValue(value.cache_creation_input_tokens) ?? 0)
-    + (numberValue(value.cache_read_input_tokens) ?? 0)
-  );
+interface AnthropicUsageSnapshot {
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+function anthropicUsageSnapshot(value: unknown): AnthropicUsageSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  const inputTokens = anthropicInputTokens(value);
+  const outputTokens = anthropicOutputTokens(value);
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+  };
+}
+
+function mergeUsageToken(current: number, next: number | undefined): number {
+  // A later compatibility event may contain only output usage or an explicit
+  // zero input value. Do not let that erase a valid earlier input count.
+  return next === undefined || (next === 0 && current > 0) ? current : next;
+}
+
+function anthropicInputTokens(value: Record<string, unknown>): number | undefined {
+  const inputTokens = firstUsageNumber(value, [
+    'input_tokens',
+    'prompt_tokens',
+    'inputTokens',
+    'promptTokens',
+  ]);
+  const cacheCreation = firstUsageNumber(value, [
+    'cache_creation_input_tokens',
+    'cacheCreationInputTokens',
+  ]);
+  const cacheRead = firstUsageNumber(value, [
+    'cache_read_input_tokens',
+    'cacheReadInputTokens',
+  ]);
+  if (
+    inputTokens === undefined
+    && cacheCreation === undefined
+    && cacheRead === undefined
+  ) {
+    return undefined;
+  }
+  return (inputTokens ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0);
+}
+
+function anthropicOutputTokens(value: Record<string, unknown>): number | undefined {
+  return firstUsageNumber(value, [
+    'output_tokens',
+    'completion_tokens',
+    'outputTokens',
+    'completionTokens',
+  ]);
+}
+
+function firstUsageNumber(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): number | undefined {
+  let zero: number | undefined;
+  for (const key of keys) {
+    const number = usageNumberValue(value[key]);
+    if (number === undefined) continue;
+    if (number > 0) return number;
+    zero ??= number;
+  }
+  return zero;
+}
+
+function usageNumberValue(value: unknown): number | undefined {
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : undefined;
+  }
+  return numberValue(value);
 }
 
 function normalizeAnthropicBaseUrl(value: string): string {
