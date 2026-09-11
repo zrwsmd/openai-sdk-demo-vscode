@@ -587,6 +587,16 @@ export class AgentActionVerificationError extends Error {
   }
 }
 
+function isAgentCancellationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "AbortError" ||
+    error.name === "APIUserAbortError" ||
+    error.constructor.name === "APIUserAbortError" ||
+    error.message === "Request was aborted."
+  );
+}
+
 export async function verifyWorkspaceWrite(
   workspaceRoot: string | WorkspaceScope,
   relativePath: string,
@@ -1205,21 +1215,38 @@ export async function runAgent(
 
   const pump = async (
     stream: StreamedRunResult<any, any>,
-  ): Promise<"done" | "empty-bailed"> => {
+  ): Promise<"done" | "empty-bailed" | "cancelled"> => {
     let bailed = false;
+    let cancelled = false;
     try {
       await protocolAdapter.consume(stream);
     } catch (e) {
-      if (!(e instanceof EmptyGatewayResponseError)) throw e;
-      bailed = true;
+      if (isAgentCancellationError(e) || options.signal?.aborted || stream.cancelled) {
+        cancelled = true;
+      } else if (e instanceof EmptyGatewayResponseError) {
+        bailed = true;
+      } else {
+        throw e;
+      }
     }
-    try {
+    if (!cancelled && !bailed) {
       // Session persistence and finalOutput settlement can finish after the
       // last streamed event. Await completed before reading settled summaries.
-      await stream.completed;
-    } catch (e) {
-      if (!(e instanceof EmptyGatewayResponseError)) throw e;
-      bailed = true;
+      try {
+        await stream.completed;
+      } catch (e) {
+        if (
+          isAgentCancellationError(e) ||
+          options.signal?.aborted ||
+          stream.cancelled
+        ) {
+          cancelled = true;
+        } else if (e instanceof EmptyGatewayResponseError) {
+          bailed = true;
+        } else {
+          throw e;
+        }
+      }
     }
     usage.inputTokens = stream.state.usage.inputTokens;
     usage.outputTokens = stream.state.usage.outputTokens;
@@ -1227,6 +1254,7 @@ export async function runAgent(
     const interrupted = stream.state.getInterruptions().length > 0;
     if (
       !bailed &&
+      !cancelled &&
       !interrupted &&
       !stream.cancelled &&
       stream.finalOutput !== undefined
@@ -1238,6 +1266,7 @@ export async function runAgent(
       );
       output = projected.text;
     }
+    if (cancelled) return "cancelled";
     return bailed ? "empty-bailed" : "done";
   };
 
@@ -1358,7 +1387,7 @@ export async function runAgent(
       };
     }
 
-    if (options.signal?.aborted || stream.cancelled) {
+    if (outcome === "cancelled" || options.signal?.aborted || stream.cancelled) {
       return {
         result: createAgentResult({
           status: "cancelled",
