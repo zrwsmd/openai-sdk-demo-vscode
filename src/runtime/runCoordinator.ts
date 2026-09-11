@@ -103,7 +103,7 @@ export class RunCoordinator {
       return;
     }
     const last = await this.store.getLast();
-    this.emit({ type: 'retryState', canRetry: !!last });
+    this.emit({ type: 'retryState', canRetry: !!last && last.status !== 'refused' });
   }
 
   async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
@@ -150,7 +150,7 @@ export class RunCoordinator {
       this.ensureProtocolFactory(run);
       this.emitProtocol(this.protocolFactory!.next({
         type: 'approval.resolved',
-        payload: { approvalId, approved },
+        payload: { approvalId, approved, reason: approved ? undefined : 'user_rejected' },
       }));
       if (this.stopRequested) {
         this.stopRequested = false;
@@ -214,6 +214,10 @@ export class RunCoordinator {
       if (await this.store.getActive()) return;
       const previous = await this.store.getLast();
       if (!previous) return;
+      if (previous.status === 'refused') {
+        this.emit({ type: 'error', message: '本轮审批已拒绝，请重新提交需求。' });
+        return;
+      }
       if (validateConfig({ ...previous.config, apiKey })) {
         this.emit({ type: 'error', message: '重试失败：当前没有可用的 API Key。' });
         return;
@@ -324,7 +328,9 @@ export class RunCoordinator {
 
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
-      if (result.status === 'cancelled') await this.session.truncate(run.sessionItemCountBefore);
+      if (result.status === 'cancelled' || result.status === 'refused') {
+        await this.session.truncate(run.sessionItemCountBefore);
+      }
       await this.store.update(run);
 
       if (result.status === 'awaiting_approval') {
@@ -348,6 +354,18 @@ export class RunCoordinator {
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.cancelled',
           payload: { reason: 'user_cancelled' },
+        }));
+      } else if (result.status === 'refused') {
+        await this.audit('run_refused', run, { reason: result.result.reason });
+        this.writeLog(`[run:${run.id}] 用户拒绝审批，本轮已终止并回滚会话`);
+        this.emit({
+          type: 'refused',
+          message: result.result.reason,
+          canRetry: false,
+        });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.refused',
+          payload: { reason: result.result.reason },
         }));
       } else {
         await this.audit('run_completed', run, { usage: result.usage });

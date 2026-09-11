@@ -17,6 +17,7 @@ export type DurableRunStatus =
   | 'awaiting_approval'
   | 'completed'
   | 'cancelled'
+  | 'refused'
   | 'failed';
 
 export interface DurableRunConfig {
@@ -168,7 +169,7 @@ export class JsonRunStore implements RunStore {
 
   private assertRunRecord(value: unknown, field: string): asserts value is DurableRunRecord {
     const run = value as Partial<DurableRunRecord> | undefined;
-    const statuses: DurableRunStatus[] = ['running', 'awaiting_approval', 'completed', 'cancelled', 'failed'];
+    const statuses: DurableRunStatus[] = ['running', 'awaiting_approval', 'completed', 'cancelled', 'refused', 'failed'];
     if (
       !run ||
       run.schemaVersion !== 1 ||

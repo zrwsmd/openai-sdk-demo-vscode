@@ -131,6 +131,12 @@ const runCancelled = eventBase.extend({
   payload: z.object({ reason: z.string().optional() }).passthrough(),
 });
 
+const runRefused = eventBase.extend({
+  type: z.literal('run.refused'),
+  source: z.literal('runtime'),
+  payload: z.object({ reason: z.string().min(1) }).passthrough(),
+});
+
 const agentStarted = eventBase.extend({
   type: z.literal('agent.started'),
   source: z.literal('agent'),
@@ -331,6 +337,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   runCompleted,
   runFailed,
   runCancelled,
+  runRefused,
   agentStarted,
   agentUpdated,
   textDelta,
@@ -371,6 +378,7 @@ const defaultSource: Record<AgentProtocolEventType, AgentEventSource> = {
   'run.completed': 'runtime',
   'run.failed': 'runtime',
   'run.cancelled': 'runtime',
+  'run.refused': 'runtime',
   'agent.started': 'agent',
   'agent.updated': 'agent',
   'text.delta': 'model',

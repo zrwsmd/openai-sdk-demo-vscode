@@ -121,7 +121,11 @@ export interface AgentConfig {
  */
 export type ApprovalRequest = ProtocolApprovalRequest;
 
-export type AgentRunStatus = "completed" | "awaiting_approval" | "cancelled";
+export type AgentRunStatus =
+  | "completed"
+  | "awaiting_approval"
+  | "cancelled"
+  | "refused";
 
 export interface AgentRunCheckpoint {
   state: string;
@@ -1288,10 +1292,14 @@ export async function runAgent(
   };
 
   const decisions = new Map(Object.entries(options.decisions ?? {}));
+  type ApprovalResolution = {
+    unresolved: ApprovalRequest[];
+    refused: ApprovalRequest[];
+  };
   const resolveApprovals = async (
     state: RunState<any, any>,
     pending: RunToolApprovalItem[],
-  ): Promise<ApprovalRequest[]> => {
+  ): Promise<ApprovalResolution> => {
     const requests = pending.map((item, index) => {
       const raw = item.rawItem as { name?: string; arguments?: string };
       return {
@@ -1301,6 +1309,7 @@ export async function runAgent(
       };
     });
     const unresolved: ApprovalRequest[] = [];
+    const refused: ApprovalRequest[] = [];
     for (let index = 0; index < pending.length; index++) {
       const item = pending[index];
       const request = requests[index];
@@ -1317,9 +1326,10 @@ export async function runAgent(
         state.approve(item);
       } else {
         state.reject(item, { message: "用户拒绝了该工具调用。" });
+        refused.push(request);
       }
     }
-    return unresolved;
+    return { unresolved, refused };
   };
 
   let state: RunState<any, any> | undefined;
@@ -1340,7 +1350,24 @@ export async function runAgent(
     if (state) {
       const pending = state.getInterruptions();
       if (pending.length) {
-        const unresolved = await resolveApprovals(state, pending);
+        const resolution = await resolveApprovals(state, pending);
+        if (resolution.refused.length) {
+          const reason = `用户拒绝了工具调用: ${resolution.refused
+            .map((request) => request.name)
+            .join(", ")}`;
+          const result = createAgentResult<IndustrialAgentOutput>({
+            status: "refused",
+            reason,
+            usage,
+          });
+          return {
+            result,
+            output,
+            usage,
+            status: "refused",
+          };
+        }
+        const unresolved = resolution.unresolved;
         if (unresolved.length) {
           await checkpoint(state, unresolved);
           const result = createAgentResult<IndustrialAgentOutput>({

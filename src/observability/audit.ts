@@ -8,6 +8,7 @@ export type AuditEventType =
   | 'run_completed'
   | 'run_failed'
   | 'run_cancelled'
+  | 'run_refused'
   | 'approval_requested'
   | 'approval_decided'
   | 'guardrail_evaluated'
@@ -75,4 +76,3 @@ export class JsonAuditSink implements AuditSink {
     return next;
   }
 }
-

@@ -103,4 +103,33 @@ async function fixture(executeAgent) {
   if (!freshEvents.some((event) => event.type === 'runRecovered')) throw new Error('recovery event missing');
 }
 
-console.log('run coordinator tests passed: cancel rollback, retry identity, approval/crash recovery');
+// Refusing an approval is a terminal user decision, not a system failure.
+{
+  const test = await fixture(async (_cfg, session, userText) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    return {
+      status: 'refused',
+      output: '',
+      usage,
+      result: {
+        protocolVersion: 1,
+        status: 'refused',
+        reason: '用户拒绝了工具调用: write_file',
+        diagnostics: [],
+        artifacts: [],
+        usage,
+      },
+    };
+  });
+  await test.coordinator.start('拒绝写文件', config, 'key');
+  const refused = await test.store.getLast();
+  if (refused?.status !== 'refused') throw new Error('refused run was not persisted');
+  if (refused?.error !== undefined) throw new Error('refused run was incorrectly marked as an error');
+  if ((await test.session.getItems()).length !== 0) throw new Error('refused session was not rolled back');
+  if (!test.events.some((event) => event.type === 'refused')) throw new Error('refused runtime event missing');
+  if (!test.events.some((event) => event.type === 'agentEvent' && event.event.type === 'run.refused')) {
+    throw new Error('run.refused protocol event missing');
+  }
+}
+
+console.log('run coordinator tests passed: cancel rollback, retry identity, approval/crash recovery, refusal terminal state');

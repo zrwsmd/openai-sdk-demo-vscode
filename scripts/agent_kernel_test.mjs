@@ -128,15 +128,12 @@ async function runTestTurn(userText, decide) {
     asked.push({ name, args });
     return false;
   };
-  let refused = false;
-  try {
-    await runTestTurn('再次把程序导出为文件', denyAll);
-  } catch {
-    refused = true;
-  }
+  const r = await runTestTurn('再次把程序导出为文件', denyAll);
   const files = await fs.readdir(path.join(dir, 'exports'));
-  console.log('[6] 审批(拒绝):asked =', asked.map((a) => a.name).join(','), '| 落盘文件仍为 =', files.join(','));
-  if (asked.length < 1 || files.length !== 1 || !refused) throw new Error('场景6 拒绝后应失败且不产生新文件');
+  console.log('[6] 审批(拒绝):asked =', asked.map((a) => a.name).join(','), '| 状态 =', r.status, '| 落盘文件仍为 =', files.join(','));
+  if (asked.length < 1 || files.length !== 1 || r.status !== 'refused') {
+    throw new Error('场景6 拒绝后应返回 refused 且不产生新文件');
+  }
 }
 
 // [7] 死循环 → maxTurns 截停(放最后:会往会话里灌 10 轮工具往返)

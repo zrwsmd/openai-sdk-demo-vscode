@@ -364,12 +364,12 @@ function showApprovals(runId, approvals) {
   setRuntimeMode('awaiting');
 }
 
-function finishApprovalCards(className) {
+function finishApprovalCards(className, statusText) {
   for (const card of messagesEl.querySelectorAll('.approval-card:not(.approved):not(.rejected)')) {
     card.classList.add(className);
     const status = card.querySelector('.approval-status');
     if (status) {
-      status.textContent = className === 'rejected' ? '已取消' : '已结束';
+      status.textContent = statusText || (className === 'rejected' ? '已取消' : '已结束');
       status.classList.add(className);
     }
     for (const button of card.querySelectorAll('button')) button.disabled = true;
@@ -635,8 +635,20 @@ window.addEventListener('message', (event) => {
         if (!agentText) agentBubble.remove();
       }
       agentBubble = null;
-      finishApprovalCards('rejected');
+      finishApprovalCards('rejected', '已取消');
       addNote('tool-note', '本轮已停止，可以安全重试');
+      canRetry = msg.canRetry === true;
+      currentRunId = null;
+      setRuntimeMode('idle');
+      break;
+    case 'refused':
+      if (agentBubble) {
+        agentBubble.classList.remove('streaming');
+        if (!agentText) agentBubble.remove();
+      }
+      agentBubble = null;
+      finishApprovalCards('rejected', '已拒绝');
+      addNote('tool-note', msg.message || '本轮已拒绝执行，未产生副作用。');
       canRetry = msg.canRetry === true;
       currentRunId = null;
       setRuntimeMode('idle');
