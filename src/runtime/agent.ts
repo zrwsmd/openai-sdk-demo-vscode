@@ -270,7 +270,7 @@ export function commandToolResult(
   });
 }
 
-function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
+function buildTools(cfg: AgentConfig) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
   const workspace = workspaceScopeFromRoots(
@@ -548,9 +548,10 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
     writeFileTool,
     runCommandTool,
   ];
-  return requiredTool
-    ? allTools.filter((candidate) => candidate.name === requiredTool)
-    : allTools;
+  // Keep the full tool surface even when a required side-effect is inferred.
+  // toolChoice / requireToolOnce still forces that tool on the first model
+  // call; hiding the rest would block get_io_table / validate_st_code / etc.
+  return allTools;
 }
 
 const SYSTEM_PROMPT =
@@ -1061,7 +1062,7 @@ export async function runAgent(
   // final turn can use structured output without a tool-choice conflict.
   const forceToolChoice =
     model instanceof GatewayGuardedModel ? undefined : requestedToolChoice;
-  const tools = buildTools(cfg, requiredTool);
+  const tools = buildTools(cfg);
   const agent =
     cfg.orchestration === "team"
       ? (() => {
@@ -1208,17 +1209,28 @@ export async function runAgent(
     let bailed = false;
     try {
       await protocolAdapter.consume(stream);
-      usage.inputTokens = stream.state.usage.inputTokens;
-      usage.outputTokens = stream.state.usage.outputTokens;
-      usage.requests = stream.state.usage.requests;
     } catch (e) {
       if (!(e instanceof EmptyGatewayResponseError)) throw e;
       bailed = true;
-      usage.requests = stream.state.usage.requests;
-      usage.inputTokens = stream.state.usage.inputTokens;
-      usage.outputTokens = stream.state.usage.outputTokens;
     }
-    if (stream.finalOutput !== undefined) {
+    try {
+      // Session persistence and finalOutput settlement can finish after the
+      // last streamed event. Await completed before reading settled summaries.
+      await stream.completed;
+    } catch (e) {
+      if (!(e instanceof EmptyGatewayResponseError)) throw e;
+      bailed = true;
+    }
+    usage.inputTokens = stream.state.usage.inputTokens;
+    usage.outputTokens = stream.state.usage.outputTokens;
+    usage.requests = stream.state.usage.requests;
+    const interrupted = stream.state.getInterruptions().length > 0;
+    if (
+      !bailed &&
+      !interrupted &&
+      !stream.cancelled &&
+      stream.finalOutput !== undefined
+    ) {
       structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
       const projected = projectAgentOutput(
         industrialAgentOutputDefinition,

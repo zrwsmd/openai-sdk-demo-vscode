@@ -169,6 +169,18 @@ async function runTestTurn(userText, decide) {
   ) {
     throw new Error('读取文件未透出结构化工具结果，UI 无法稳定格式化');
   }
+  const advertisedTools = diagLines
+    .slice(capabilityLogStart)
+    .find((line) => line.includes('[req]') && line.includes('tools='));
+  if (
+    !advertisedTools
+    || !advertisedTools.includes('read_file')
+    || !advertisedTools.includes('get_io_table')
+    || !advertisedTools.includes('validate_st_code')
+    || !advertisedTools.includes('write_file')
+  ) {
+    throw new Error('required read_file 不应把其他工具从模型可见列表里拿掉');
+  }
   if (
     process.env.MOCK_IGNORE_COMBINED === '1' &&
     !diagLines
