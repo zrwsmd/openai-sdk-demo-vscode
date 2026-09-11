@@ -64,6 +64,7 @@ async function runTestTurn(userText, decide) {
   const m = /\[msgs=(\d+)\]/.exec(r.output);
   console.log('[1] 问候:', r.output.slice(0, 16) + '…', '| msgs 回显 =', m?.[1], '| usage =', JSON.stringify(r.usage));
   if (!m || Number(m[1]) !== 2) throw new Error('场景1 msgs 不为 2');
+  if (!r.events.some((event) => event.type === 'text.delta')) throw new Error('场景1 普通文本没有增量事件');
   if (r.usage.requests !== 1 || r.usage.inputTokens !== 120) throw new Error('场景1 usage 不符合预期');
 }
 

@@ -10,7 +10,6 @@ import {
   Agent,
   Runner,
   tool,
-  setTracingDisabled,
   OpenAIChatCompletionsModel,
   MaxTurnsExceededError,
   RunState,
@@ -77,10 +76,6 @@ import {
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
-
-// 网关场景必须关闭 tracing:轨迹上传 OpenAI 官方服务会失败刷屏。
-// 必须在模块加载时调用,运行时设置无效。
-setTracingDisabled(true);
 
 // 超轮次异常透传给 UI 层做友好提示
 export { MaxTurnsExceededError };
@@ -1000,21 +995,22 @@ function makeLoggingFetch(): unknown {
   };
 }
 
-const modelCache = new Map<string, GatewayGuardedModel>();
+// The OpenAI client is configuration-only. Keep it reusable, but never cache
+// GatewayGuardedModel because its watchdog/capability state belongs to a run.
+const openAIClientCache = new Map<string, OpenAI>();
 
 function buildChatCompletionsModel(cfg: AgentConfig): GatewayGuardedModel {
-  const key = `${cfg.baseUrl}|${cfg.apiKey}|${cfg.model}`;
-  let m = modelCache.get(key);
-  if (!m) {
-    const client = new OpenAI({
+  const key = JSON.stringify([cfg.baseUrl, cfg.apiKey]);
+  let client = openAIClientCache.get(key);
+  if (!client) {
+    client = new OpenAI({
       baseURL: cfg.baseUrl,
       apiKey: cfg.apiKey,
       fetch: makeLoggingFetch() as never,
     });
-    m = new GatewayGuardedModel(client, cfg.model);
-    modelCache.set(key, m);
+    openAIClientCache.set(key, client);
   }
-  return m;
+  return new GatewayGuardedModel(client, cfg.model);
 }
 
 // ---------- 一轮对话:流式执行 + 会话持久化 + 审批中断/恢复 ----------
@@ -1063,6 +1059,14 @@ export async function runAgent(
   );
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
+  // Keep the existing structured contract for Responses and Anthropic.
+  // Plain OpenAI Chat Completions conversations can stream text directly.
+  const textStreamingMode =
+    modelAdapter.provider === "openai" &&
+    modelAdapter.apiFormat === "chat_completions" &&
+    cfg.orchestration !== "team" &&
+    requiredTool === undefined;
+  const structuredMode = !textStreamingMode;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   if (
     model instanceof GatewayGuardedModel &&
@@ -1095,11 +1099,19 @@ export async function runAgent(
           tools,
           ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
           // Gateway capability negotiation happens inside GatewayGuardedModel;
-          // the Agent keeps the canonical structured output contract.
-          outputType: industrialAgentOutputDefinition.schema,
+          // Ordinary conversation stays text-native so the UI can receive
+          // text.delta events; action turns keep the canonical schema.
+          ...(structuredMode
+            ? { outputType: industrialAgentOutputDefinition.schema }
+            : {}),
         });
 
-  const runner = new Runner();
+  const tracingDisabled = !(
+    modelAdapter.provider === "openai" &&
+    modelAdapter.apiFormat === "responses" &&
+    !cfg.baseUrl.trim()
+  );
+  const runner = new Runner({ tracingDisabled });
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = "";
   let structuredOutput: IndustrialAgentOutput | undefined;
@@ -1209,7 +1221,7 @@ export async function runAgent(
   const protocolAdapter = new AgentStreamAdapter({
     runId: options.protocol.runId,
     operationId: options.protocol.operationId,
-    structuredOutput: true,
+    structuredOutput: structuredMode,
     eventFactory: options.protocol.eventFactory,
     emit: (event) => {
       observeProtocolEvent(event);
@@ -1263,12 +1275,16 @@ export async function runAgent(
       !stream.cancelled &&
       stream.finalOutput !== undefined
     ) {
-      structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
-      const projected = projectAgentOutput(
-        industrialAgentOutputDefinition,
-        structuredOutput,
-      );
-      output = projected.text;
+      if (structuredMode) {
+        structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
+        const projected = projectAgentOutput(
+          industrialAgentOutputDefinition,
+          structuredOutput,
+        );
+        output = projected.text;
+      } else if (typeof stream.finalOutput === "string") {
+        output = stream.finalOutput;
+      }
     }
     if (cancelled) return "cancelled";
     return bailed ? "empty-bailed" : "done";
@@ -1401,6 +1417,7 @@ export async function runAgent(
     // Keep the existing action result fallback for that explicit empty-response
     // path; normal completed turns must still pass schema validation above.
     if (
+      structuredMode &&
       !structuredOutput &&
       outcome === "empty-bailed" &&
       model instanceof GatewayGuardedModel &&
@@ -1427,6 +1444,31 @@ export async function runAgent(
       };
     }
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
+      if (!structuredMode) {
+        const canonicalOutput: IndustrialAgentOutput = {
+          message: output,
+          diagnostics: [],
+          artifacts: [],
+          data: null,
+        };
+        const projected = projectAgentOutput(
+          industrialAgentOutputDefinition,
+          canonicalOutput,
+        );
+        const result = createAgentResult({
+          status: "completed",
+          output: canonicalOutput,
+          usage,
+          diagnostics: projected.diagnostics,
+          artifacts: projected.artifacts,
+        });
+        return {
+          result,
+          output,
+          usage,
+          status: "completed",
+        };
+      }
       if (!structuredOutput) {
         throw new AgentOutputValidationError(
           "Agent 未返回符合 Schema 的最终结构化结果",

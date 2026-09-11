@@ -356,16 +356,20 @@ export class RunCoordinator {
           payload: { reason: 'user_cancelled' },
         }));
       } else if (result.status === 'refused') {
-        await this.audit('run_refused', run, { reason: result.result.reason });
+        const reason =
+          result.result.status === 'refused'
+            ? result.result.reason
+            : '用户拒绝了工具调用。';
+        await this.audit('run_refused', run, { reason });
         this.writeLog(`[run:${run.id}] 用户拒绝审批，本轮已终止并回滚会话`);
         this.emit({
           type: 'refused',
-          message: result.result.reason,
+          message: reason,
           canRetry: false,
         });
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.refused',
-          payload: { reason: result.result.reason },
+          payload: { reason },
         }));
       } else {
         await this.audit('run_completed', run, { usage: result.usage });

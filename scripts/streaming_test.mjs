@@ -175,6 +175,23 @@ const structuredResult = await structuredAdapter.consume(structuredStream);
 assert.equal(structuredResult.output, '开始检查完成');
 assert.equal(structuredEvents.some((event) => event.type === 'text.delta'), false);
 
+const textEvents = [];
+const textStream = scriptedEvents();
+textStream.state = { usage: { inputTokens: 3, outputTokens: 4, requests: 1 } };
+const textAdapter = new AgentStreamAdapter({
+  runId: 'run-text',
+  operationId: 'op-text',
+  structuredOutput: false,
+  eventFactory: new AgentEventFactory('run-text', 'op-text'),
+  emit: (event) => textEvents.push(event),
+});
+const textResult = await textAdapter.consume(textStream);
+assert.equal(textResult.output, '开始检查完成');
+assert.deepEqual(
+  textEvents.filter((event) => event.type === 'text.delta').map((event) => event.payload.text),
+  ['开始检查', '完成'],
+);
+
 const extended = [];
 const extendedStream = extendedEvents();
 extendedStream.state = { usage: { inputTokens: 10, outputTokens: 20, requests: 2 } };

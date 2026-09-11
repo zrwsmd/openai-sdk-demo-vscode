@@ -324,7 +324,7 @@ const server = http.createServer((req, res) => {
       endWithToolCall(res, model);
     } else {
       // 回显 messages 数量:第二句话应能看到第一句的历史 → 验证 session 回放
-      await streamStructuredText(res, model, `${REPLY} [msgs=${messages.length}]`);
+      await streamText(res, model, `${REPLY} [msgs=${messages.length}]`);
     }
   });
 });
