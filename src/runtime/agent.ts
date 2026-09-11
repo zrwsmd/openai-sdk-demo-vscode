@@ -241,6 +241,35 @@ function parseOptionalInt(value: unknown): number | undefined {
   return undefined;
 }
 
+export function commandToolResult(
+  command: string,
+  result: { exitCode: number | null; output: string },
+): string {
+  if (result.exitCode === 0) {
+    return toolResult({ ok: true, data: result, effect: "process", risk: "execute" });
+  }
+  const isTimeout = result.exitCode === null;
+  const message = isTimeout
+    ? "命令超时或被终止，未取得成功退出码。"
+    : `命令执行失败，退出码 ${result.exitCode}。`;
+  return toolResult({
+    ok: false,
+    data: result,
+    error: message,
+    diagnostics: [
+      {
+        code: isTimeout ? "command_timeout" : "command_nonzero_exit",
+        message,
+        severity: "error",
+        details: { command, exitCode: result.exitCode },
+      },
+    ],
+    effect: "process",
+    risk: "execute",
+    metadata: { exitCode: result.exitCode },
+  });
+}
+
 function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -492,16 +521,15 @@ function buildTools(cfg: AgentConfig, requiredTool?: RequiredAgentTool) {
     execute: ({ command }, _context, details) =>
       guard(
         () =>
-          withEffect("run_command", { command }, "execute", async () =>
-            contract(
+            withEffect("run_command", { command }, "execute", async () =>
+            commandToolResult(
+              command,
               await runCommand(
                 workspace.primaryRoot,
                 command,
                 60_000,
                 details?.signal,
               ),
-              "execute",
-              "process",
             ),
           ),
         "execute",

@@ -3,7 +3,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveInWorkspace, listFiles, readFileRange, writeFileText, searchText, runCommand } from './agent.testbundle.mjs';
+import { resolveInWorkspace, listFiles, readFileRange, writeFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-ws-test-'));
 await fs.writeFile(path.join(ws, 'main.st'), 'PROGRAM Demo\n  x := 1;\nEND_PROGRAM\n');
@@ -76,7 +76,45 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
   if (!ok.output.includes('hello-from-tool') || ok.exitCode !== 0 || bad.exitCode !== 7) throw new Error('命令执行结果不符合预期');
 }
 
-// [7] run_command:AbortSignal 会终止 shell 及其子进程树
+// [7] run_command: 工具结果把非零退出和超时标成失败
+{
+  const okRun = await runCommand(ws, 'echo hello-from-tool');
+  const ok = parseToolResult(JSON.parse(commandToolResult('echo hello-from-tool', okRun)));
+  const badCommand = 'node -e "process.exit(7)"';
+  const badRun = await runCommand(ws, badCommand);
+  const bad = parseToolResult(JSON.parse(commandToolResult(badCommand, badRun)));
+  const timeout = parseToolResult(JSON.parse(commandToolResult('sleep 120', {
+    exitCode: null,
+    output: '命令超时(60000ms)被终止:\n',
+  })));
+  console.log(
+    '[7] run_command 工具结果: 成功 ok=', ok.ok,
+    '| 非零 ok=', bad.ok, 'code=', bad.diagnostics[0]?.code, 'exit=', bad.data?.exitCode,
+    '| 超时 ok=', timeout.ok, 'code=', timeout.diagnostics[0]?.code,
+  );
+  if (ok.ok !== true || ok.effect !== 'process' || ok.data?.exitCode !== 0) {
+    throw new Error('成功命令应返回 ok:true 且带 process 副作用');
+  }
+  if (
+    bad.ok !== false
+    || bad.error !== '命令执行失败，退出码 7。'
+    || bad.diagnostics[0]?.code !== 'command_nonzero_exit'
+    || bad.data?.exitCode !== 7
+    || bad.metadata?.exitCode !== 7
+  ) {
+    throw new Error('非零退出码应返回 ok:false 且带 command_nonzero_exit');
+  }
+  if (
+    timeout.ok !== false
+    || timeout.error !== '命令超时或被终止，未取得成功退出码。'
+    || timeout.diagnostics[0]?.code !== 'command_timeout'
+    || timeout.metadata?.exitCode !== null
+  ) {
+    throw new Error('超时应返回 ok:false 且带 command_timeout');
+  }
+}
+
+// [8] run_command:AbortSignal 会终止 shell 及其子进程树
 {
   const controller = new AbortController();
   const marker = path.join(ws, 'cancel-marker.txt').replaceAll('\\', '/');
@@ -96,7 +134,7 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
   const elapsed = Date.now() - startedAt;
   await new Promise((resolve) => setTimeout(resolve, 3500));
   const childSurvived = await fs.access(marker).then(() => true, () => false);
-  console.log('[7] run_command: 取消 =', aborted, '| 耗时 =', elapsed, 'ms | 子进程存活 =', childSurvived);
+  console.log('[8] run_command: 取消 =', aborted, '| 耗时 =', elapsed, 'ms | 子进程存活 =', childSurvived);
   if (!aborted || elapsed > 3000 || childSurvived) throw new Error('命令取消未终止进程树');
 }
 
