@@ -269,6 +269,16 @@ const server = http.createServer((req, res) => {
       // 死循环模式:无论是否收到工具结果,都再次请求工具 → 应被 maxTurns 截停
       endWithToolCall(res, model);
     } else if (
+      userText.includes('自动兜底') &&
+      req_body.tool_choice &&
+      last.role !== 'tool'
+    ) {
+      // 兜底场景:首轮让模型保持 auto 并故意不选工具,第二轮收到强制
+      // tool_choice 后才执行动作,验证强制选择确实只是一次性 fallback。
+      endWithNamedToolCall(res, model, 'export_st_program', JSON.stringify({ code: ST_CODE }));
+    } else if (userText.includes('自动兜底') && last.role !== 'tool') {
+      await streamStructuredText(res, model, '我先说明一下,但还没有执行导出工具。');
+    } else if (
       ignoreCombinedToolChoice &&
       req_body.response_format &&
       req_body.tool_choice &&

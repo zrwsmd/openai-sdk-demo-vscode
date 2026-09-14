@@ -64,9 +64,15 @@ const server = http.createServer((req, res) => {
         && message.content.some((block) => block?.type === 'tool_result'),
       );
       const userText = request.messages
-        .flatMap((message) => Array.isArray(message.content) ? message.content : [])
-        .filter((block) => block?.type === 'text')
-        .map((block) => block.text)
+        .flatMap((message) => (
+          typeof message.content === 'string'
+            ? [message.content]
+            : Array.isArray(message.content)
+              ? message.content
+              : []
+        ))
+        .filter((block) => typeof block === 'string' || block?.type === 'text')
+        .map((block) => typeof block === 'string' ? block : block.text)
         .join('\n');
 
       res.writeHead(200, {
@@ -275,11 +281,17 @@ try {
   assert.equal(completed?.payload.result?.data?.content, '你好');
   assert.match(read.result.output, /Anthropic Messages API 已读取文件/);
 
-  const toolRequest = requests.find((request) =>
-    request.body.tool_choice?.type === 'tool',
+  const readRequest = requests.find((request) =>
+    request.body.messages?.some((message) => (
+      typeof message.content === 'string'
+        ? message.content.includes('读取')
+        : Array.isArray(message.content)
+          && message.content.some((block) => block?.type === 'text' && block.text.includes('读取'))
+    )),
   );
-  assert.equal(toolRequest?.body.tool_choice?.name, 'read_file');
-  assert.equal(toolRequest?.body.tools?.[0]?.input_schema?.type, 'object');
+  assert.equal(readRequest?.body.tool_choice, undefined);
+  assert.ok(readRequest?.body.tools?.some((tool) => tool?.name === 'read_file'));
+  assert.equal(readRequest?.body.tools?.[0]?.input_schema?.type, 'object');
   assert.equal(requests.length, 3);
   console.log('Anthropic Messages API tests passed: native route, structured output, tool choice, tool call, typed result');
 } finally {

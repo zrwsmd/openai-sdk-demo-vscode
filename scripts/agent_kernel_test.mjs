@@ -110,19 +110,47 @@ async function runTestTurn(userText, decide) {
   const capabilityRequests = diagLines
     .slice(capabilityLogStart)
     .filter((line) => line.includes('[req]'));
-  if (!capabilityRequests.some((line) => line.includes('format=json_schema') && !line.includes('choice=-'))) {
-    throw new Error('场景5 首次工具请求没有尝试 response_format + tool_choice');
-  }
   if (!capabilityRequests.some((line) => line.includes('format=json_schema') && line.includes('choice=-'))) {
-    throw new Error('场景5 工具完成后的最终请求没有恢复结构化输出');
-  }
-  if (process.env.MOCK_REJECT_COMBINED === '1'
-    && !capabilityRequests.some((line) => line.includes('format=-') && !line.includes('choice=-'))) {
-    throw new Error('场景5 网关组合能力冲突后没有降级工具请求');
+    throw new Error('场景5 首轮工具选择没有保持 auto');
   }
 }
 
-// [6] needsApproval-拒绝:不落盘
+// [6] 首轮 auto 未执行动作时,只在第二轮启用一次强制工具兜底
+{
+  const asked = [];
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn('请自动兜底导出程序', async (name, args) => {
+    asked.push({ name, args });
+    return true;
+  });
+  const capabilityRequests = diagLines
+    .slice(capabilityLogStart)
+    .filter((line) => line.includes('[req]'));
+  const forcedRequest = capabilityRequests.find(
+    (line) => line.includes('export_st_program') && !line.includes('choice=-'),
+  );
+  console.log(
+    '[6] 工具选择兜底:首轮 =',
+    capabilityRequests[0] ?? '(无)',
+    '| 强制兜底 =',
+    forcedRequest ?? '(无)',
+  );
+  if (!capabilityRequests[0]?.includes('choice=-')) {
+    throw new Error('场景6 首轮没有使用 auto 工具选择');
+  }
+  if (!forcedRequest) {
+    throw new Error('场景6 首轮未执行动作后没有启用强制工具兜底');
+  }
+  if (process.env.MOCK_REJECT_COMBINED === '1'
+    && !capabilityRequests.some((line) => line.includes('format=-') && !line.includes('choice=-'))) {
+    throw new Error('场景6 网关组合能力冲突后没有降级工具请求');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'export_st_program' || !r.output.includes('导出')) {
+    throw new Error('场景6 强制工具兜底未完成审批和导出');
+  }
+}
+
+// [7] needsApproval-拒绝:不落盘
 {
   const asked = [];
   const denyAll = async (name, args) => {
@@ -137,7 +165,7 @@ async function runTestTurn(userText, decide) {
   }
 }
 
-// [7] 死循环 → maxTurns 截停(放最后:会往会话里灌 10 轮工具往返)
+// [8] 死循环 → maxTurns 截停(放最后:会往会话里灌 10 轮工具往返)
 {
   let thrown = null;
   try {
@@ -149,7 +177,7 @@ async function runTestTurn(userText, decide) {
   if (!(thrown instanceof MaxTurnsExceededError)) throw new Error('场景7 未触发 MaxTurnsExceededError');
 }
 
-// [8] 新会话:clearSession 后文件清空
+// [9] 新会话:clearSession 后文件清空
 {
   await fs.writeFile(path.join(dir, 'lk.txt'), '你好', 'utf8');
   const capabilityLogStart = diagLines.length;
@@ -178,17 +206,6 @@ async function runTestTurn(userText, decide) {
     || !advertisedTools.includes('write_file')
   ) {
     throw new Error('required read_file 不应把其他工具从模型可见列表里拿掉');
-  }
-  if (
-    process.env.MOCK_IGNORE_COMBINED === '1' &&
-    !diagLines
-      .slice(capabilityLogStart)
-      .some(
-        (line) =>
-          line.includes('format=-') && line.includes('choice='),
-      )
-  ) {
-    throw new Error('场景8 网关忽略组合参数后没有重试纯工具请求');
   }
 }
 

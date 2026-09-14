@@ -1049,10 +1049,6 @@ export async function runAgent(
 ): Promise<AgentRunResult> {
   const actionPolicy = cfg.actionPolicy ?? new DefaultActionPolicy();
   const requiredTool = actionPolicy.requiredToolFor(userText);
-  const requestedToolChoice =
-    requiredTool && !options.initialState
-      ? { toolChoice: requiredTool }
-      : undefined;
   const workspace = workspaceScopeFromRoots(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
@@ -1068,43 +1064,35 @@ export async function runAgent(
     requiredTool === undefined;
   const structuredMode = !textStreamingMode;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
-  if (
-    model instanceof GatewayGuardedModel &&
-    requiredTool &&
-    !options.initialState
-  ) {
-    model.requireToolOnce(requiredTool);
-  }
-  // The gateway model negotiates the first tool request itself. Keeping
-  // toolChoice off the Agent settings makes it one-shot, so the post-tool
-  // final turn can use structured output without a tool-choice conflict.
-  const forceToolChoice =
-    model instanceof GatewayGuardedModel ? undefined : requestedToolChoice;
   const tools = buildTools(cfg);
-  const agent =
-    cfg.orchestration === "team"
-      ? (() => {
-          const team = createIndustrialAgentTeam(model, tools, {
-            executorStructuredOutput: true,
-            executorModelSettings: forceToolChoice,
-          });
-          // Explicit side effects bypass planning and enter the controlled executor
-          // directly. Planning remains the default for read-only/analysis requests.
-          return requiredTool ? team.executor : team.planner;
-        })()
-      : new Agent({
-          name: "PLC 编程助手",
-          model,
-          instructions: SYSTEM_PROMPT,
-          tools,
-          ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
-          // Gateway capability negotiation happens inside GatewayGuardedModel;
-          // Ordinary conversation stays text-native so the UI can receive
-          // text.delta events; action turns keep the canonical schema.
-          ...(structuredMode
-            ? { outputType: industrialAgentOutputDefinition.schema }
-            : {}),
-        });
+  const buildAgent = (forcedTool?: RequiredAgentTool) => {
+    const forceToolChoice =
+      forcedTool && !(model instanceof GatewayGuardedModel)
+        ? { toolChoice: forcedTool }
+        : undefined;
+    if (cfg.orchestration === "team") {
+      const team = createIndustrialAgentTeam(model, tools, {
+        executorStructuredOutput: true,
+        executorModelSettings: forceToolChoice,
+      });
+      // Explicit side effects bypass planning and enter the controlled executor.
+      return requiredTool ? team.executor : team.planner;
+    }
+    return new Agent({
+      name: "PLC 编程助手",
+      model,
+      instructions: SYSTEM_PROMPT,
+      tools,
+      ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
+      // Gateway capability negotiation happens inside GatewayGuardedModel;
+      // Ordinary conversation stays text-native so the UI can receive
+      // text.delta events; action turns keep the canonical schema.
+      ...(structuredMode
+        ? { outputType: industrialAgentOutputDefinition.schema }
+        : {}),
+    });
+  };
+  let agent = buildAgent();
 
   const tracingDisabled = !(
     modelAdapter.provider === "openai" &&
@@ -1215,6 +1203,13 @@ export async function runAgent(
       );
     }
     return verified;
+  };
+
+  const hasSuccessfulRequiredAction = (): boolean => {
+    if (!requiredTool) return true;
+    return [...toolResults.values()].some(
+      (call) => call.name === requiredTool && call.result.ok,
+    );
   };
 
   // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
@@ -1360,6 +1355,7 @@ export async function runAgent(
   // Approval checkpoints are first-class results. The host persists the
   // checkpoint and resumes the same SDK RunState with explicit decisions.
   let approvalRounds = 0;
+  let forcedToolFallbackUsed = false;
   while (true) {
     if (approvalRounds++ >= MAX_TURNS)
       throw new MaxTurnsExceededError("审批恢复次数超过上限");
@@ -1442,6 +1438,24 @@ export async function runAgent(
         usage,
         status: "cancelled",
       };
+    }
+    if (
+      requiredTool &&
+      !hasSuccessfulRequiredAction() &&
+      !forcedToolFallbackUsed &&
+      (outcome === "empty-bailed" || !state.getInterruptions().length)
+    ) {
+      forcedToolFallbackUsed = true;
+      if (model instanceof GatewayGuardedModel) {
+        model.requireToolOnce(requiredTool);
+      }
+      agent = buildAgent(requiredTool);
+      state.setCurrentAgent(agent);
+      state._currentStep = { type: "next_step_run_again" };
+      state._noActiveAgentRun = true;
+      structuredOutput = undefined;
+      output = "";
+      continue;
     }
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
