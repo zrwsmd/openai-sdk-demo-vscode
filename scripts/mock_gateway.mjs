@@ -217,12 +217,47 @@ async function handleResponsesRequest(reqBody, res) {
   const serializedInput = JSON.stringify(input);
   const hasToolOutput = input.some((item) => item?.type === 'function_call_output');
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  if (!hasToolOutput && serializedInput.includes('慢速')) {
+    await streamResponsesText(res, model, '慢速响应'.repeat(300));
+    return;
+  }
   if (!hasToolOutput && serializedInput.includes('读取')) {
     await streamResponsesTool(
       res,
       model,
       'read_file',
       JSON.stringify({ path: 'lk.txt' }),
+    );
+    return;
+  }
+  if (!hasToolOutput && serializedInput.includes('导出')) {
+    await streamResponsesTool(
+      res,
+      model,
+      'export_st_program',
+      JSON.stringify({ code: ST_CODE }),
+    );
+    return;
+  }
+  if (
+    !hasToolOutput &&
+    (serializedInput.includes('非零') ||
+      serializedInput.includes('失败命令'))
+  ) {
+    await streamResponsesTool(
+      res,
+      model,
+      'run_command',
+      JSON.stringify({ command: 'node -e "process.exit(7)"' }),
+    );
+    return;
+  }
+  if (!hasToolOutput && serializedInput.includes('超时命令')) {
+    await streamResponsesTool(
+      res,
+      model,
+      'run_command',
+      JSON.stringify({ command: 'node -e "setTimeout(() => {}, 5000)"' }),
     );
     return;
   }
@@ -296,6 +331,17 @@ const server = http.createServer((req, res) => {
       res.end();
     } else if (userText.includes('rr.txt') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'write_file', JSON.stringify({ path: 'rr.txt', content: '你好我是agent' }));
+    } else if (
+      (userText.includes('非零') || userText.includes('失败命令')) &&
+      last.role !== 'tool'
+    ) {
+      endWithNamedToolCall(res, model, 'run_command', JSON.stringify({
+        command: 'node -e "process.exit(7)"',
+      }));
+    } else if (userText.includes('超时命令') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'run_command', JSON.stringify({
+        command: 'node -e "setTimeout(() => {}, 5000)"',
+      }));
     } else if (userText.includes('读取') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'lk.txt' }));
     } else if (last.role === 'tool' && userText.includes('思考')) {
