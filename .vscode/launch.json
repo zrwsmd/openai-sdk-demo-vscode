@@ -21,6 +21,33 @@
       "env": {
         "NODE_OPTIONS": "--enable-source-maps"
       }
+    },
+    {
+      "name": "调试 PLC Agent（进入第三方代码）",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: compile:debug",
+      "sourceMaps": true,
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/dist/**/*.js",
+        "${workspaceFolder}/src/**/*.ts",
+        "!**/node_modules/**"
+      ],
+      "sourceMapPathOverrides": {
+        "webpack:///./src/*": "${workspaceFolder}/src/*",
+        "webpack:///*": "${workspaceFolder}/*",
+        "${workspaceFolder}/node_modules/@openai/agents-core/src/run.ts": "${workspaceFolder}/node_modules/@openai/agents-core/dist/run.js",
+        "${workspaceFolder}/node_modules/@openai/agents/src/index.ts": "${workspaceFolder}/node_modules/@openai/agents/dist/index.js"
+      },
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "smartStep": false,
+      "env": {
+        "NODE_OPTIONS": "--require=${workspaceFolder}/scripts/debug/strip-third-party-sourcemaps.cjs"
+      }
     }
   ]
 }

@@ -6,6 +6,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --external:vscode --target=node18 --sourcemap --outfile=dist/extension.js",
+    "compile:debug": "esbuild src/app/extension.ts --bundle --platform=node --format=cjs --external:vscode --external:@openai/agents --external:@anthropic-ai/sdk --external:openai --external:zod --target=node18 --sourcemap --outfile=dist/extension.js",
     "watch": "npm run compile -- --watch",
     "test:generate": "node scripts/build_test_bundle.mjs",
     "test:protocol": "npm run test:generate && node scripts/protocol_test.mjs",

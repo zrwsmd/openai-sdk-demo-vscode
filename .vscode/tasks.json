@@ -8,6 +8,12 @@
       "problemMatcher": []
     },
     {
+      "label": "npm: compile:debug",
+      "type": "npm",
+      "script": "compile:debug",
+      "problemMatcher": []
+    },
+    {
       "label": "npm: watch",
       "type": "npm",
       "script": "watch",
