@@ -245,7 +245,12 @@ export function commandToolResult(
   result: { exitCode: number | null; output: string },
 ): string {
   if (result.exitCode === 0) {
-    return toolResult({ ok: true, data: result, effect: "process", risk: "execute" });
+    return toolResult({
+      ok: true,
+      data: result,
+      effect: "process",
+      risk: "execute",
+    });
   }
   const isTimeout = result.exitCode === null;
   const message = isTimeout
@@ -520,7 +525,7 @@ function buildTools(cfg: AgentConfig) {
     execute: ({ command }, _context, details) =>
       guard(
         () =>
-            withEffect("run_command", { command }, "execute", async () =>
+          withEffect("run_command", { command }, "execute", async () =>
             commandToolResult(
               command,
               await runCommand(
@@ -629,12 +634,16 @@ export async function verifyWorkspaceWrite(
  * 看门狗追不上响应飞快的网关(实测 10 连发仅 84ms),所以在模型层同步归因:
  * 一次响应若既无内容增量、最终 output 也为空 → 记 1 次空回复;连续 2 次即抛错截停。
  */
-export type GatewayStructuredToolChoiceSupport = 'unknown' | 'supported' | 'unsupported';
+export type GatewayStructuredToolChoiceSupport =
+  | "unknown"
+  | "supported"
+  | "unsupported";
 
 export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   private emptyStreak = 0;
   private requiredToolOnce?: RequiredAgentTool;
-  private structuredToolChoiceSupport: GatewayStructuredToolChoiceSupport = 'unknown';
+  private structuredToolChoiceSupport: GatewayStructuredToolChoiceSupport =
+    "unknown";
 
   /** 每轮用户消息开始时清零,避免跨轮误伤 */
   resetEmptyStreak(): void {
@@ -688,9 +697,9 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
       }
 
       if (!sawRequiredTool) {
-        this.structuredToolChoiceSupport = 'unsupported';
+        this.structuredToolChoiceSupport = "unsupported";
         agentLog(
-          '[capability] gateway accepted response_format + tool_choice but did not produce the required tool call; retrying without response_format',
+          "[capability] gateway accepted response_format + tool_choice but did not produce the required tool call; retrying without response_format",
         );
         for await (const ev of super.getStreamedResponse(
           fallbackRequest,
@@ -700,17 +709,23 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
         return;
       }
 
-      if (sawEvent && this.structuredToolChoiceSupport === 'unknown') {
-        this.structuredToolChoiceSupport = 'supported';
-        agentLog('[capability] gateway supports response_format + tool_choice');
+      if (sawEvent && this.structuredToolChoiceSupport === "unknown") {
+        this.structuredToolChoiceSupport = "supported";
+        agentLog("[capability] gateway supports response_format + tool_choice");
       }
       for (const bufferedEvent of bufferedEvents) yield bufferedEvent;
     } catch (error) {
-      if (!shouldNegotiate || sawEvent || !isStructuredToolChoiceConflict(error)) {
+      if (
+        !shouldNegotiate ||
+        sawEvent ||
+        !isStructuredToolChoiceConflict(error)
+      ) {
         throw error;
       }
-      this.structuredToolChoiceSupport = 'unsupported';
-      agentLog('[capability] gateway rejected response_format + tool_choice; retrying tool request without response_format');
+      this.structuredToolChoiceSupport = "unsupported";
+      agentLog(
+        "[capability] gateway rejected response_format + tool_choice; retrying tool request without response_format",
+      );
       for await (const ev of super.getStreamedResponse(
         fallbackRequest,
       ) as AsyncIterable<any>) {
@@ -735,7 +750,7 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
       requiredTool && hasStructuredOutput(request.outputType),
     );
     const effectiveRequest =
-      shouldNegotiate && this.structuredToolChoiceSupport === 'unsupported'
+      shouldNegotiate && this.structuredToolChoiceSupport === "unsupported"
         ? withoutStructuredOutput(forcedRequest)
         : forcedRequest;
     let sawOutput = false;
@@ -764,13 +779,15 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
 }
 
 function hasStructuredOutput(outputType: unknown): boolean {
-  return outputType !== undefined && outputType !== null && outputType !== 'text';
+  return (
+    outputType !== undefined && outputType !== null && outputType !== "text"
+  );
 }
 
 function withoutStructuredOutput(request: any): any {
   return {
     ...request,
-    outputType: 'text',
+    outputType: "text",
   };
 }
 
@@ -799,7 +816,7 @@ function hasRequiredToolCallEvent(
     Array.isArray(output) &&
     output.some(
       (item: any) =>
-        (item?.type === 'function_call' || item?.type === 'tool_call') &&
+        (item?.type === "function_call" || item?.type === "tool_call") &&
         item?.name === requiredTool,
     )
   );
@@ -813,7 +830,7 @@ function isStructuredToolChoiceConflict(error: unknown): boolean {
     body?: { error?: { message?: unknown; code?: unknown } };
     response?: { data?: { error?: { message?: unknown; code?: unknown } } };
   };
-  const status = typeof value?.status === 'number' ? value.status : undefined;
+  const status = typeof value?.status === "number" ? value.status : undefined;
   const text = [
     value?.message,
     value?.error?.message,
@@ -823,8 +840,8 @@ function isStructuredToolChoiceConflict(error: unknown): boolean {
     value?.response?.data?.error?.message,
     value?.response?.data?.error?.code,
   ]
-    .filter((part): part is string => typeof part === 'string')
-    .join(' ')
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
     .toLowerCase();
   if (status !== undefined && status !== 400 && status !== 422) return false;
   const mentionsFormat =
@@ -832,7 +849,9 @@ function isStructuredToolChoiceConflict(error: unknown): boolean {
   const mentionsToolChoice =
     /tool[_ ]?choice|function call|tool call|tools/.test(text);
   const describesConflict =
-    /not supported|unsupported|cannot|can't|invalid|incompatible|conflict|not allowed|does not allow|only/.test(text);
+    /not supported|unsupported|cannot|can't|invalid|incompatible|conflict|not allowed|does not allow|only/.test(
+      text,
+    );
   return mentionsFormat && mentionsToolChoice && describesConflict;
 }
 
@@ -1232,7 +1251,11 @@ export async function runAgent(
     try {
       await protocolAdapter.consume(stream);
     } catch (e) {
-      if (isAgentCancellationError(e) || options.signal?.aborted || stream.cancelled) {
+      if (
+        isAgentCancellationError(e) ||
+        options.signal?.aborted ||
+        stream.cancelled
+      ) {
         cancelled = true;
       } else if (e instanceof EmptyGatewayResponseError) {
         bailed = true;
@@ -1427,7 +1450,11 @@ export async function runAgent(
       };
     }
 
-    if (outcome === "cancelled" || options.signal?.aborted || stream.cancelled) {
+    if (
+      outcome === "cancelled" ||
+      options.signal?.aborted ||
+      stream.cancelled
+    ) {
       return {
         result: createAgentResult({
           status: "cancelled",
