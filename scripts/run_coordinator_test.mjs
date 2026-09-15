@@ -132,4 +132,64 @@ async function fixture(executeAgent) {
   }
 }
 
-console.log('run coordinator tests passed: cancel rollback, retry identity, approval/crash recovery, refusal terminal state');
+// Clear owns the final boundary: a late run completion cannot restore the old
+// session or leave a retryable run behind after the user starts a new session.
+{
+  let releaseAgent;
+  let sessionWriteStarted;
+  const sessionWrite = new Promise((resolve) => {
+    sessionWriteStarted = resolve;
+  });
+  const agentGate = new Promise((resolve) => {
+    releaseAgent = resolve;
+  });
+  const test = await fixture(async (_cfg, session, userText) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    sessionWriteStarted();
+    await agentGate;
+    return { status: 'completed', output: 'late result', usage };
+  });
+
+  const running = test.coordinator.start('old session', config, 'key');
+  await sessionWrite;
+  const clearing = test.coordinator.clear();
+  releaseAgent();
+  await Promise.all([running, clearing]);
+  if ((await test.session.getItems()).length !== 0) throw new Error('clear lost to a late run session write');
+  if ((await test.store.getLast()) !== undefined) throw new Error('clear left a stale run for retry');
+  if (!test.events.some((event) => event.type === 'cleared')) throw new Error('clear event missing');
+}
+
+// A stop that already read the active run but has not started rollback yet is
+// absorbed by clear(); it must not resurrect the run after clearRuns().
+{
+  const test = await fixture(async () => ({ status: 'completed', output: '', usage }));
+  await test.store.begin('pending stop', config, 0);
+  let releaseActiveRead;
+  let activeReadStarted;
+  const activeRead = new Promise((resolve) => {
+    activeReadStarted = resolve;
+  });
+  const activeReadGate = new Promise((resolve) => {
+    releaseActiveRead = resolve;
+  });
+  const originalGetActive = test.store.getActive.bind(test.store);
+  let readCount = 0;
+  test.store.getActive = async () => {
+    const active = await originalGetActive();
+    readCount += 1;
+    if (readCount === 1) {
+      activeReadStarted();
+      await activeReadGate;
+    }
+    return active;
+  };
+  const stopping = test.coordinator.stop(false);
+  await activeRead;
+  const clearing = test.coordinator.clear();
+  releaseActiveRead();
+  await Promise.all([stopping, clearing]);
+  if ((await test.store.getLast()) !== undefined) throw new Error('late stop rollback resurrected a cleared run');
+}
+
+console.log('run coordinator tests passed: cancel rollback, retry identity, approval/crash recovery, refusal terminal state, clear races');

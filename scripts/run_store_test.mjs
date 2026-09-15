@@ -112,4 +112,20 @@ await session.addItems([
 await session.truncate(1);
 if ((await session.getItems()).length !== 1) throw new Error('session truncate did not restore boundary');
 
-console.log('run store tests passed: checkpoint restore, active-run lock, effect occurrences, uncertain-effect block, session rollback');
+const firstAccessSession = new JsonFileSession(path.join(dir, 'first-access-session.json'));
+const firstSessionId = await firstAccessSession.getSessionId();
+if (firstSessionId !== await firstAccessSession.getSessionId()) throw new Error('session id changed before first persistence');
+
+// Separate session instances for the same UI storage path share the same
+// serialized queue; a clear cannot be overwritten by a stale instance write.
+const sharedSessionPath = path.join(dir, 'shared-session.json');
+const staleSession = new JsonFileSession(sharedSessionPath);
+const currentSession = new JsonFileSession(sharedSessionPath);
+await staleSession.addItems([{ type: 'message', role: 'user', content: 'stale' }]);
+await staleSession.getItems();
+const pendingAdd = staleSession.addItems([{ type: 'message', role: 'user', content: 'late' }]);
+const pendingClear = currentSession.clearSession();
+await Promise.all([pendingAdd, pendingClear]);
+if ((await currentSession.getItems()).length !== 0) throw new Error('shared session clear was overwritten by a stale instance');
+
+console.log('run store tests passed: checkpoint restore, active-run lock, effect occurrences, uncertain-effect block, session rollback, shared session queue');

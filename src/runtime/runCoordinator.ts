@@ -50,8 +50,15 @@ export class RunCoordinator {
   private controller?: AbortController;
   private activeDone?: Promise<void>;
   private resolveActiveDone?: () => void;
+  private transitionDone?: Promise<void>;
+  private resolveTransitionDone?: () => void;
   private liveOutput = '';
   private stopRequested = false;
+  private cancelChain: Promise<void> = Promise.resolve();
+  private clearing = false;
+  private clearGeneration = 0;
+  private clearOperation?: Promise<void>;
+  private initializeOperation?: Promise<void>;
   private protocolFactory?: AgentEventFactory;
   private protocolRunId?: string;
 
@@ -65,10 +72,22 @@ export class RunCoordinator {
   }
 
   async initialize(): Promise<void> {
+    if (this.initializeOperation) return this.initializeOperation;
+    if (this.clearing && this.clearOperation) await this.clearOperation;
+    this.initializeOperation = this.initializeInternal().finally(() => {
+      this.initializeOperation = undefined;
+    });
+    return this.initializeOperation;
+  }
+
+  private async initializeInternal(): Promise<void> {
+    const generation = this.clearGeneration;
     const active = await this.store.getActive();
+    if (this.isClearing(generation)) return;
     if (active?.status === 'running') {
       if (this.busy || this.transitioning) {
-        await this.replayHistory();
+        await this.replayHistory(generation);
+        if (this.isClearing(generation)) return;
         this.emit({
           type: 'runAttached',
           runId: active.id,
@@ -80,6 +99,7 @@ export class RunCoordinator {
       // A live AbortController cannot survive a host restart. Roll back the
       // incomplete Session turn and expose deterministic retry instead.
       await this.session.truncate(active.sessionItemCountBefore);
+      if (this.isClearing(generation)) return;
       active.status = 'failed';
       active.error = '扩展进程在运行期间中断，本轮已回滚，可以安全重试。';
       active.result = createAgentResult({
@@ -88,11 +108,13 @@ export class RunCoordinator {
         usage: active.usage,
       });
       await this.store.update(active);
-      await this.replayHistory();
+      await this.replayHistory(generation);
+      if (this.isClearing(generation)) return;
       this.emit({ type: 'runRecovered', message: active.error, canRetry: true });
       return;
     }
-    await this.replayHistory();
+    await this.replayHistory(generation);
+    if (this.isClearing(generation)) return;
     if (active?.status === 'awaiting_approval') {
       this.emit({
         type: 'runRestored',
@@ -103,12 +125,13 @@ export class RunCoordinator {
       return;
     }
     const last = await this.store.getLast();
+    if (this.isClearing(generation)) return;
     this.emit({ type: 'retryState', canRetry: !!last && last.status !== 'refused' });
   }
 
   async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
-    if (this.busy || this.transitioning) return;
-    this.transitioning = true;
+    if (this.busy || this.transitioning || this.clearing) return;
+    const generation = this.beginTransition();
     try {
       if (await this.store.getActive()) return;
       const error = validateConfig({ ...config, apiKey });
@@ -116,8 +139,11 @@ export class RunCoordinator {
         this.emit({ type: 'error', message: error });
         return;
       }
+      if (this.isClearing(generation)) return;
       const run = await this.store.begin(userText, config, (await this.session.getItems()).length);
+      if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
+      if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: userText, runId: run.id });
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       if (this.stopRequested) {
@@ -129,14 +155,15 @@ export class RunCoordinator {
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error) });
     } finally {
-      this.transitioning = false;
+      this.endTransition();
     }
   }
 
   async approve(runId: string, approvalId: string, approved: boolean, apiKey: string): Promise<void> {
-    if (this.busy || this.transitioning || !runId || !approvalId) return;
-    this.transitioning = true;
+    if (this.busy || this.transitioning || this.clearing || !runId || !approvalId) return;
+    const generation = this.beginTransition();
     try {
+      if (this.isClearing(generation)) return;
       const run = await this.store.getActive();
       if (!run || run.id !== runId || run.status !== 'awaiting_approval' || !run.state) return;
       if (!run.approvals.some((approval) => approval.id === approvalId)) return;
@@ -145,7 +172,9 @@ export class RunCoordinator {
       await this.audit('approval_decided', run, { approvalId, approved });
       run.status = 'running';
       await this.store.update(run);
+      if (this.isClearing(generation)) return;
       await this.audit('run_resumed', run, { approvalId });
+      if (this.isClearing(generation)) return;
       this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
       this.ensureProtocolFactory(run);
       this.emitProtocol(this.protocolFactory!.next({
@@ -164,11 +193,15 @@ export class RunCoordinator {
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
-      this.transitioning = false;
+      this.endTransition();
     }
   }
 
   async stop(notify = true): Promise<void> {
+    if (this.clearing) {
+      if (this.clearOperation) await this.clearOperation;
+      return;
+    }
     if (this.controller) {
       const done = this.activeDone;
       this.controller.abort();
@@ -187,7 +220,16 @@ export class RunCoordinator {
     await this.cancelPending(run, notify);
   }
 
-  private async cancelPending(run: DurableRunRecord, notify: boolean): Promise<void> {
+  private cancelPending(run: DurableRunRecord, notify: boolean): Promise<void> {
+    // A stop call may have passed its initial clearing check and only reach
+    // this point after clear() started. Let clear own the final rollback.
+    if (this.clearing) return Promise.resolve();
+    const operation = this.cancelChain.then(() => this.cancelPendingInternal(run, notify));
+    this.cancelChain = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async cancelPendingInternal(run: DurableRunRecord, notify: boolean): Promise<void> {
     // Rollback first: an intervening crash leaves the record active and startup
     // safely repeats this idempotent truncation.
     await this.session.truncate(run.sessionItemCountBefore);
@@ -208,12 +250,13 @@ export class RunCoordinator {
   }
 
   async retry(apiKey: string): Promise<void> {
-    if (this.busy || this.transitioning) return;
-    this.transitioning = true;
+    if (this.busy || this.transitioning || this.clearing) return;
+    const generation = this.beginTransition();
     try {
       if (await this.store.getActive()) return;
       const previous = await this.store.getLast();
       if (!previous) return;
+      if (this.isClearing(generation)) return;
       if (previous.status === 'refused') {
         this.emit({ type: 'error', message: '本轮审批已拒绝，请重新提交需求。' });
         return;
@@ -223,29 +266,62 @@ export class RunCoordinator {
         return;
       }
       await this.session.truncate(previous.sessionItemCountBefore);
-      await this.replayHistory();
+      await this.replayHistory(generation);
       const run = await this.store.begin(
         previous.userText,
         previous.config,
         previous.sessionItemCountBefore,
         previous.operationId,
       );
+      if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
+      if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: run.userText, runId: run.id, retry: true });
       this.writeLog(`[run:${run.id}] 重试 operation=${run.operationId}`);
       await this.execute(run, apiKey);
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error) });
     } finally {
-      this.transitioning = false;
+      this.endTransition();
     }
   }
 
   async clear(): Promise<void> {
-    await this.stop(false);
-    await this.session.clearSession();
-    await this.store.clearRuns();
-    this.emit({ type: 'cleared' });
+    if (this.clearOperation) return this.clearOperation;
+    this.clearing = true;
+    this.clearGeneration += 1;
+    this.stopRequested = true;
+    const operation = (async () => {
+      // Abort the current model/tool stream, then wait for the complete
+      // transition. The transition owns all late Session writes and must
+      // finish before the new session is persisted.
+      this.controller?.abort();
+      if (this.activeDone) await this.activeDone;
+      if (this.transitionDone) await this.transitionDone;
+      if (this.initializeOperation) {
+        try {
+          await this.initializeOperation;
+        } catch (error) {
+          this.writeLog(`[clear] 初始化收尾失败，继续清理: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      await this.cancelChain;
+
+      // An approval checkpoint has no controller, but is still an active run.
+      // Roll it back before clearing the session so its terminal update cannot
+      // race the clear operation.
+      const active = await this.store.getActive();
+      if (active) await this.cancelPendingInternal(active, false);
+      await this.session.clearSession();
+      await this.store.clearRuns();
+      this.emit({ type: 'cleared' });
+    })();
+    this.clearOperation = operation.finally(() => {
+      this.stopRequested = false;
+      this.clearing = false;
+      this.clearOperation = undefined;
+    });
+    return this.clearOperation;
   }
 
   private async execute(
@@ -255,6 +331,7 @@ export class RunCoordinator {
   ): Promise<void> {
     if (this.busy) return;
     this.busy = true;
+    const runGeneration = this.clearGeneration;
     const controller = new AbortController();
     this.controller = controller;
     this.activeDone = new Promise<void>((resolve) => {
@@ -269,7 +346,7 @@ export class RunCoordinator {
       this.resolveActiveDone?.();
       this.resolveActiveDone = undefined;
       this.activeDone = undefined;
-      this.emit({ type: 'idle' });
+      if (!this.isRunInvalidated(runGeneration)) this.emit({ type: 'idle' });
       return;
     }
     this.emit({ type: 'busy', runId: run.id });
@@ -305,9 +382,15 @@ export class RunCoordinator {
             runId: run.id,
             operationId: run.operationId,
             eventFactory: this.protocolFactory,
-            onEvent: (event: AgentProtocolEvent) => this.emitProtocol(event),
+            onEvent: (event: AgentProtocolEvent) => {
+              if (!this.isRunInvalidated(runGeneration)) this.emitProtocol(event);
+            },
           },
           onCheckpoint: async (checkpoint) => {
+            if (this.isRunInvalidated(runGeneration)) {
+              controller.abort();
+              return;
+            }
             run.status = 'awaiting_approval';
             run.state = checkpoint.state;
             run.approvals = checkpoint.approvals;
@@ -319,6 +402,9 @@ export class RunCoordinator {
         },
       );
 
+      // clear() may have invalidated this run while the SDK was settling its
+      // final promise. Its cleanup owns the final Session/RunStore state.
+      if (this.isRunInvalidated(runGeneration)) return;
       run.output = result.output;
       run.result = result.result;
       run.usage = result.usage;
@@ -330,11 +416,14 @@ export class RunCoordinator {
       // host crashes between these writes, startup still sees an active run.
       if (result.status === 'cancelled' || result.status === 'refused') {
         await this.session.truncate(run.sessionItemCountBefore);
+        if (this.isRunInvalidated(runGeneration)) return;
       }
       await this.store.update(run);
+      if (this.isRunInvalidated(runGeneration)) return;
 
       if (result.status === 'awaiting_approval') {
         await this.audit('approval_requested', run, { approvals: run.approvals });
+        if (this.isRunInvalidated(runGeneration)) return;
         this.writeLog(`[run:${run.id}] 已持久化审批断点 (${run.approvals.length} 项)`);
         this.emit({ type: 'awaitingApproval', runId: run.id, approvals: run.approvals });
         for (const approval of run.approvals) {
@@ -349,6 +438,7 @@ export class RunCoordinator {
         }
       } else if (result.status === 'cancelled') {
         await this.audit('run_cancelled', run);
+        if (this.isRunInvalidated(runGeneration)) return;
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });
         this.emitProtocol(this.protocolFactory!.next({
@@ -361,6 +451,7 @@ export class RunCoordinator {
             ? result.result.reason
             : '用户拒绝了工具调用。';
         await this.audit('run_refused', run, { reason });
+        if (this.isRunInvalidated(runGeneration)) return;
         this.writeLog(`[run:${run.id}] 用户拒绝审批，本轮已终止并回滚会话`);
         this.emit({
           type: 'refused',
@@ -373,6 +464,7 @@ export class RunCoordinator {
         }));
       } else {
         await this.audit('run_completed', run, { usage: result.usage });
+        if (this.isRunInvalidated(runGeneration)) return;
         this.writeLog(
           `[run:${run.id}] 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens} | 模型调用 ${result.usage.requests} 次`,
         );
@@ -385,7 +477,9 @@ export class RunCoordinator {
       }
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
+      if (this.isRunInvalidated(runGeneration)) return;
       await this.session.truncate(run.sessionItemCountBefore);
+      if (this.isRunInvalidated(runGeneration)) return;
       run.status = cancelled ? 'cancelled' : 'failed';
       run.state = undefined;
       run.approvals = [];
@@ -398,6 +492,7 @@ export class RunCoordinator {
           usage: run.usage,
         });
       await this.store.update(run);
+      if (this.isRunInvalidated(runGeneration)) return;
       if (cancelled) {
         await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
@@ -422,7 +517,7 @@ export class RunCoordinator {
       this.resolveActiveDone = undefined;
       this.activeDone = undefined;
       this.liveOutput = '';
-      this.emit({ type: 'idle' });
+      if (!this.isRunInvalidated(runGeneration)) this.emit({ type: 'idle' });
     }
   }
 
@@ -444,8 +539,10 @@ export class RunCoordinator {
     }));
   }
 
-  private async replayHistory(): Promise<void> {
-    this.emit({ type: 'history', messages: extractChatMessages(await this.session.getItems()) });
+  private async replayHistory(generation = this.clearGeneration): Promise<void> {
+    const messages = extractChatMessages(await this.session.getItems());
+    if (this.isClearing(generation)) return;
+    this.emit({ type: 'history', messages });
   }
 
   private async audit(type: AuditEventType, run: DurableRunRecord, metadata?: Record<string, unknown>): Promise<void> {
@@ -472,5 +569,28 @@ export class RunCoordinator {
 
   private emit(event: RuntimeEvent): void {
     this.emitEvent(event);
+  }
+
+  private beginTransition(): number {
+    this.transitioning = true;
+    this.transitionDone = new Promise<void>((resolve) => {
+      this.resolveTransitionDone = resolve;
+    });
+    return this.clearGeneration;
+  }
+
+  private endTransition(): void {
+    this.transitioning = false;
+    this.resolveTransitionDone?.();
+    this.resolveTransitionDone = undefined;
+    this.transitionDone = undefined;
+  }
+
+  private isClearing(generation: number): boolean {
+    return this.clearing || generation !== this.clearGeneration;
+  }
+
+  private isRunInvalidated(generation: number): boolean {
+    return this.clearing || generation !== this.clearGeneration;
   }
 }

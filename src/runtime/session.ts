@@ -16,13 +16,23 @@ import type { AgentInputItem, Session } from '@openai/agents';
 export class JsonFileSession implements Session {
   private items: AgentInputItem[] = [];
   private sessionId = '';
+  /**
+   * All operations for the same file share one queue, including operations
+   * issued by separate JsonFileSession instances in the same extension host.
+   * This prevents a stale instance from writing over a newer clear/add.
+   */
+  private static readonly queues = new Map<string, Promise<void>>();
   private loaded = false;
-  private saveChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly filePath: string) {}
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
+  private queueKey(): string {
+    const resolved = path.resolve(this.filePath);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  }
+
+  private async loadFromDisk(force = false): Promise<void> {
+    if (this.loaded && !force) return;
     try {
       const data = JSON.parse(await fs.readFile(this.filePath, 'utf8')) as {
         schemaVersion?: number;
@@ -41,63 +51,101 @@ export class JsonFileSession implements Session {
           `会话存储损坏，已停止恢复以避免混入错误上下文: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      this.sessionId = randomUUID();
+      // A read-only first access may happen before the first write. Keep the
+      // generated id stable until the document is actually persisted.
+      if (!this.loaded || !this.sessionId) this.sessionId = randomUUID();
       this.items = [];
     }
     this.loaded = true;
   }
 
-  /** 串行化写入,避免连续 addItems 并发写同一文件 */
-  private persist(): Promise<void> {
-    this.saveChain = this.saveChain.then(async () => {
+  private persistSnapshot(): Promise<void> {
+    // Capture the complete document before awaiting any filesystem operation.
+    // Persisting `this.items` later would allow a subsequent clear/mutation to
+    // change the payload of an already queued write.
+    const snapshot = JSON.stringify({
+      schemaVersion: 1,
+      sessionId: this.sessionId,
+      items: this.items,
+    });
+    return (async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
       await fs.writeFile(
         temp,
-        JSON.stringify({ schemaVersion: 1, sessionId: this.sessionId, items: this.items }),
+        snapshot,
         'utf8',
       );
       await fs.rename(temp, this.filePath);
+    })();
+  }
+
+  /** Serialize reads and writes against the same on-disk session document. */
+  private enqueue<T>(operation: () => Promise<T> | T): Promise<T> {
+    const key = this.queueKey();
+    const previous = JsonFileSession.queues.get(key) ?? Promise.resolve();
+    const current = previous.then(operation);
+    const settled = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    JsonFileSession.queues.set(key, settled);
+    void settled.then(() => {
+      if (JsonFileSession.queues.get(key) === settled) {
+        JsonFileSession.queues.delete(key);
+      }
     });
-    return this.saveChain;
+    return current;
   }
 
   async getSessionId(): Promise<string> {
-    await this.ensureLoaded();
-    return this.sessionId;
+    return this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      return this.sessionId;
+    });
   }
 
   async getItems(limit?: number): Promise<AgentInputItem[]> {
-    await this.ensureLoaded();
-    return limit === undefined ? [...this.items] : this.items.slice(-limit);
+    return this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      return limit === undefined ? [...this.items] : this.items.slice(-limit);
+    });
   }
 
   async addItems(items: AgentInputItem[]): Promise<void> {
-    await this.ensureLoaded();
-    this.items.push(...items);
-    await this.persist();
+    await this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      this.items.push(...items);
+      await this.persistSnapshot();
+    });
   }
 
   async popItem(): Promise<AgentInputItem | undefined> {
-    await this.ensureLoaded();
-    const last = this.items.pop();
-    await this.persist();
-    return last;
+    return this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      const last = this.items.pop();
+      await this.persistSnapshot();
+      return last;
+    });
   }
 
   async clearSession(): Promise<void> {
-    this.items = [];
-    this.sessionId = randomUUID();
-    this.loaded = true;
-    await this.persist();
+    await this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      this.items = [];
+      this.sessionId = randomUUID();
+      await this.persistSnapshot();
+    });
   }
 
   /** Restore the session to a turn boundary before retrying a failed/cancelled run. */
   async truncate(length: number): Promise<void> {
-    await this.ensureLoaded();
-    const safeLength = Math.max(0, Math.min(this.items.length, Math.floor(length)));
-    this.items = this.items.slice(0, safeLength);
-    await this.persist();
+    await this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      const safeLength = Math.max(0, Math.min(this.items.length, Math.floor(length)));
+      this.items = this.items.slice(0, safeLength);
+      await this.persistSnapshot();
+    });
   }
 }
 
