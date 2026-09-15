@@ -153,7 +153,7 @@ export class RunCoordinator {
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       if (this.stopRequested) {
         this.stopRequested = false;
-        await this.cancelPending(run, false);
+        await this.pausePending(run, false);
         return;
       }
       await this.execute(run, apiKey);
@@ -188,7 +188,7 @@ export class RunCoordinator {
       }));
       if (this.stopRequested) {
         this.stopRequested = false;
-        await this.cancelPending(run, false);
+        await this.pausePending(run, false);
         return;
       }
       await this.execute(run, apiKey, {
@@ -218,7 +218,7 @@ export class RunCoordinator {
     if (this.transitioning) {
       this.stopRequested = true;
       const pending = await this.store.getActive();
-      if (pending) await this.cancelPending(pending, notify);
+      if (pending) await this.pausePending(pending, notify);
       return;
     }
     const run = await this.store.getActive();
@@ -245,12 +245,37 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
-      const run = await this.store.resume(previous.id);
+      const hasSdkState = typeof previous.state === 'string' && previous.state.length > 0;
+      if (!hasSdkState) {
+        // An immediate stop can happen before the SDK has a serializable
+        // RunState. The stopped turn was already rolled back, so claim a new
+        // attempt in the same operation lineage; the effect journal prevents
+        // completed or uncertain side effects from being duplicated.
+        await this.session.truncate(previous.sessionItemCountBefore);
+      }
       if (this.isClearing(generation)) return;
-      await this.audit('run_resumed', run, { resumedRunId: previous.id });
+      const run = hasSdkState
+        ? await this.store.resume(previous.id)
+        : await this.store.begin(
+          previous.userText,
+          previous.config,
+          previous.sessionItemCountBefore,
+          previous.operationId,
+        );
       if (this.isClearing(generation)) return;
-      this.emit({ type: 'resumeStarted', runId: run.id, continued: true });
-      await this.execute(run, apiKey, { initialState: run.state });
+      await this.audit('run_resumed', run, {
+        resumedRunId: previous.id,
+        strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
+      });
+      if (this.isClearing(generation)) return;
+      this.emit({
+        type: 'resumeStarted',
+        runId: run.id,
+        continued: true,
+        restartedFromBoundary: !hasSdkState,
+        userText: run.userText,
+      });
+      await this.execute(run, apiKey, hasSdkState ? { initialState: run.state } : {});
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
@@ -278,11 +303,60 @@ export class RunCoordinator {
       usage: run.usage,
     });
     run.state = undefined;
+    run.canContinue = false;
     run.approvals = [];
     await this.store.update(run);
     await this.audit('run_cancelled', run);
     if (notify) {
       this.emit({ type: 'cancelled', canRetry: true });
+      this.emit({ type: 'idle' });
+    }
+  }
+
+  private pausePending(run: DurableRunRecord, notify: boolean): Promise<void> {
+    if (this.clearing) return Promise.resolve();
+    const operation = this.cancelChain.then(() => this.pausePendingInternal(run, notify));
+    this.cancelChain = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async pausePendingInternal(run: DurableRunRecord, notify: boolean): Promise<void> {
+    const active = await this.store.getActive();
+    if (!active || active.id !== run.id) {
+      const last = await this.store.getLast();
+      if (notify && last?.id === run.id && last.status === 'paused') {
+        const hasSdkState = typeof last.state === 'string' && last.state.length > 0;
+        this.emit({
+          type: 'paused',
+          canContinue: true,
+          canRetry: true,
+          resumeStrategy: hasSdkState ? 'sdk_state' : 'safe_restart',
+        });
+        this.emit({ type: 'idle' });
+      }
+      return;
+    }
+    const hasSdkState = typeof active.state === 'string' && active.state.length > 0;
+    if (!hasSdkState) await this.session.truncate(active.sessionItemCountBefore);
+    active.status = 'paused';
+    active.canContinue = true;
+    active.result = createAgentResult({
+      status: 'cancelled',
+      reason: 'user_paused',
+      usage: active.usage,
+    });
+    if (!hasSdkState) active.approvals = [];
+    await this.store.update(active);
+    await this.audit('run_paused', active, {
+      strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
+    });
+    if (notify) {
+      this.emit({
+        type: 'paused',
+        canContinue: true,
+        canRetry: true,
+        resumeStrategy: hasSdkState ? 'sdk_state' : 'safe_restart',
+      });
       this.emit({ type: 'idle' });
     }
   }
@@ -380,7 +454,7 @@ export class RunCoordinator {
     this.liveOutput = '';
     if (this.stopRequested) {
       this.stopRequested = false;
-      await this.cancelPending(run, false);
+      await this.pausePending(run, false);
       this.controller = undefined;
       this.busy = false;
       this.resolveActiveDone?.();
@@ -450,13 +524,13 @@ export class RunCoordinator {
       run.result = result.result;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
-      const resumable = this.pauseRequested
-        && result.status === 'cancelled'
+      const manuallyPaused = this.pauseRequested && result.status === 'cancelled';
+      const resumable = manuallyPaused
         && typeof result.state === 'string'
         && result.state.length > 0;
       run.state = result.status === 'awaiting_approval' || resumable ? result.state : undefined;
-      run.status = resumable ? 'paused' : result.status;
-      run.canContinue = resumable;
+      run.status = manuallyPaused ? 'paused' : result.status;
+      run.canContinue = manuallyPaused;
 
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
@@ -482,11 +556,21 @@ export class RunCoordinator {
             },
           }));
         }
-      } else if (result.status === 'cancelled' && resumable) {
-        await this.audit('run_paused', run);
+      } else if (result.status === 'cancelled' && manuallyPaused) {
+        await this.audit('run_paused', run, {
+          strategy: resumable ? 'sdk_state' : 'safe_restart',
+        });
         if (this.isRunInvalidated(runGeneration)) return;
-        this.writeLog(`[run:${run.id}] 已暂停，保存可续跑断点`);
-        this.emit({ type: 'paused', canContinue: true, canRetry: true, usage: result.usage });
+        this.writeLog(
+          `[run:${run.id}] 已暂停，恢复策略=${resumable ? 'sdk_state' : 'safe_restart'}`,
+        );
+        this.emit({
+          type: 'paused',
+          canContinue: true,
+          canRetry: true,
+          resumeStrategy: resumable ? 'sdk_state' : 'safe_restart',
+          usage: result.usage,
+        });
       } else if (result.status === 'cancelled') {
         await this.audit('run_cancelled', run);
         if (this.isRunInvalidated(runGeneration)) return;
@@ -531,7 +615,8 @@ export class RunCoordinator {
       if (this.isRunInvalidated(runGeneration)) return;
       await this.session.truncate(run.sessionItemCountBefore);
       if (this.isRunInvalidated(runGeneration)) return;
-      run.status = cancelled ? 'cancelled' : 'failed';
+      const manuallyPaused = cancelled && this.pauseRequested;
+      run.status = manuallyPaused ? 'paused' : cancelled ? 'cancelled' : 'failed';
       run.state = undefined;
       run.approvals = [];
       run.error = cancelled ? undefined : this.formatError(error);
@@ -542,10 +627,19 @@ export class RunCoordinator {
           error: run.error ?? 'unknown_error',
           usage: run.usage,
         });
-      run.canContinue = false;
+      run.canContinue = manuallyPaused;
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
-      if (cancelled) {
+      if (manuallyPaused) {
+        await this.audit('run_paused', run, { strategy: 'safe_restart' });
+        this.writeLog(`[run:${run.id}] 已暂停，恢复策略=safe_restart`);
+        this.emit({
+          type: 'paused',
+          canContinue: true,
+          canRetry: true,
+          resumeStrategy: 'safe_restart',
+        });
+      } else if (cancelled) {
         await this.audit('run_cancelled', run);
         this.writeLog(`[run:${run.id}] 已取消并回滚会话`);
         this.emit({ type: 'cancelled', canRetry: true });

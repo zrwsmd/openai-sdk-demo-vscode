@@ -77,6 +77,15 @@ resumed.status = 'completed';
 resumed.result = undefined;
 await store.update(resumed);
 
+const earlyPaused = await store.begin('stopped immediately', config, 3, 'operation-early-resume');
+earlyPaused.status = 'paused';
+earlyPaused.canContinue = true;
+await store.update(earlyPaused);
+const earlyContinuable = await store.getContinuable();
+if (earlyContinuable?.id !== earlyPaused.id || earlyContinuable.state !== undefined) {
+  throw new Error('state-less safe continuation was not discovered');
+}
+
 // Each intentional occurrence executes once; a fresh retry replays both.
 let executions = 0;
 const first = await store.executeEffect('attempt-1', 'operation-1', 'write_file', { path: 'a.st', content: 'x' }, async () => {

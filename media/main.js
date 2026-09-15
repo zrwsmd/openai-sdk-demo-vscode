@@ -633,6 +633,11 @@ window.addEventListener('message', (event) => {
     case 'resumeStarted':
       canContinue = false;
       currentRunId = msg.runId || currentRunId;
+      if (msg.userText) {
+        const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
+        const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
+        if (lastUser !== msg.userText) addMessage('user', msg.userText);
+      }
       if (!agentBubble) {
         agentText = '';
         agentBubble = addMessage('agent', '');
@@ -662,7 +667,12 @@ window.addEventListener('message', (event) => {
         if (!agentText) agentBubble.remove();
       }
       agentBubble = null;
-      addNote('tool-note', '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮');
+      addNote(
+        'tool-note',
+        msg.resumeStrategy === 'safe_restart'
+          ? '本轮停止较早；输入“继续”会从最近安全位置恢复，也可以重试本轮'
+          : '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮',
+      );
       canRetry = msg.canRetry === true;
       canContinue = msg.canContinue === true;
       currentRunId = null;

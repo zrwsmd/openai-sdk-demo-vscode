@@ -212,8 +212,9 @@ export class JsonRunStore implements RunStore {
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
       (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
+      (run.state !== undefined && typeof run.state !== 'string') ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
-      (run.status === 'paused' && (run.canContinue !== true || typeof run.state !== 'string' || !run.state)) ||
+      (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
       !Array.isArray(run.approvals) ||
       run.approvals.some(
@@ -290,7 +291,7 @@ export class JsonRunStore implements RunStore {
   async getContinuable(): Promise<DurableRunRecord | undefined> {
     await this.writeChain;
     const last = (await this.readDocument()).last;
-    return last?.status === 'paused' && last.canContinue === true && !!last.state ? last : undefined;
+    return last?.status === 'paused' && last.canContinue === true ? last : undefined;
   }
 
   async begin(

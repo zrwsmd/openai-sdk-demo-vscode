@@ -15,12 +15,26 @@ async function fixture(executeAgent) {
   return { dir, session, store, events, coordinator };
 }
 
-// Cancel rolls the partial Session turn back and exposes a retryable terminal run.
+// An immediate manual stop can happen before the SDK exposes a RunState. The
+// coordinator rolls back the partial turn and safely restarts it on continue.
 {
+  let calls = 0;
+  const initialStates = [];
   const test = await fixture(async (_cfg, session, userText, options) => {
+    calls += 1;
+    initialStates.push(options.initialState);
     await session.addItems([{ type: 'message', role: 'user', content: userText }]);
-    await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
-    return { status: 'cancelled', output: '', usage };
+    if (calls === 1) {
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+      return { status: 'cancelled', output: '', usage };
+    }
+    await session.addItems([{
+      type: 'message',
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text: 'continued safely' }],
+    }]);
+    return { status: 'completed', output: 'continued safely', usage };
   });
   const running = test.coordinator.start('cancel me', config, 'key');
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -31,9 +45,24 @@ async function fixture(executeAgent) {
   if (!test.events.some((event) => event.type === 'agentEvent' && event.event.type === 'run.started')) {
     throw new Error('stable run.started protocol event missing');
   }
-  if ((await test.session.getItems()).length !== 0) throw new Error('coordinator did not rollback cancelled session');
-  if ((await test.store.getLast())?.status !== 'cancelled') throw new Error('cancelled run was not persisted');
-  if (!test.events.some((event) => event.type === 'cancelled')) throw new Error('cancelled event missing');
+  if ((await test.session.getItems()).length !== 0) throw new Error('coordinator did not rollback the early-stop session');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.canContinue !== true || paused.state !== undefined) {
+    throw new Error('early stop was not persisted as a safe continuation');
+  }
+  if (!test.events.some((event) => event.type === 'paused' && event.resumeStrategy === 'safe_restart')) {
+    throw new Error('safe-restart pause event missing');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (
+    completed?.status !== 'completed' ||
+    completed.id === paused.id ||
+    completed.operationId !== paused.operationId ||
+    initialStates[1] !== undefined
+  ) {
+    throw new Error('early-stop continue did not restart from the safe boundary');
+  }
 }
 
 // A manual stop preserves the SDK checkpoint; continue resumes that exact
@@ -82,7 +111,10 @@ async function fixture(executeAgent) {
   await test.coordinator.stop();
   await starting;
   if (agentCalls !== 0) throw new Error('stop raced with startup and still invoked the agent');
-  if ((await test.store.getLast())?.status !== 'cancelled') throw new Error('pre-controller stop was not persisted');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.canContinue !== true) {
+    throw new Error('pre-controller stop was not preserved for continuation');
+  }
 }
 
 // Retry reuses operationId while getting a new attempt/run id.
