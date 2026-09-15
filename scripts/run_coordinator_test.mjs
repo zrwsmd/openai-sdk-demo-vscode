@@ -65,6 +65,86 @@ async function fixture(executeAgent) {
   }
 }
 
+// A transient gateway failure keeps the SDK state and can resume without
+// replaying the original task.
+{
+  const initialStates = [];
+  let calls = 0;
+  const test = await fixture(async (_cfg, session, userText, options) => {
+    calls += 1;
+    initialStates.push(options.initialState);
+    if (calls === 1) {
+      await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+      throw Object.assign(new Error('502 {"detail":"Model gateway is unavailable"}'), {
+        status: 502,
+        agentRunState: '{"sdk":"gateway-checkpoint"}',
+      });
+    }
+    return { status: 'completed', output: 'gateway recovered', usage };
+  });
+  await test.coordinator.start('gateway state resume', config, 'key');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.state !== '{"sdk":"gateway-checkpoint"}' || !paused.canContinue) {
+    throw new Error('retryable gateway state was not preserved');
+  }
+  if ((await test.session.getItems()).length !== 1) {
+    throw new Error('session was rolled back despite a resumable gateway state');
+  }
+  if (!test.events.some((event) => event.type === 'error' && event.canContinue === true)) {
+    throw new Error('recoverable gateway error did not expose continue');
+  }
+  await test.coordinator.continue('key');
+  if (initialStates[1] !== '{"sdk":"gateway-checkpoint"}' || (await test.store.getLast())?.status !== 'completed') {
+    throw new Error('gateway failure did not resume from SDK state');
+  }
+}
+
+// A retryable failure without a serializable state falls back to the safe
+// session boundary and keeps the operation lineage for side-effect recovery.
+{
+  let calls = 0;
+  const test = await fixture(async (_cfg, session, userText) => {
+    calls += 1;
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    if (calls === 1) {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' });
+    }
+    return { status: 'completed', output: 'connection recovered', usage };
+  });
+  await test.coordinator.start('gateway boundary resume', config, 'key');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.state !== undefined || !paused.canContinue) {
+    throw new Error('state-less gateway failure was not preserved for safe continuation');
+  }
+  if ((await test.session.getItems()).length !== 0) {
+    throw new Error('state-less gateway failure did not rollback its partial session');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (completed?.status !== 'completed' || completed.id === paused.id || completed.operationId !== paused.operationId) {
+    throw new Error('state-less gateway failure did not restart safely');
+  }
+}
+
+// Runs persisted by the previous build as failed should also recognize a 502
+// message and become continuable after the extension is updated.
+{
+  const test = await fixture(async () => ({ status: 'completed', output: 'legacy recovered', usage }));
+  const legacy = await test.store.begin('legacy gateway failure', config, 0, 'legacy-gateway-op');
+  legacy.status = 'failed';
+  legacy.error = 'Error: 502 {"detail":"Model gateway is unavailable"}';
+  await test.store.update(legacy);
+  await test.coordinator.initialize();
+  if (!test.events.some((event) => event.type === 'retryState' && event.canContinue === true)) {
+    throw new Error('legacy retryable failure was not exposed as continuable');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (completed?.status !== 'completed' || completed.operationId !== legacy.operationId) {
+    throw new Error('legacy gateway failure could not continue from its safe boundary');
+  }
+}
+
 // A manual stop preserves the SDK checkpoint; continue resumes that exact
 // state instead of replaying the user's text from the beginning.
 {

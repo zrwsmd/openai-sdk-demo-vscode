@@ -1,6 +1,8 @@
 import {
   runAgent,
   validateConfig,
+  getResumableAgentState,
+  isRetryableAgentError,
   MaxTurnsExceededError,
   MAX_TURNS,
   type AgentRunOptions,
@@ -127,10 +129,13 @@ export class RunCoordinator {
     }
     const last = await this.store.getLast();
     if (this.isClearing(generation)) return;
+    const recoverableFailure = last?.status === 'failed' && isRetryableAgentError(last.error);
     this.emit({
       type: 'retryState',
       canRetry: !!last && last.status !== 'refused',
-      canContinue: last?.status === 'paused' && last.canContinue === true,
+      canContinue:
+        (last?.status === 'paused' && last.canContinue === true) ||
+        recoverableFailure,
     });
   }
 
@@ -231,7 +236,11 @@ export class RunCoordinator {
     const generation = this.beginTransition();
     try {
       if (await this.store.getActive()) return;
-      const previous = await this.store.getContinuable();
+      let previous = await this.store.getContinuable();
+      if (!previous) {
+        const last = await this.store.getLast();
+        if (last?.status === 'failed' && isRetryableAgentError(last.error)) previous = last;
+      }
       if (!previous) {
         this.emit({ type: 'error', message: '没有可续跑的任务断点，请使用重试重新执行。' });
         return;
@@ -612,12 +621,20 @@ export class RunCoordinator {
       }
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
-      if (this.isRunInvalidated(runGeneration)) return;
-      await this.session.truncate(run.sessionItemCountBefore);
-      if (this.isRunInvalidated(runGeneration)) return;
       const manuallyPaused = cancelled && this.pauseRequested;
-      run.status = manuallyPaused ? 'paused' : cancelled ? 'cancelled' : 'failed';
-      run.state = undefined;
+      const retryableFailure = !cancelled && isRetryableAgentError(error);
+      const errorState = manuallyPaused || retryableFailure
+        ? getResumableAgentState(error)
+        : undefined;
+      const hasSdkState = typeof errorState === 'string' && errorState.length > 0;
+      if (this.isRunInvalidated(runGeneration)) return;
+      if (!hasSdkState) {
+        await this.session.truncate(run.sessionItemCountBefore);
+        if (this.isRunInvalidated(runGeneration)) return;
+      }
+      const continuable = manuallyPaused || retryableFailure;
+      run.status = continuable ? 'paused' : cancelled ? 'cancelled' : 'failed';
+      run.state = hasSdkState ? errorState : undefined;
       run.approvals = [];
       run.error = cancelled ? undefined : this.formatError(error);
       run.result = cancelled
@@ -627,17 +644,18 @@ export class RunCoordinator {
           error: run.error ?? 'unknown_error',
           usage: run.usage,
         });
-      run.canContinue = manuallyPaused;
+      run.canContinue = continuable;
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
       if (manuallyPaused) {
-        await this.audit('run_paused', run, { strategy: 'safe_restart' });
-        this.writeLog(`[run:${run.id}] 已暂停，恢复策略=safe_restart`);
+        const strategy = hasSdkState ? 'sdk_state' : 'safe_restart';
+        await this.audit('run_paused', run, { strategy });
+        this.writeLog(`[run:${run.id}] 已暂停，恢复策略=${strategy}`);
         this.emit({
           type: 'paused',
           canContinue: true,
           canRetry: true,
-          resumeStrategy: 'safe_restart',
+          resumeStrategy: strategy,
         });
       } else if (cancelled) {
         await this.audit('run_cancelled', run);
@@ -646,6 +664,25 @@ export class RunCoordinator {
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.cancelled',
           payload: { reason: 'aborted' },
+        }));
+      } else if (retryableFailure) {
+        const strategy = hasSdkState ? 'sdk_state' : 'safe_restart';
+        await this.audit('run_failed', run, {
+          error: run.error,
+          recoverable: true,
+          strategy,
+        });
+        this.writeLog(`[run:${run.id}] 可恢复错误: ${run.error} | 恢复策略=${strategy}`);
+        this.emit({
+          type: 'error',
+          message: run.error,
+          canRetry: true,
+          canContinue: true,
+          resumeStrategy: strategy,
+        });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.failed',
+          payload: { error: run.error ?? 'unknown_error', recoverable: true },
         }));
       } else {
         await this.audit('run_failed', run, { error: run.error });

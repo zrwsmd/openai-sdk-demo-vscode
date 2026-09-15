@@ -561,7 +561,15 @@ window.addEventListener('message', (event) => {
       agentBubble = null;
       addNote('error-note', msg.message);
       if (msg.canRetry === true) canRetry = true;
-      if (msg.canContinue === true) canContinue = true;
+      if (msg.canContinue === true) {
+        canContinue = true;
+        addNote(
+          'tool-note',
+          msg.resumeStrategy === 'safe_restart'
+            ? '这是可恢复错误；输入“继续”会从最近安全位置恢复'
+            : '这是可恢复错误；输入“继续”会从 SDK 断点恢复',
+        );
+      }
       if (msg.canContinue === false) canContinue = false;
       currentRunId = null;
       setRuntimeMode('idle');
