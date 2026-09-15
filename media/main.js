@@ -592,7 +592,8 @@ window.addEventListener('message', (event) => {
       setRuntimeMode('running');
       break;
     case 'planning':
-      addNote('tool-note', '正在判断任务是否需要多步计划…');
+      // Planning is an internal routing step. Keep the run busy so stop/cancel
+      // remains available, but do not expose implementation details to users.
       setRuntimeMode('running');
       break;
     case 'idle':
