@@ -15,6 +15,7 @@ import {
 export type DurableRunStatus =
   | 'running'
   | 'awaiting_approval'
+  | 'paused'
   | 'completed'
   | 'cancelled'
   | 'refused'
@@ -44,6 +45,8 @@ export interface DurableRunRecord {
   config: DurableRunConfig;
   sessionItemCountBefore: number;
   state?: string;
+  /** True only when the SDK state can resume this exact run. */
+  canContinue: boolean;
   approvals: ApprovalRequest[];
   /** Canonical structured result. Absent only while the run is still active. */
   result?: AgentResult<unknown>;
@@ -103,12 +106,14 @@ export class RunAlreadyActiveError extends Error {
 export interface RunStore {
   getActive(): Promise<DurableRunRecord | undefined>;
   getLast(): Promise<DurableRunRecord | undefined>;
+  getContinuable(): Promise<DurableRunRecord | undefined>;
   begin(
     userText: string,
     config: DurableRunConfig,
     sessionItemCountBefore: number,
     operationId?: string,
   ): Promise<DurableRunRecord>;
+  resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
   clearRuns(): Promise<void>;
   executeEffect<T>(
@@ -138,8 +143,16 @@ export class JsonRunStore implements RunStore {
       if (!parsed || typeof parsed !== 'object' || parsed.schemaVersion !== 1) {
         throw new Error('unsupported run store schema');
       }
-      if (parsed.active !== undefined) this.assertRunRecord(parsed.active, 'active');
-      if (parsed.last !== undefined) this.assertRunRecord(parsed.last, 'last');
+      if (parsed.active !== undefined) {
+        this.assertRunRecord(parsed.active, 'active');
+        // v1 stores created before checkpoint continuation did not have this
+        // field; normalize them in memory so every caller sees a boolean.
+        parsed.active.canContinue = parsed.active.canContinue === true;
+      }
+      if (parsed.last !== undefined) {
+        this.assertRunRecord(parsed.last, 'last');
+        parsed.last.canContinue = parsed.last.canContinue === true;
+      }
       const effects = parsed.effects ?? {};
       const effectAttempts = parsed.effectAttempts ?? {};
       if (!isRecord(effects)) throw new Error('invalid effects journal');
@@ -169,7 +182,7 @@ export class JsonRunStore implements RunStore {
 
   private assertRunRecord(value: unknown, field: string): asserts value is DurableRunRecord {
     const run = value as Partial<DurableRunRecord> | undefined;
-    const statuses: DurableRunStatus[] = ['running', 'awaiting_approval', 'completed', 'cancelled', 'refused', 'failed'];
+    const statuses: DurableRunStatus[] = ['running', 'awaiting_approval', 'paused', 'completed', 'cancelled', 'refused', 'failed'];
     if (
       !run ||
       run.schemaVersion !== 1 ||
@@ -199,6 +212,9 @@ export class JsonRunStore implements RunStore {
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
       (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
+      (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
+      (run.status === 'paused' && (run.canContinue !== true || typeof run.state !== 'string' || !run.state)) ||
+      (run.canContinue === true && run.status !== 'paused') ||
       !Array.isArray(run.approvals) ||
       run.approvals.some(
         (approval) =>
@@ -271,6 +287,12 @@ export class JsonRunStore implements RunStore {
     return (await this.readDocument()).last;
   }
 
+  async getContinuable(): Promise<DurableRunRecord | undefined> {
+    await this.writeChain;
+    const last = (await this.readDocument()).last;
+    return last?.status === 'paused' && last.canContinue === true && !!last.state ? last : undefined;
+  }
+
   async begin(
     userText: string,
     config: DurableRunConfig,
@@ -287,6 +309,7 @@ export class JsonRunStore implements RunStore {
       config,
       sessionItemCountBefore,
       approvals: [],
+      canContinue: false,
       output: '',
       usage: { ...EMPTY_USAGE },
       createdAt: now,
@@ -299,6 +322,34 @@ export class JsonRunStore implements RunStore {
       (document.effectAttempts ??= {})[run.id] = {};
     });
     return run;
+  }
+
+  async resume(runId: string): Promise<DurableRunRecord> {
+    return this.mutate((document) => {
+      if (document.active) throw new RunAlreadyActiveError();
+      const previous = document.last;
+      if (
+        !previous ||
+        previous.id !== runId ||
+        previous.status !== 'paused' ||
+        previous.canContinue !== true ||
+        !previous.state
+      ) {
+        throw new Error('没有可续跑的任务断点');
+      }
+      const resumed: DurableRunRecord = {
+        ...previous,
+        status: 'running',
+        canContinue: false,
+        approvals: [],
+        result: undefined,
+        error: undefined,
+        updatedAt: new Date().toISOString(),
+      };
+      document.active = resumed;
+      document.last = resumed;
+      return resumed;
+    });
   }
 
   async update(run: DurableRunRecord): Promise<void> {

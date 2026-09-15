@@ -30,6 +30,7 @@ import {
  * 会话持久化:对话历史存 workspace storage/session.json(SDK Session 接口),无工作区回退 globalStorage。
  * 消息协议:
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'stop'} / {type:'retry'}
+ *                   {type:'continue'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'getSettings', apiFormat?, requestId?}
  *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
@@ -83,6 +84,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.stop();
       } else if (msg.type === 'retry') {
         void this.retry();
+      } else if (msg.type === 'continue') {
+        void this.continueRun();
       } else if (msg.type === 'getSettings') {
         void this.sendSettingsToWebview(
           isAgentProvider(msg.provider) ? msg.provider : undefined,
@@ -284,6 +287,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async send(text: string): Promise<void> {
+    // Keep the natural-language command narrow: "继续写一个..." remains a
+    // new task, while an exact continuation phrase resumes the saved SDK state.
+    if (isContinueRequest(text)) {
+      await this.continueRun();
+      return;
+    }
     const live = await this.getConfig();
     const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const config: DurableRunConfig = {
@@ -312,6 +321,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async retry(): Promise<void> {
     const live = await this.getConfig();
     await this.coordinator.retry(live.apiKey);
+  }
+
+  private async continueRun(): Promise<void> {
+    const live = await this.getConfig();
+    await this.coordinator.continue(live.apiKey);
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -367,6 +381,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <div class="right">
           <button id="gear" class="gear-btn" title="模型设置">⚙</button>
           <button id="retry" class="tool-btn" title="重试上一轮" disabled>↻</button>
+          <button id="continue" class="tool-btn" title="继续上次任务" disabled>↪</button>
           <button id="stop" class="tool-btn danger hidden" title="停止本轮">■</button>
           <button id="send" class="send-btn" title="发送 (Enter)">↑</button>
         </div>
@@ -378,6 +393,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function isContinueRequest(text: string): boolean {
+  return /^(?:继续|接着刚才|继续刚才|继续上次|从刚才继续)[。！!,.，、\s]*$/u.test(text.trim());
 }
 
 function stringListSetting(

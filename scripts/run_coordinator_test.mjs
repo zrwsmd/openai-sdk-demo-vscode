@@ -36,6 +36,41 @@ async function fixture(executeAgent) {
   if (!test.events.some((event) => event.type === 'cancelled')) throw new Error('cancelled event missing');
 }
 
+// A manual stop preserves the SDK checkpoint; continue resumes that exact
+// state instead of replaying the user's text from the beginning.
+{
+  const initialStates = [];
+  let startedResolve;
+  const started = new Promise((resolve) => {
+    startedResolve = resolve;
+  });
+  let call = 0;
+  const test = await fixture(async (_cfg, session, userText, options) => {
+    call += 1;
+    initialStates.push(options.initialState);
+    if (call === 1) {
+      await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+      startedResolve();
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+      return { status: 'cancelled', output: 'partial', usage, state: '{"sdk":"checkpoint"}' };
+    }
+    return { status: 'completed', output: 'continued', usage };
+  });
+  const running = test.coordinator.start('resume me', config, 'key');
+  await started;
+  await test.coordinator.stop();
+  await running;
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.canContinue !== true || paused.state !== '{"sdk":"checkpoint"}') {
+    throw new Error('manual stop did not persist a continuable checkpoint');
+  }
+  await test.coordinator.continue('key');
+  const resumed = await test.store.getLast();
+  if (initialStates[0] !== undefined || initialStates[1] !== '{"sdk":"checkpoint"}' || resumed?.status !== 'completed') {
+    throw new Error('continue did not resume the saved checkpoint');
+  }
+}
+
 // Stop can win the pre-controller startup window without allowing the model to run.
 {
   let agentCalls = 0;

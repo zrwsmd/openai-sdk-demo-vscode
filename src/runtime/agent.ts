@@ -1455,6 +1455,12 @@ export async function runAgent(
       options.signal?.aborted ||
       stream.cancelled
     ) {
+      let resumableState: string | undefined;
+      try {
+        resumableState = state?.toString();
+      } catch {
+        // A provider may abort before the SDK can serialize a usable state.
+      }
       return {
         result: createAgentResult({
           status: "cancelled",
@@ -1464,6 +1470,7 @@ export async function runAgent(
         output,
         usage,
         status: "cancelled",
+        state: resumableState,
       };
     }
     if (

@@ -8,6 +8,7 @@ export type AuditEventType =
   | 'run_completed'
   | 'run_failed'
   | 'run_cancelled'
+  | 'run_paused'
   | 'run_refused'
   | 'approval_requested'
   | 'approval_decided'

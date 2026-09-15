@@ -53,6 +53,30 @@ try {
 }
 if (!staleConflict) throw new Error('terminal run was reactivated by a stale update');
 
+// A user stop with a serialized SDK state is resumable; resume must create a
+// fresh active attempt while preserving the exact checkpoint and operation id.
+const paused = await store.begin('resume me', config, 3, 'operation-resume');
+paused.status = 'paused';
+paused.state = '{"sdk":"resume-state"}';
+paused.canContinue = true;
+await store.update(paused);
+const continuable = await store.getContinuable();
+if (continuable?.id !== paused.id || continuable.state !== paused.state) {
+  throw new Error('continuable checkpoint was not discovered');
+}
+const resumed = await store.resume(paused.id);
+if (
+  resumed.status !== 'running' ||
+  resumed.canContinue ||
+  resumed.state !== paused.state ||
+  resumed.operationId !== paused.operationId
+) {
+  throw new Error('resume did not preserve the checkpoint');
+}
+resumed.status = 'completed';
+resumed.result = undefined;
+await store.update(resumed);
+
 // Each intentional occurrence executes once; a fresh retry replays both.
 let executions = 0;
 const first = await store.executeEffect('attempt-1', 'operation-1', 'write_file', { path: 'a.st', content: 'x' }, async () => {

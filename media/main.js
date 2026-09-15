@@ -6,6 +6,7 @@ const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
 const retryBtn = document.getElementById('retry');
+const continueBtn = document.getElementById('continue');
 const gearBtn = document.getElementById('gear');
 const modelChip = document.getElementById('model-chip');
 const settingsEl = document.getElementById('settings');
@@ -21,6 +22,7 @@ let hasSavedKey = false;
 let runtimeMode = 'idle';
 let currentRunId = null;
 let canRetry = false;
+let canContinue = false;
 let settingsRequestId = 0;
 let settingsSavePending = false;
 
@@ -32,6 +34,7 @@ function setRuntimeMode(mode) {
   stopBtn.classList.toggle('hidden', !(running || awaiting));
   stopBtn.disabled = mode === 'stopping';
   retryBtn.disabled = !canRetry || running || awaiting;
+  continueBtn.disabled = !canContinue || running || awaiting;
 }
 
 // ---------- 消息渲染 ----------
@@ -192,6 +195,10 @@ stopBtn.addEventListener('click', () => {
 retryBtn.addEventListener('click', () => {
   if (runtimeMode !== 'idle' || !canRetry) return;
   vscode.postMessage({ type: 'retry' });
+});
+continueBtn.addEventListener('click', () => {
+  if (runtimeMode !== 'idle' || !canContinue) return;
+  vscode.postMessage({ type: 'continue' });
 });
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -517,6 +524,7 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
+      canContinue = false;
       agentBubble = addMessage('agent', '');
       agentBubble.classList.add('streaming');
       break;
@@ -540,6 +548,7 @@ window.addEventListener('message', (event) => {
       if (!waitingForToolResult) agentBubble = null;
       showUsage(msg.usage);
       canRetry = msg.canRetry === true;
+      canContinue = false;
       currentRunId = null;
       setRuntimeMode('idle');
       break;
@@ -552,6 +561,8 @@ window.addEventListener('message', (event) => {
       agentBubble = null;
       addNote('error-note', msg.message);
       if (msg.canRetry === true) canRetry = true;
+      if (msg.canContinue === true) canContinue = true;
+      if (msg.canContinue === false) canContinue = false;
       currentRunId = null;
       setRuntimeMode('idle');
       break;
@@ -573,6 +584,7 @@ window.addEventListener('message', (event) => {
       hadToolThisTurn = false;
       currentRunId = null;
       canRetry = false;
+      canContinue = false;
       setRuntimeMode('idle');
       showWelcomeHint();
       break;
@@ -619,6 +631,8 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'resumeStarted':
+      canContinue = false;
+      currentRunId = msg.runId || currentRunId;
       if (!agentBubble) {
         agentText = '';
         agentBubble = addMessage('agent', '');
@@ -638,6 +652,19 @@ window.addEventListener('message', (event) => {
       finishApprovalCards('rejected', '已取消');
       addNote('tool-note', '本轮已停止，可以安全重试');
       canRetry = msg.canRetry === true;
+      canContinue = false;
+      currentRunId = null;
+      setRuntimeMode('idle');
+      break;
+    case 'paused':
+      if (agentBubble) {
+        agentBubble.classList.remove('streaming');
+        if (!agentText) agentBubble.remove();
+      }
+      agentBubble = null;
+      addNote('tool-note', '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮');
+      canRetry = msg.canRetry === true;
+      canContinue = msg.canContinue === true;
       currentRunId = null;
       setRuntimeMode('idle');
       break;
@@ -650,16 +677,19 @@ window.addEventListener('message', (event) => {
       finishApprovalCards('rejected', '已拒绝');
       addNote('tool-note', msg.message || '本轮已拒绝执行，未产生副作用。');
       canRetry = msg.canRetry === true;
+      canContinue = false;
       currentRunId = null;
       setRuntimeMode('idle');
       break;
     case 'runRecovered':
       addNote('error-note', msg.message);
       canRetry = msg.canRetry === true;
+      canContinue = false;
       setRuntimeMode('idle');
       break;
     case 'retryState':
       canRetry = msg.canRetry === true;
+      canContinue = msg.canContinue === true;
       setRuntimeMode(runtimeMode);
       break;
     case 'settings':

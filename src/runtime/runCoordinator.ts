@@ -54,6 +54,7 @@ export class RunCoordinator {
   private resolveTransitionDone?: () => void;
   private liveOutput = '';
   private stopRequested = false;
+  private pauseRequested = false;
   private cancelChain: Promise<void> = Promise.resolve();
   private clearing = false;
   private clearGeneration = 0;
@@ -126,7 +127,11 @@ export class RunCoordinator {
     }
     const last = await this.store.getLast();
     if (this.isClearing(generation)) return;
-    this.emit({ type: 'retryState', canRetry: !!last && last.status !== 'refused' });
+    this.emit({
+      type: 'retryState',
+      canRetry: !!last && last.status !== 'refused',
+      canContinue: last?.status === 'paused' && last.canContinue === true,
+    });
   }
 
   async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
@@ -204,6 +209,7 @@ export class RunCoordinator {
     }
     if (this.controller) {
       const done = this.activeDone;
+      this.pauseRequested = true;
       this.controller.abort();
       if (notify) this.emit({ type: 'stopping' });
       await done;
@@ -218,6 +224,38 @@ export class RunCoordinator {
     const run = await this.store.getActive();
     if (!run) return;
     await this.cancelPending(run, notify);
+  }
+
+  async continue(apiKey: string): Promise<void> {
+    if (this.busy || this.transitioning || this.clearing) return;
+    const generation = this.beginTransition();
+    try {
+      if (await this.store.getActive()) return;
+      const previous = await this.store.getContinuable();
+      if (!previous) {
+        this.emit({ type: 'error', message: '没有可续跑的任务断点，请使用重试重新执行。' });
+        return;
+      }
+      if (validateConfig({ ...previous.config, apiKey })) {
+        this.emit({
+          type: 'error',
+          message: '继续失败：当前没有可用的 API Key。',
+          canContinue: true,
+        });
+        return;
+      }
+      if (this.isClearing(generation)) return;
+      const run = await this.store.resume(previous.id);
+      if (this.isClearing(generation)) return;
+      await this.audit('run_resumed', run, { resumedRunId: previous.id });
+      if (this.isClearing(generation)) return;
+      this.emit({ type: 'resumeStarted', runId: run.id, continued: true });
+      await this.execute(run, apiKey, { initialState: run.state });
+    } catch (error) {
+      this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
+    } finally {
+      this.endTransition();
+    }
   }
 
   private cancelPending(run: DurableRunRecord, notify: boolean): Promise<void> {
@@ -291,6 +329,7 @@ export class RunCoordinator {
     this.clearing = true;
     this.clearGeneration += 1;
     this.stopRequested = true;
+    this.pauseRequested = false;
     const operation = (async () => {
       // Abort the current model/tool stream, then wait for the complete
       // transition. The transition owns all late Session writes and must
@@ -331,6 +370,7 @@ export class RunCoordinator {
   ): Promise<void> {
     if (this.busy) return;
     this.busy = true;
+    this.pauseRequested = false;
     const runGeneration = this.clearGeneration;
     const controller = new AbortController();
     this.controller = controller;
@@ -392,6 +432,7 @@ export class RunCoordinator {
               return;
             }
             run.status = 'awaiting_approval';
+            run.canContinue = false;
             run.state = checkpoint.state;
             run.approvals = checkpoint.approvals;
             run.output = baseOutput + checkpoint.output;
@@ -409,12 +450,17 @@ export class RunCoordinator {
       run.result = result.result;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
-      run.state = result.state;
-      run.status = result.status;
+      const resumable = this.pauseRequested
+        && result.status === 'cancelled'
+        && typeof result.state === 'string'
+        && result.state.length > 0;
+      run.state = result.status === 'awaiting_approval' || resumable ? result.state : undefined;
+      run.status = resumable ? 'paused' : result.status;
+      run.canContinue = resumable;
 
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
-      if (result.status === 'cancelled' || result.status === 'refused') {
+      if ((result.status === 'cancelled' && !resumable) || result.status === 'refused') {
         await this.session.truncate(run.sessionItemCountBefore);
         if (this.isRunInvalidated(runGeneration)) return;
       }
@@ -436,6 +482,11 @@ export class RunCoordinator {
             },
           }));
         }
+      } else if (result.status === 'cancelled' && resumable) {
+        await this.audit('run_paused', run);
+        if (this.isRunInvalidated(runGeneration)) return;
+        this.writeLog(`[run:${run.id}] 已暂停，保存可续跑断点`);
+        this.emit({ type: 'paused', canContinue: true, canRetry: true, usage: result.usage });
       } else if (result.status === 'cancelled') {
         await this.audit('run_cancelled', run);
         if (this.isRunInvalidated(runGeneration)) return;
@@ -491,6 +542,7 @@ export class RunCoordinator {
           error: run.error ?? 'unknown_error',
           usage: run.usage,
         });
+      run.canContinue = false;
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
       if (cancelled) {
@@ -517,6 +569,7 @@ export class RunCoordinator {
       this.resolveActiveDone = undefined;
       this.activeDone = undefined;
       this.liveOutput = '';
+      this.pauseRequested = false;
       if (!this.isRunInvalidated(runGeneration)) this.emit({ type: 'idle' });
     }
   }
