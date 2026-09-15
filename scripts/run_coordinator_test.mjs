@@ -6,13 +6,93 @@ import { JsonFileSession, JsonRunStore, RunCoordinator } from './agent.testbundl
 const config = { baseUrl: 'http://mock/v1', model: 'mock', exportDir: '', workspaceRoot: '' };
 const usage = { inputTokens: 1, outputTokens: 2, requests: 1 };
 
-async function fixture(executeAgent) {
+async function fixture(executeAgent, planTask) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-coordinator-test-'));
   const session = new JsonFileSession(path.join(dir, 'session.json'));
   const store = new JsonRunStore(path.join(dir, 'runs.json'));
   const events = [];
-  const coordinator = new RunCoordinator({ session, store, executeAgent, emit: (event) => events.push(event) });
+  const coordinator = new RunCoordinator({ session, store, executeAgent, planTask, emit: (event) => events.push(event) });
   return { dir, session, store, events, coordinator };
+}
+
+// A model-selected generic plan is persisted and progress is validated in
+// order without changing the existing single-agent execution contract.
+{
+  let plannerCalls = 0;
+  let receivedPlan;
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    receivedPlan = options.taskPlan;
+    await options.onPlanProgress({ stepId: 'step-1', phase: 'started', note: '准备完成' });
+    await options.onPlanProgress({ stepId: 'step-1', phase: 'completed', note: '输入已确认' });
+    await options.onPlanProgress({ stepId: 'step-2', phase: 'started' });
+    await options.onPlanProgress({ stepId: 'step-2', phase: 'completed', note: '目标已完成' });
+    return { status: 'completed', output: 'planned result', usage };
+  }, async () => {
+    plannerCalls += 1;
+    return {
+      schemaVersion: 1,
+      id: 'plan-test',
+      goal: '完成一个通用多步任务',
+      reason: '存在先后依赖',
+      status: 'pending',
+      steps: [
+        { id: 'step-1', title: '准备', objective: '准备输入', completionCriteria: '输入就绪', suggestedTools: [], status: 'pending' },
+        { id: 'step-2', title: '执行', objective: '完成目标', completionCriteria: '目标完成', suggestedTools: [], status: 'pending' },
+      ],
+    };
+  });
+  await test.coordinator.start('通用多步任务', config, 'key');
+  const planned = await test.store.getLast();
+  if (plannerCalls !== 1 || receivedPlan?.steps.length !== 2 || planned?.plan?.status !== 'completed') {
+    throw new Error('linear plan was not executed or persisted');
+  }
+  const planEvents = test.events
+    .filter((event) => event.type === 'agentEvent')
+    .map((event) => event.event)
+    .filter((event) => event.type === 'run.progress' && String(event.payload.stage).startsWith('plan.'));
+  if (!planEvents.some((event) => event.payload.stage === 'plan.created') ||
+      planEvents.filter((event) => String(event.payload.stage).startsWith('plan.step.')).length !== 4) {
+    throw new Error('linear plan progress events are missing');
+  }
+}
+
+// Existing team orchestration already owns planning and must not receive a
+// second generic planner pass.
+{
+  let plannerCalls = 0;
+  const test = await fixture(
+    async () => ({ status: 'completed', output: 'team result', usage }),
+    async () => { plannerCalls += 1; return undefined; },
+  );
+  await test.coordinator.start('team task', { ...config, orchestration: 'team' }, 'key');
+  if (plannerCalls !== 0) throw new Error('team orchestration invoked the generic planner');
+}
+
+// Stopping during the planner call aborts planning, creates no agent call, and
+// leaves the already-created run resumable from its safe boundary.
+{
+  let agentCalls = 0;
+  let plannerAborted = false;
+  let plannerStartedResolve;
+  const plannerStarted = new Promise((resolve) => { plannerStartedResolve = resolve; });
+  const test = await fixture(async () => {
+    agentCalls += 1;
+    return { status: 'completed', output: 'unexpected', usage };
+  }, async (_cfg, _text, signal) => {
+    plannerStartedResolve();
+    await new Promise((resolve, reject) => signal.addEventListener('abort', () => {
+      plannerAborted = true;
+      reject(Object.assign(new Error('planning aborted'), { name: 'AbortError' }));
+    }, { once: true }));
+  });
+  const starting = test.coordinator.start('stop planning', config, 'key');
+  await plannerStarted;
+  await test.coordinator.stop();
+  await starting;
+  const paused = await test.store.getLast();
+  if (!plannerAborted || agentCalls !== 0 || paused?.status !== 'paused' || !paused.canContinue) {
+    throw new Error('stop during planning did not preserve a safe continuation');
+  }
 }
 
 // An immediate manual stop can happen before the SDK exposes a RunState. The
@@ -142,6 +222,26 @@ async function fixture(executeAgent) {
   const completed = await test.store.getLast();
   if (completed?.status !== 'completed' || completed.operationId !== legacy.operationId) {
     throw new Error('legacy gateway failure could not continue from its safe boundary');
+  }
+}
+
+// A legacy retryable failed record with stale SDK state must use the safe
+// boundary instead of calling RunStore.resume(), which only accepts paused runs.
+{
+  const initialStates = [];
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    initialStates.push(options.initialState);
+    return { status: 'completed', output: 'legacy state recovered', usage };
+  });
+  const legacy = await test.store.begin('legacy state gateway failure', config, 0, 'legacy-state-op');
+  legacy.status = 'failed';
+  legacy.state = '{"stale":true}';
+  legacy.error = 'Error: 502 gateway unavailable';
+  await test.store.update(legacy);
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (completed?.status !== 'completed' || completed.operationId !== legacy.operationId || initialStates[0] !== undefined) {
+    throw new Error('legacy failed state did not use safe continuation');
   }
 }
 

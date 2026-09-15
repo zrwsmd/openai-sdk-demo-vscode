@@ -416,6 +416,7 @@ function handleProtocolEvent(event) {
     }
     case 'tool.started': {
       const name = payload.toolName || 'tool';
+      if (name === 'report_plan_progress') break;
       addNote('tool-note', `正在执行 · ${name}`);
       hadToolThisTurn = true;
       pendingToolCount += 1;
@@ -428,6 +429,7 @@ function handleProtocolEvent(event) {
     }
     case 'tool.completed': {
       const name = payload.toolName || 'tool';
+      if (name === 'report_plan_progress') break;
       const summary = typeof payload.summary === 'string'
         ? payload.summary
         : JSON.stringify(payload.result ?? '');
@@ -469,6 +471,17 @@ function handleProtocolEvent(event) {
     case 'usage.updated':
     case 'run.started':
     case 'run.progress':
+      if (typeof payload.stage === 'string' && payload.stage.startsWith('plan.')) {
+        if (payload.stage === 'plan.created' && payload.plan && Array.isArray(payload.plan.steps)) {
+          addNote('tool-note', `已生成线性计划：${payload.plan.steps.length} 步`);
+        } else if (payload.stage === 'plan.restored' && payload.plan && Array.isArray(payload.plan.steps)) {
+          const current = payload.plan.currentStepId ? `，当前 ${payload.plan.currentStepId}` : '';
+          addNote('tool-note', `已恢复线性计划（${payload.plan.steps.length} 步${current}）`);
+        } else if (payload.stage === 'plan.step.started' || payload.stage === 'plan.step.completed') {
+          const phase = payload.stage.endsWith('completed') ? '完成' : '开始';
+          addNote('tool-note', `计划 ${payload.stepId || ''} ${phase}${payload.message ? `：${payload.message}` : ''}`);
+        }
+      }
       break;
   }
 }
@@ -576,6 +589,10 @@ window.addEventListener('message', (event) => {
       break;
     case 'busy':
       currentRunId = msg.runId || currentRunId;
+      setRuntimeMode('running');
+      break;
+    case 'planning':
+      addNote('tool-note', '正在判断任务是否需要多步计划…');
       setRuntimeMode('running');
       break;
     case 'idle':

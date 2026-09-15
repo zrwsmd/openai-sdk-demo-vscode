@@ -16,6 +16,7 @@ import {
   defineToolInputGuardrail,
   ToolGuardrailFunctionOutputFactory,
   type RunToolApprovalItem,
+  type AgentInputItem,
   type Session,
   type StreamedRunResult,
 } from "@openai/agents";
@@ -73,6 +74,14 @@ import {
   type AgentProvider,
   type ModelAdapter,
 } from "./modelAdapter";
+import {
+  createTaskPlan,
+  renderTaskPlan,
+  taskPlanDecisionSchema,
+  type TaskPlan,
+  type TaskPlanProgress,
+  updateTaskPlan,
+} from "./taskPlan";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -138,6 +147,10 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
   /** Called whenever a resumable state is available or changes. */
   onCheckpoint?: (checkpoint: AgentRunCheckpoint) => Promise<void> | void;
+  /** Durable linear plan selected by the model before execution. */
+  taskPlan?: TaskPlan;
+  /** Persists validated step transitions outside the SDK session. */
+  onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
   protocol: {
     runId: string;
@@ -571,6 +584,12 @@ const SYSTEM_PROMPT =
   "只有收到工具成功回执后，才能在最终结果中报告写入完成。" +
   "任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，" +
   "不允许调用完工具不给结论就结束。回答要简洁，用中文。";
+
+const GENERIC_PLAN_SYSTEM_PROMPT =
+  "你是通用任务执行助手，处理用户提出的文件、代码、命令、数据、PLC 或其他可用工具任务。" +
+  "只在用户目标需要时调用相应工具，不要臆造额外领域步骤。" +
+  "写文件、运行命令和设备写入必须经过现有审批、策略与审计约束；工具失败时如实处理。" +
+  "最终答复必须基于真实工具回执和计划步骤结果，不得声称未完成的动作已经完成。";
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
@@ -1138,6 +1157,45 @@ function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
   });
 }
 
+/**
+ * Ask the model whether the request needs a bounded linear workflow.
+ * This planner has no tools and cannot mutate the workspace; callers may
+ * safely fall back to the existing single-agent path if planning fails.
+ */
+export async function planTask(
+  cfg: AgentConfig,
+  userText: string,
+  signal?: AbortSignal,
+  history: AgentInputItem[] = [],
+): Promise<TaskPlan | undefined> {
+  const adapter = buildModelAdapter(cfg);
+  const planner = new Agent({
+    name: "通用任务规划器",
+    model: adapter.model,
+    instructions:
+      "你是通用任务规划器，不执行任何工具，也不输出领域专用方案。" +
+      "判断用户目标是否包含两个或以上有先后关系、需要分别确认完成的动作。" +
+      "单一问答、解释、改写或一次性操作返回 requiresPlan=false。" +
+      "需要多步时只生成 2 到 8 个线性步骤，每一步都必须是可执行目标，并给出清晰完成标准。" +
+      "不要臆造用户没有提出的动作；suggestedTools 只填写通用工具名或空数组。" +
+      "必须严格返回 schema，不要输出 markdown。",
+    outputType: taskPlanDecisionSchema,
+  });
+  const tracingDisabled = !(adapter.provider === "openai" && adapter.apiFormat === "responses" && !cfg.baseUrl.trim());
+  const plannerInput: string | AgentInputItem[] = history.length
+    ? [
+        ...history,
+        { type: "message", role: "user", content: userText },
+      ]
+    : userText;
+  const result = await new Runner({ tracingDisabled }).run(planner, plannerInput, {
+    stream: false,
+    maxTurns: 1,
+    signal,
+  });
+  return createTaskPlan(result.finalOutput, userText);
+}
+
 export async function runAgent(
   cfg: AgentConfig,
   session: Session,
@@ -1158,10 +1216,48 @@ export async function runAgent(
     modelAdapter.provider === "openai" &&
     modelAdapter.apiFormat === "chat_completions" &&
     cfg.orchestration !== "team" &&
+    options.taskPlan === undefined &&
     requiredTool === undefined;
   const structuredMode = !textStreamingMode;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
-  const tools = buildTools(cfg);
+  let activePlan = options.taskPlan ? structuredClone(options.taskPlan) : undefined;
+  const planProgressTool = activePlan
+    ? tool({
+        name: "report_plan_progress",
+        description: "报告通用线性计划中一个步骤的开始或完成。只能按计划顺序调用，不执行外部副作用。",
+        parameters: z.object({
+          stepId: z.string().describe("计划中的步骤 ID，例如 step-1"),
+          phase: z.enum(["started", "completed"]),
+          note: z.string().optional().describe("简短说明本步骤的实际进展或完成依据"),
+        }),
+        execute: async (progress) => {
+          activePlan = updateTaskPlan(activePlan!, progress as TaskPlanProgress);
+          await options.onPlanProgress?.(progress as TaskPlanProgress);
+          return toolResult({
+            ok: true,
+            data: {
+              stepId: progress.stepId,
+              phase: progress.phase,
+              planStatus: activePlan.status,
+            },
+            effect: "none",
+            risk: "plan",
+          });
+        },
+      })
+    : undefined;
+  const tools = [
+    ...buildTools(cfg),
+    ...(planProgressTool ? [planProgressTool] : []),
+  ];
+  const executionInstructions = activePlan
+    ? GENERIC_PLAN_SYSTEM_PROMPT +
+      "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种 PLC/ST 场景；以计划目标和用户原始要求为准。" +
+      "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
+      "开始每一步前调用 report_plan_progress(stepId, started)；达到该步完成标准后调用 report_plan_progress(stepId, completed)。" +
+      "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
+      renderTaskPlan(activePlan)
+    : SYSTEM_PROMPT;
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
     const forceToolChoice =
       forcedTool && !(model instanceof GatewayGuardedModel)
@@ -1178,7 +1274,7 @@ export async function runAgent(
     return new Agent({
       name: "PLC 编程助手",
       model,
-      instructions: SYSTEM_PROMPT,
+      instructions: executionInstructions,
       tools,
       ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
       // Gateway capability negotiation happens inside GatewayGuardedModel;
@@ -1307,6 +1403,15 @@ export async function runAgent(
     return [...toolResults.values()].some(
       (call) => call.name === requiredTool && call.result.ok,
     );
+  };
+
+  const assertPlanCompleted = (): void => {
+    if (activePlan && activePlan.status !== "completed") {
+      const pending = activePlan.steps.find((step) => step.status !== "completed");
+      throw new AgentActionVerificationError(
+        `线性计划尚未完成${pending ? `: ${pending.id} ${pending.title}` : ""}`,
+      );
+    }
   };
 
   // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
@@ -1584,6 +1689,7 @@ export async function runAgent(
     }
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
+        assertPlanCompleted();
         const canonicalOutput: IndustrialAgentOutput = {
           message: output,
           diagnostics: [],
@@ -1613,6 +1719,7 @@ export async function runAgent(
           "Agent 未返回符合 Schema 的最终结构化结果",
         );
       }
+      assertPlanCompleted();
       const verifiedArtifacts = await verifyRequiredActions();
       const canonicalOutput: IndustrialAgentOutput = {
         ...structuredOutput,

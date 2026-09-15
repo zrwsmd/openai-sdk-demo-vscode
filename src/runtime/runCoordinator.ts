@@ -3,6 +3,7 @@ import {
   validateConfig,
   getResumableAgentState,
   isRetryableAgentError,
+  planTask,
   MaxTurnsExceededError,
   MAX_TURNS,
   type AgentRunOptions,
@@ -13,6 +14,13 @@ import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
+import {
+  failTaskPlan,
+  pauseTaskPlan,
+  restartTaskPlan,
+  updateTaskPlan,
+  type TaskPlanProgress,
+} from './taskPlan';
 
 export type RuntimeEvent =
   | { type: 'agentEvent'; event: AgentProtocolEvent }
@@ -24,6 +32,8 @@ export interface RunCoordinatorDependencies {
   emit: (event: RuntimeEvent) => void;
   log?: (line: string) => void;
   executeAgent?: typeof runAgent;
+  /** Optional model planner. Tests and embedders can omit it to retain the single path. */
+  planTask?: typeof planTask;
   audit?: AuditSink;
 }
 
@@ -46,6 +56,7 @@ export class RunCoordinator {
   private readonly emitEvent: (event: RuntimeEvent) => void;
   private readonly writeLog: (line: string) => void;
   private readonly executeAgent: typeof runAgent;
+  private readonly planTask?: typeof planTask;
   private readonly auditSink?: AuditSink;
   private busy = false;
   private transitioning = false;
@@ -64,6 +75,7 @@ export class RunCoordinator {
   private initializeOperation?: Promise<void>;
   private protocolFactory?: AgentEventFactory;
   private protocolRunId?: string;
+  private transitionController?: AbortController;
 
   constructor(dependencies: RunCoordinatorDependencies) {
     this.session = dependencies.session;
@@ -71,6 +83,7 @@ export class RunCoordinator {
     this.emitEvent = dependencies.emit;
     this.writeLog = dependencies.log ?? (() => {});
     this.executeAgent = dependencies.executeAgent ?? runAgent;
+    this.planTask = dependencies.planTask;
     this.auditSink = dependencies.audit;
   }
 
@@ -105,6 +118,7 @@ export class RunCoordinator {
       if (this.isClearing(generation)) return;
       active.status = 'failed';
       active.error = '扩展进程在运行期间中断，本轮已回滚，可以安全重试。';
+      if (active.plan) active.plan = failTaskPlan(active.plan);
       active.result = createAgentResult({
         status: 'failed',
         error: active.error,
@@ -119,6 +133,13 @@ export class RunCoordinator {
     await this.replayHistory(generation);
     if (this.isClearing(generation)) return;
     if (active?.status === 'awaiting_approval') {
+      if (active.plan) {
+        this.ensureProtocolFactory(active);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.progress',
+          payload: { stage: 'plan.restored', plan: active.plan },
+        }));
+      }
       this.emit({
         type: 'runRestored',
         runId: active.id,
@@ -137,6 +158,13 @@ export class RunCoordinator {
         (last?.status === 'paused' && last.canContinue === true) ||
         recoverableFailure,
     });
+    if (last?.plan) {
+      this.ensureProtocolFactory(last);
+      this.emitProtocol(this.protocolFactory!.next({
+        type: 'run.progress',
+        payload: { stage: 'plan.restored', plan: last.plan },
+      }));
+    }
   }
 
   async start(userText: string, config: DurableRunConfig, apiKey: string): Promise<void> {
@@ -150,12 +178,50 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
-      const run = await this.store.begin(userText, config, (await this.session.getItems()).length);
+      const sessionItems = await this.session.getItems();
+      const run = await this.store.begin(
+        userText,
+        config,
+        sessionItems.length,
+      );
       if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: userText, runId: run.id });
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
+      if (this.planTask && config.orchestration !== 'team') {
+        this.emit({ type: 'planning' });
+        const planningController = new AbortController();
+        this.transitionController = planningController;
+        try {
+          run.plan = await this.planTask(
+            { ...config, apiKey },
+            userText,
+            planningController.signal,
+            sessionItems,
+          );
+          if (run.plan && !this.isClearing(generation) && !this.stopRequested) {
+            await this.store.update(run);
+            this.ensureProtocolFactory(run);
+            this.emitProtocol(this.protocolFactory!.next({
+              type: 'run.progress',
+              payload: {
+                stage: 'plan.created',
+                message: `已生成 ${run.plan.steps.length} 步线性计划`,
+                plan: run.plan,
+              },
+            }));
+          }
+        } catch (error) {
+          // Planning is an optimization layer. A provider that cannot return
+          // the structured plan must not break the existing single-agent UX.
+          this.writeLog(`[plan] 规划失败，退回单任务执行: ${this.formatError(error)}`);
+          run.plan = undefined;
+        } finally {
+          if (this.transitionController === planningController) this.transitionController = undefined;
+        }
+      }
+      if (this.isClearing(generation)) return;
       if (this.stopRequested) {
         this.stopRequested = false;
         await this.pausePending(run, false);
@@ -222,6 +288,7 @@ export class RunCoordinator {
     }
     if (this.transitioning) {
       this.stopRequested = true;
+      this.transitionController?.abort();
       const pending = await this.store.getActive();
       if (pending) await this.pausePending(pending, notify);
       return;
@@ -255,7 +322,11 @@ export class RunCoordinator {
       }
       if (this.isClearing(generation)) return;
       const hasSdkState = typeof previous.state === 'string' && previous.state.length > 0;
-      if (!hasSdkState) {
+      // Only a current paused record is eligible for SDK RunState.resume.
+      // Legacy retryable `failed` records may contain a stale serialized
+      // state, but their session boundary is the only safe continuation.
+      const canResumeSdkState = previous.status === 'paused' && hasSdkState;
+      if (!canResumeSdkState) {
         // An immediate stop can happen before the SDK has a serializable
         // RunState. The stopped turn was already rolled back, so claim a new
         // attempt in the same operation lineage; the effect journal prevents
@@ -263,28 +334,36 @@ export class RunCoordinator {
         await this.session.truncate(previous.sessionItemCountBefore);
       }
       if (this.isClearing(generation)) return;
-      const run = hasSdkState
+      const run = canResumeSdkState
         ? await this.store.resume(previous.id)
         : await this.store.begin(
           previous.userText,
           previous.config,
           previous.sessionItemCountBefore,
           previous.operationId,
+          restartTaskPlan(previous.plan),
         );
       if (this.isClearing(generation)) return;
       await this.audit('run_resumed', run, {
         resumedRunId: previous.id,
-        strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
+        strategy: canResumeSdkState ? 'sdk_state' : 'safe_restart',
       });
       if (this.isClearing(generation)) return;
       this.emit({
         type: 'resumeStarted',
         runId: run.id,
         continued: true,
-        restartedFromBoundary: !hasSdkState,
+        restartedFromBoundary: !canResumeSdkState,
         userText: run.userText,
       });
-      await this.execute(run, apiKey, hasSdkState ? { initialState: run.state } : {});
+      if (run.plan) {
+        this.ensureProtocolFactory(run);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.progress',
+          payload: { stage: 'plan.restored', plan: run.plan },
+        }));
+      }
+      await this.execute(run, apiKey, canResumeSdkState ? { initialState: run.state } : {});
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
@@ -314,6 +393,7 @@ export class RunCoordinator {
     run.state = undefined;
     run.canContinue = false;
     run.approvals = [];
+    if (run.plan) run.plan = failTaskPlan(run.plan);
     await this.store.update(run);
     await this.audit('run_cancelled', run);
     if (notify) {
@@ -355,6 +435,7 @@ export class RunCoordinator {
       usage: active.usage,
     });
     if (!hasSdkState) active.approvals = [];
+    if (active.plan) active.plan = pauseTaskPlan(active.plan);
     await this.store.update(active);
     await this.audit('run_paused', active, {
       strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
@@ -393,11 +474,23 @@ export class RunCoordinator {
         previous.config,
         previous.sessionItemCountBefore,
         previous.operationId,
+        restartTaskPlan(previous.plan),
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
       if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: run.userText, runId: run.id, retry: true });
+      if (run.plan) {
+        this.ensureProtocolFactory(run);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.progress',
+          payload: {
+            stage: 'plan.created',
+            message: `已重新生成 ${run.plan.steps.length} 步线性计划`,
+            plan: run.plan,
+          },
+        }));
+      }
       this.writeLog(`[run:${run.id}] 重试 operation=${run.operationId}`);
       await this.execute(run, apiKey);
     } catch (error) {
@@ -418,6 +511,7 @@ export class RunCoordinator {
       // transition. The transition owns all late Session writes and must
       // finish before the new session is persisted.
       this.controller?.abort();
+      this.transitionController?.abort();
       if (this.activeDone) await this.activeDone;
       if (this.transitionDone) await this.transitionDone;
       if (this.initializeOperation) {
@@ -500,6 +594,7 @@ export class RunCoordinator {
         run.userText,
         {
           ...options,
+          taskPlan: run.plan,
           signal: controller.signal,
           protocol: {
             runId: run.id,
@@ -523,6 +618,23 @@ export class RunCoordinator {
             await this.store.update(run);
             await this.audit('checkpoint_saved', run, { approvalCount: checkpoint.approvals.length });
           },
+          onPlanProgress: async (progress: TaskPlanProgress) => {
+            if (!run.plan || this.isRunInvalidated(runGeneration)) return;
+            run.plan = updateTaskPlan(run.plan, progress);
+            await this.store.update(run);
+            if (!this.isRunInvalidated(runGeneration)) {
+              this.emitProtocol(this.protocolFactory!.next({
+                type: 'run.progress',
+                payload: {
+                  stage: `plan.step.${progress.phase}`,
+                  message: progress.note,
+                  planId: run.plan.id,
+                  stepId: progress.stepId,
+                  planStatus: run.plan.status,
+                },
+              }));
+            }
+          },
         },
       );
 
@@ -540,6 +652,10 @@ export class RunCoordinator {
       run.state = result.status === 'awaiting_approval' || resumable ? result.state : undefined;
       run.status = manuallyPaused ? 'paused' : result.status;
       run.canContinue = manuallyPaused;
+      if (run.plan) {
+        if (manuallyPaused) run.plan = pauseTaskPlan(run.plan);
+        else if (result.status === 'refused' || result.status === 'cancelled') run.plan = failTaskPlan(run.plan);
+      }
 
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
@@ -645,6 +761,9 @@ export class RunCoordinator {
           usage: run.usage,
         });
       run.canContinue = continuable;
+      if (run.plan) {
+        run.plan = continuable ? pauseTaskPlan(run.plan) : failTaskPlan(run.plan);
+      }
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
       if (manuallyPaused) {
@@ -765,6 +884,7 @@ export class RunCoordinator {
 
   private endTransition(): void {
     this.transitioning = false;
+    this.transitionController = undefined;
     this.resolveTransitionDone?.();
     this.resolveTransitionDone = undefined;
     this.transitionDone = undefined;

@@ -11,6 +11,7 @@ import {
   type AgentApiFormat,
   type AgentProvider,
 } from './modelAdapter';
+import { parseTaskPlan, type TaskPlan } from './taskPlan';
 
 export type DurableRunStatus =
   | 'running'
@@ -47,6 +48,8 @@ export interface DurableRunRecord {
   state?: string;
   /** True only when the SDK state can resume this exact run. */
   canContinue: boolean;
+  /** Generic linear plan produced before execution, when the task needs one. */
+  plan?: TaskPlan;
   approvals: ApprovalRequest[];
   /** Canonical structured result. Absent only while the run is still active. */
   result?: AgentResult<unknown>;
@@ -112,6 +115,7 @@ export interface RunStore {
     config: DurableRunConfig,
     sessionItemCountBefore: number,
     operationId?: string,
+    plan?: TaskPlan,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -241,6 +245,13 @@ export class JsonRunStore implements RunStore {
         throw new Error(`invalid ${field} result`);
       }
     }
+    if (run.plan !== undefined) {
+      try {
+        parseTaskPlan(run.plan);
+      } catch {
+        throw new Error(`invalid ${field} task plan`);
+      }
+    }
   }
 
   private assertEffectRecord(value: unknown, key: string): asserts value is EffectRecord {
@@ -299,6 +310,7 @@ export class JsonRunStore implements RunStore {
     config: DurableRunConfig,
     sessionItemCountBefore: number,
     operationId: string = randomUUID(),
+    plan?: TaskPlan,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -311,6 +323,7 @@ export class JsonRunStore implements RunStore {
       sessionItemCountBefore,
       approvals: [],
       canContinue: false,
+      plan,
       output: '',
       usage: { ...EMPTY_USAGE },
       createdAt: now,

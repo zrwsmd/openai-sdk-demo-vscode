@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
-import { setAgentLogger } from '../runtime/agent';
+import { planTask, setAgentLogger } from '../runtime/agent';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
@@ -61,6 +61,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       store: runStore,
       emit: (event) => this.post(event),
       log: (line) => this.log.appendLine(line),
+      planTask,
       audit,
     });
   }

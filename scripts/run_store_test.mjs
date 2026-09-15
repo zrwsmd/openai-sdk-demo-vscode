@@ -86,6 +86,28 @@ if (earlyContinuable?.id !== earlyPaused.id || earlyContinuable.state !== undefi
   throw new Error('state-less safe continuation was not discovered');
 }
 
+// Generic linear plans are validated and survive a fresh store instance.
+const planned = await store.begin('multi-step task', config, 3, 'operation-plan', {
+  schemaVersion: 1,
+  id: 'plan-1',
+  goal: '完成一个多步任务',
+  reason: '包含两个有顺序的动作',
+  status: 'pending',
+  steps: [
+    { id: 'step-1', title: '准备', objective: '准备输入', completionCriteria: '输入已确认', suggestedTools: [], status: 'pending' },
+    { id: 'step-2', title: '执行', objective: '执行目标动作', completionCriteria: '动作已完成', suggestedTools: [], status: 'pending' },
+  ],
+});
+await store.update(planned);
+const plannedRestored = await new JsonRunStore(file).getLast();
+if (plannedRestored?.plan?.steps.length !== 2 || plannedRestored.plan.goal !== '完成一个多步任务') {
+  throw new Error('task plan was not persisted with the durable run');
+}
+planned.status = 'completed';
+planned.plan.status = 'completed';
+planned.plan.steps.forEach((step) => { step.status = 'completed'; });
+await store.update(planned);
+
 // Each intentional occurrence executes once; a fresh retry replays both.
 let executions = 0;
 const first = await store.executeEffect('attempt-1', 'operation-1', 'write_file', { path: 'a.st', content: 'x' }, async () => {
