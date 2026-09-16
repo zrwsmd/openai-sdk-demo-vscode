@@ -1271,7 +1271,7 @@ export async function planTeamTask(
   return runTeamRole(
     cfg,
     "Team Planner",
-    "Return executionGraph with 1-12 DAG nodes. Every node must include dependsOn, completionCriteria, suggestedTools, effect, resources and parallelSafe. Only read-only or no-effect nodes may set parallelSafe=true; file writes, commands and device writes must remain serial. " +
+    "Return executionGraph with 1-12 DAG nodes. Every node must include dependsOn, completionCriteria, suggestedTools, effect, resources, parallelSafe and priority (0-100). Only read-only or no-effect nodes may set parallelSafe=true; file writes, commands and device writes must remain serial. Set bounded maxParallelism, budget, task timeoutMs, nodeTimeoutMs and maxRetries when the task warrants them. " +
     "你是协作任务的规划角色，不执行工具。把给定目标整理成执行角色可直接遵循的紧凑计划，" +
       "列出审查重点和可观察的验证标准。不要增加用户未要求的副作用，必须严格返回 schema。",
     teamPlannerReportSchema,
@@ -1307,7 +1307,8 @@ export async function verifyTeamTask(
     cfg,
     "Team Verifier",
     "你是只读结果验证角色，不执行工具。仅依据给定执行结果与证据，判断是否满足目标和验证标准。" +
-      "证据不足、执行失败或结果不完整时 passed=false；不要猜测成功。必须严格返回 schema。",
+      "证据不足、执行失败或结果不完整时 passed=false；不要猜测成功。" +
+      "不通过时 decision 选择 retry（重试已有节点）、revise（只调整尚未开始的节点）或 ask_user（需要用户补充决定），并填写 retryNodeIds、revisedGraph 或 userQuestion；通过时 decision=pass。必须严格返回 schema。",
     teamVerificationReportSchema,
     `目标：${task.goal}\n计划：${task.planSummary}\n验证标准：${task.verificationCriteria.join('；') || '结果满足用户请求且有真实证据'}\n执行结果：${executorSummary}\n证据：${evidence.join('；') || '无额外证据'}`,
     signal,

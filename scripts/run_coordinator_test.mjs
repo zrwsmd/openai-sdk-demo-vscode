@@ -38,6 +38,33 @@ function completedAgentResult(message) {
   };
 }
 
+function governedTeam(executionGraph, verifyTeamTask = async () => ({
+  passed: true,
+  decision: 'pass',
+  summary: 'verified',
+  evidence: ['done'],
+  gaps: [],
+})) {
+  return {
+    routeTeamTask: async (_cfg, text) => createTeamTask({
+      route: 'team',
+      goal: text,
+      reason: 'governed Team test',
+      planSummary: 'execute governed graph',
+      reviewFocus: [],
+      verificationCriteria: ['done'],
+    }, text),
+    planTeamTask: async () => ({
+      planSummary: 'execute governed graph',
+      reviewFocus: [],
+      verificationCriteria: ['done'],
+      executionGraph,
+    }),
+    reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
+    verifyTeamTask,
+  };
+}
+
 // A model-selected generic plan is persisted and progress is validated in
 // order without changing the existing single-agent execution contract.
 {
@@ -187,6 +214,299 @@ function completedAgentResult(message) {
   const completed = await test.store.getLast();
   if (maxActive !== 2 || calls.length !== 3 || !calls.filter((call) => call.text.includes('读取')).every((call) => call.dryRun) || calls.find((call) => call.text.includes('写入'))?.dryRun || completed?.status !== 'completed') {
     throw new Error('DAG scheduler did not enforce parallel-safe and side-effect boundaries');
+  }
+}
+
+// The request budget caps a ready parallel batch before any model call starts,
+// then fails the still-incomplete graph at the persisted budget boundary.
+{
+  let executorCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: 'read complete', usage, result: completedAgentResult('read complete') };
+  }, undefined, governedTeam({
+    maxParallelism: 2,
+    budget: { maxRequests: 1 },
+    nodes: [
+      { id: 'read-a', title: 'Read A', objective: 'read A', dependsOn: [], completionCriteria: 'done', suggestedTools: ['read_file'], effect: 'read', resources: ['a'], parallelSafe: true, priority: 80 },
+      { id: 'read-b', title: 'Read B', objective: 'read B', dependsOn: [], completionCriteria: 'done', suggestedTools: ['read_file'], effect: 'read', resources: ['b'], parallelSafe: true, priority: 70 },
+    ],
+  }));
+  await test.coordinator.start('budget governed graph', { ...config, orchestration: 'auto' }, 'key');
+  const failed = await test.store.getLast();
+  const graph = failed?.teamTask?.executionGraph;
+  if (
+    executorCalls !== 1 || failed?.status !== 'failed' || graph?.usage.requests !== 1 ||
+    graph.nodes.filter((node) => node.status === 'completed').length !== 1 ||
+    !graph.controlLog.some((entry) => entry.action === 'limit' && entry.reason.includes('请求预算'))
+  ) {
+    throw new Error('request budget did not cap execution and persist the terminal boundary');
+  }
+}
+
+// A node timeout aborts only that worker and leaves a continuable DAG
+// checkpoint instead of losing the already-reviewed Team task.
+{
+  let executorCalls = 0;
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    executorCalls += 1;
+    await new Promise((resolve) => {
+      if (options.signal.aborted) resolve();
+      else options.signal.addEventListener('abort', resolve, { once: true });
+    });
+    return {
+      status: 'cancelled',
+      output: '',
+      usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+      result: { protocolVersion: 1, status: 'cancelled', reason: 'aborted', diagnostics: [], artifacts: [], usage: { inputTokens: 0, outputTokens: 0, requests: 0 } },
+    };
+  }, undefined, governedTeam({
+    nodeTimeoutMs: 10,
+    timeoutMs: 1_000,
+    nodes: [
+      { id: 'slow-read', title: 'Slow read', objective: 'read slowly', dependsOn: [], completionCriteria: 'done', suggestedTools: ['read_file'], effect: 'read', resources: ['source'], parallelSafe: true, priority: 50 },
+    ],
+  }));
+  await test.coordinator.start('node timeout graph', { ...config, orchestration: 'auto' }, 'key');
+  const paused = await test.store.getLast();
+  if (
+    executorCalls !== 1 || paused?.status !== 'paused' || paused.canContinue !== true ||
+    paused.teamTask?.executionGraph?.nodes[0].status !== 'paused' ||
+    !String(paused.error).includes('超过 10ms')
+  ) {
+    throw new Error('node timeout did not create a continuable graph checkpoint');
+  }
+}
+
+// The global timeout is a hard terminal limit even when it expires while a
+// node is running; it is distinct from a continuable node timeout.
+{
+  let executorCalls = 0;
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    executorCalls += 1;
+    await new Promise((resolve) => {
+      if (options.signal.aborted) resolve();
+      else options.signal.addEventListener('abort', resolve, { once: true });
+    });
+    return {
+      status: 'cancelled',
+      output: '',
+      usage: { inputTokens: 0, outputTokens: 0, requests: 1 },
+      result: { protocolVersion: 1, status: 'cancelled', reason: 'aborted', diagnostics: [], artifacts: [], usage: { inputTokens: 0, outputTokens: 0, requests: 1 } },
+    };
+  }, undefined, governedTeam({
+    nodeTimeoutMs: 1_000,
+    timeoutMs: 10,
+    nodes: [
+      { id: 'global-slow', title: 'Global slow', objective: 'exceed task deadline', dependsOn: [], completionCriteria: 'done', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }));
+  await test.coordinator.start('global timeout graph', { ...config, orchestration: 'auto' }, 'key');
+  const failed = await test.store.getLast();
+  const graph = failed?.teamTask?.executionGraph;
+  if (
+    executorCalls !== 1 || failed?.status !== 'failed' || failed.canContinue ||
+    graph?.status !== 'failed' || graph.usage.requests !== 1 ||
+    !graph.controlLog.some((entry) => entry.action === 'limit' && entry.reason.includes('全局超时'))
+  ) {
+    throw new Error('global timeout did not stop the graph at a terminal persisted limit');
+  }
+}
+
+// Verifier-directed retry reopens only the requested node and runs through a
+// second verification pass under the graph retry limit.
+{
+  let executorCalls = 0;
+  let verifierCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: `attempt ${executorCalls}`, usage, result: completedAgentResult(`attempt ${executorCalls}`) };
+  }, undefined, governedTeam({
+    maxRetries: 2,
+    nodes: [
+      { id: 'work', title: 'Work', objective: 'perform work', dependsOn: [], completionCriteria: 'verified', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }, async () => {
+    verifierCalls += 1;
+    if (verifierCalls === 1) {
+      return { passed: false, decision: 'retry', retryNodeIds: ['work'], summary: 'evidence incomplete', evidence: [], gaps: ['missing proof'], nextAction: 'retry work' };
+    }
+    return { passed: true, decision: 'pass', summary: 'verified', evidence: ['proof'], gaps: [] };
+  }));
+  await test.coordinator.start('verifier retry graph', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    executorCalls !== 2 || verifierCalls !== 2 || completed?.status !== 'completed' ||
+    completed.teamTask?.executionGraph?.retryCount !== 1 ||
+    !completed.teamTask.executionGraph.controlLog.some((entry) => entry.action === 'retry')
+  ) {
+    throw new Error('verifier retry did not reopen, rerun and reverify the selected node');
+  }
+}
+
+// A verifier may append or rewrite unfinished work, but completed nodes and
+// the original budget/concurrency/timeout envelope remain immutable.
+{
+  let executorCalls = 0;
+  let verifierCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: `revised attempt ${executorCalls}`, usage, result: completedAgentResult(`revised attempt ${executorCalls}`) };
+  }, undefined, governedTeam({
+    maxParallelism: 1,
+    budget: { maxRequests: 3 },
+    timeoutMs: 1_000,
+    nodeTimeoutMs: 500,
+    maxRetries: 2,
+    nodes: [
+      { id: 'inspect', title: 'Inspect', objective: 'inspect', dependsOn: [], completionCriteria: 'done', suggestedTools: [], effect: 'read', resources: ['source'], parallelSafe: true, priority: 80 },
+      { id: 'apply', title: 'Apply', objective: 'apply', dependsOn: ['inspect'], completionCriteria: 'done', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }, async () => {
+    verifierCalls += 1;
+    if (verifierCalls === 1) {
+      return {
+        passed: false,
+        decision: 'revise',
+        summary: 'confirmation step required',
+        evidence: [],
+        gaps: ['missing confirmation'],
+        revisedGraph: {
+          maxParallelism: 4,
+          budget: { maxRequests: 100 },
+          timeoutMs: 10_000,
+          nodeTimeoutMs: 5_000,
+          maxRetries: 5,
+          nodes: [
+            { id: 'inspect', title: 'Inspect', objective: 'inspect', dependsOn: [], completionCriteria: 'done', suggestedTools: [], effect: 'read', resources: ['source'], parallelSafe: true, priority: 80 },
+            { id: 'apply', title: 'Apply', objective: 'apply', dependsOn: ['inspect'], completionCriteria: 'done', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+            { id: 'confirm', title: 'Confirm', objective: 'confirm result', dependsOn: ['apply'], completionCriteria: 'confirmed', suggestedTools: [], effect: 'read', resources: ['source'], parallelSafe: true, priority: 60 },
+          ],
+        },
+      };
+    }
+    return { passed: true, decision: 'pass', summary: 'verified', evidence: ['confirmed'], gaps: [] };
+  }));
+  await test.coordinator.start('verifier revise graph', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  const graph = completed?.teamTask?.executionGraph;
+  if (
+    executorCalls !== 3 || verifierCalls !== 2 || completed?.status !== 'completed' ||
+    graph?.nodes.find((node) => node.id === 'inspect')?.status !== 'completed' ||
+    graph.nodes.find((node) => node.id === 'confirm')?.status !== 'completed' ||
+    graph.maxParallelism !== 1 || graph.budget.maxRequests !== 3 || graph.timeoutMs !== 1_000 ||
+    graph.nodeTimeoutMs !== 500 || graph.maxRetries !== 2 ||
+    !graph.controlLog.some((entry) => entry.action === 'revise')
+  ) {
+    throw new Error('controlled graph revision changed completed work or widened its governance envelope');
+  }
+}
+
+// Verifier questions are persisted as approval checkpoints. Accepting the
+// question applies the bounded retry and resumes the same durable run.
+{
+  let executorCalls = 0;
+  let verifierCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: `question attempt ${executorCalls}`, usage, result: completedAgentResult(`question attempt ${executorCalls}`) };
+  }, undefined, governedTeam({
+    maxRetries: 2,
+    nodes: [
+      { id: 'work', title: 'Work', objective: 'perform work', dependsOn: [], completionCriteria: 'confirmed', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }, async () => {
+    verifierCalls += 1;
+    if (verifierCalls === 1) {
+      return {
+        passed: false,
+        decision: 'ask_user',
+        questionAction: 'retry',
+        retryNodeIds: ['work'],
+        userQuestion: 'Retry the incomplete work?',
+        summary: 'user confirmation required',
+        evidence: [],
+        gaps: ['confirmation'],
+      };
+    }
+    return { passed: true, decision: 'pass', summary: 'verified', evidence: ['confirmed'], gaps: [] };
+  }));
+  await test.coordinator.start('verifier question graph', { ...config, orchestration: 'auto' }, 'key');
+  const waiting = await test.store.getLast();
+  const approval = waiting?.approvals[0];
+  if (waiting?.status !== 'awaiting_approval' || !approval || approval.name !== 'team_verification') {
+    throw new Error('verifier question was not persisted as an approval checkpoint');
+  }
+  await test.coordinator.approve(waiting.id, approval.id, true, 'key');
+  const completed = await test.store.getLast();
+  if (executorCalls !== 2 || verifierCalls !== 2 || completed?.status !== 'completed' || completed.teamTask?.pendingVerification) {
+    throw new Error('approved verifier question did not resume and complete the durable Team run');
+  }
+}
+
+// Rejecting a verifier question is a user refusal, not a system error, and
+// clears the synthetic approval checkpoint without executing another node.
+{
+  let executorCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: 'needs confirmation', usage, result: completedAgentResult('needs confirmation') };
+  }, undefined, governedTeam({
+    nodes: [
+      { id: 'work', title: 'Work', objective: 'perform work', dependsOn: [], completionCriteria: 'confirmed', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }, async () => ({
+    passed: false,
+    decision: 'ask_user',
+    questionAction: 'retry',
+    retryNodeIds: ['work'],
+    userQuestion: 'Retry the incomplete work?',
+    summary: 'user confirmation required',
+    evidence: [],
+    gaps: ['confirmation'],
+  })));
+  await test.coordinator.start('reject verifier question', { ...config, orchestration: 'auto' }, 'key');
+  const waiting = await test.store.getLast();
+  const approval = waiting?.approvals[0];
+  if (!waiting || !approval) throw new Error('verifier refusal test did not reach approval');
+  await test.coordinator.approve(waiting.id, approval.id, false, 'key');
+  const refused = await test.store.getLast();
+  if (
+    executorCalls !== 1 || refused?.status !== 'refused' || refused.error !== undefined ||
+    refused.teamTask?.pendingVerification !== undefined
+  ) {
+    throw new Error('rejected verifier question was not persisted as a clean user refusal');
+  }
+}
+
+// Once the graph's adjustment allowance is exhausted, verifier ask_user must
+// fail deterministically instead of presenting an approval that cannot run.
+{
+  const test = await fixture(async () => ({
+    status: 'completed', output: 'unverified', usage, result: completedAgentResult('unverified'),
+  }), undefined, governedTeam({
+    maxRetries: 0,
+    nodes: [
+      { id: 'work', title: 'Work', objective: 'perform work', dependsOn: [], completionCriteria: 'confirmed', suggestedTools: [], effect: 'none', resources: [], parallelSafe: true, priority: 50 },
+    ],
+  }, async () => ({
+    passed: false,
+    decision: 'ask_user',
+    questionAction: 'retry',
+    retryNodeIds: ['work'],
+    userQuestion: 'Retry?',
+    summary: 'still incomplete',
+    evidence: [],
+    gaps: ['proof'],
+  })));
+  await test.coordinator.start('exhausted verifier question', { ...config, orchestration: 'auto' }, 'key');
+  const failed = await test.store.getLast();
+  if (
+    failed?.status !== 'failed' || failed.approvals.length !== 0 ||
+    failed.teamTask?.executionGraph?.status !== 'failed' ||
+    !failed.teamTask.executionGraph.controlLog.some((entry) => entry.action === 'limit')
+  ) {
+    throw new Error('exhausted verifier question exposed an unusable approval');
   }
 }
 

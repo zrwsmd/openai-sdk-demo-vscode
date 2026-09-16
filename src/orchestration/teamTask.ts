@@ -64,8 +64,23 @@ export const dagNodePlanSchema = z.object({
   effect: dagNodeEffectSchema,
   resources: z.array(z.string().min(1).max(300)).max(12),
   parallelSafe: z.boolean(),
+  priority: z.number().int().min(0).max(100).default(50),
 }).strict();
 export type DagNodePlan = z.infer<typeof dagNodePlanSchema>;
+
+export const executionBudgetSchema = z.object({
+  maxInputTokens: z.number().int().positive().max(1_000_000).optional(),
+  maxOutputTokens: z.number().int().positive().max(250_000).optional(),
+  maxRequests: z.number().int().positive().max(100).optional(),
+}).strict();
+export type ExecutionBudget = z.infer<typeof executionBudgetSchema>;
+
+export const executionUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  requests: z.number().int().nonnegative(),
+}).strict();
+export type ExecutionUsage = z.infer<typeof executionUsageSchema>;
 
 export const dagNodeSchema = dagNodePlanSchema.extend({
   status: dagNodeStatusSchema,
@@ -84,6 +99,10 @@ export type DagNode = z.infer<typeof dagNodeSchema>;
 
 export const executionGraphPlanSchema = z.object({
   maxParallelism: z.number().int().min(1).max(4).optional(),
+  budget: executionBudgetSchema.optional(),
+  timeoutMs: z.number().int().positive().max(86_400_000).optional(),
+  nodeTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+  maxRetries: z.number().int().min(0).max(5).optional(),
   nodes: z.array(dagNodePlanSchema).min(1).max(12),
 }).strict();
 export type ExecutionGraphPlan = z.infer<typeof executionGraphPlanSchema>;
@@ -92,12 +111,34 @@ export const executionGraphSchema = z.object({
   schemaVersion: z.literal(1),
   status: z.enum(['pending', 'running', 'paused', 'completed', 'failed']),
   maxParallelism: z.number().int().min(1).max(4),
+  budget: executionBudgetSchema.default({}),
+  usage: executionUsageSchema.default({ inputTokens: 0, outputTokens: 0, requests: 0 }),
+  timeoutMs: z.number().int().positive().max(86_400_000).default(15 * 60_000),
+  nodeTimeoutMs: z.number().int().positive().max(86_400_000).default(5 * 60_000),
+  elapsedMs: z.number().int().nonnegative().default(0),
+  revision: z.number().int().nonnegative().default(0),
+  retryCount: z.number().int().nonnegative().default(0),
+  maxRetries: z.number().int().min(0).max(5).default(2),
+  controlLog: z.array(z.object({
+    action: z.enum(['retry', 'revise', 'limit']),
+    reason: z.string(),
+    at: z.string(),
+  }).strict()).max(20).default([]),
   nodes: z.array(dagNodeSchema).min(1).max(12),
   sessionCommitted: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 }).strict();
 export type ExecutionGraph = z.infer<typeof executionGraphSchema>;
+
+export const pendingTeamVerificationSchema = z.object({
+  id: z.string().min(1),
+  question: z.string().min(1).max(1_000),
+  action: z.enum(['retry', 'revise']),
+  retryNodeIds: z.array(z.string().min(1).max(64)).max(12).optional(),
+  revisedGraph: executionGraphPlanSchema.optional(),
+}).strict();
+export type PendingTeamVerification = z.infer<typeof pendingTeamVerificationSchema>;
 
 export const teamTaskNodeSchema = z.object({
   id: teamRoleSchema,
@@ -122,6 +163,7 @@ export const teamTaskSchema = z.object({
   verificationCriteria: z.array(z.string()).max(8),
   /** V2 scheduler graph. Omitted only for V1 records; planner application supplies a safe fallback. */
   executionGraph: executionGraphSchema.optional(),
+  pendingVerification: pendingTeamVerificationSchema.optional(),
   status: teamTaskStatusSchema,
   nodes: z.array(teamTaskNodeSchema).length(4),
   createdAt: z.string(),
@@ -143,6 +185,11 @@ export const teamVerificationReportSchema = z.object({
   evidence: z.array(z.string()),
   gaps: z.array(z.string()),
   nextAction: z.string().optional(),
+  decision: z.enum(['pass', 'retry', 'ask_user', 'revise']).optional(),
+  retryNodeIds: z.array(z.string().min(1).max(64)).max(12).optional(),
+  revisedGraph: executionGraphPlanSchema.optional(),
+  userQuestion: z.string().max(1_000).optional(),
+  questionAction: z.enum(['retry', 'revise']).optional(),
 }).strict();
 export type TeamVerificationReport = z.infer<typeof teamVerificationReportSchema>;
 
@@ -284,6 +331,15 @@ export function createExecutionGraph(plan: unknown): ExecutionGraph {
     schemaVersion: 1,
     status: 'pending',
     maxParallelism: parsed.maxParallelism ?? 3,
+    budget: parsed.budget ?? { maxInputTokens: 120_000, maxOutputTokens: 30_000, maxRequests: 24 },
+    usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+    timeoutMs: parsed.timeoutMs ?? 15 * 60_000,
+    nodeTimeoutMs: parsed.nodeTimeoutMs ?? 5 * 60_000,
+    elapsedMs: 0,
+    revision: 0,
+    retryCount: 0,
+    maxRetries: parsed.maxRetries ?? 2,
+    controlLog: [],
     nodes: parsed.nodes.map((node) => ({ ...node, status: 'pending' })),
     sessionCommitted: false,
     createdAt: timestamp,
@@ -297,17 +353,22 @@ export function getExecutionGraphReadyNodes(graph: ExecutionGraph): DagNode[] {
   const running = parsed.nodes.filter((node) => node.status === 'running');
   const runningResources = new Set(running.flatMap((node) => node.resources));
   const hasRunningExclusive = running.some((node) => !node.parallelSafe || !isReadOnlyEffect(node.effect));
-  const ready = parsed.nodes.filter((node) =>
-    node.status === 'pending' && node.dependsOn.every((dependency) => byId.get(dependency)?.status === 'completed'),
-  );
+  const ready = parsed.nodes
+    .filter((node) =>
+      node.status === 'pending' && node.dependsOn.every((dependency) => byId.get(dependency)?.status === 'completed'),
+    )
+    .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
   if (hasRunningExclusive) return [];
-  const exclusive = ready.find((node) => !node.parallelSafe || !isReadOnlyEffect(node.effect));
-  if (exclusive) return running.length === 0 ? [exclusive] : [];
+  const highestPriority = ready[0];
+  if (highestPriority && (!highestPriority.parallelSafe || !isReadOnlyEffect(highestPriority.effect))) {
+    return running.length === 0 ? [highestPriority] : [];
+  }
   const selected: DagNode[] = [];
   const selectedResources = new Set(runningResources);
   const slots = Math.max(0, parsed.maxParallelism - running.length);
   for (const node of ready) {
     if (selected.length >= slots) break;
+    if (!node.parallelSafe || !isReadOnlyEffect(node.effect)) continue;
     if (node.resources.some((resource) => selectedResources.has(resource))) continue;
     selected.push(node);
     node.resources.forEach((resource) => selectedResources.add(resource));
@@ -355,6 +416,126 @@ export function completeExecutionGraphNode(
 export function commitExecutionGraphSession(graph: ExecutionGraph): ExecutionGraph {
   const parsed = assertExecutionGraph(graph);
   return assertExecutionGraph({ ...parsed, sessionCommitted: true, updatedAt: now() });
+}
+
+export function updateExecutionGraphControl(
+  graph: ExecutionGraph,
+  usage: ExecutionUsage,
+  elapsedMs: number,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  return assertExecutionGraph({
+    ...parsed,
+    usage: executionUsageSchema.parse(usage),
+    elapsedMs: Math.max(parsed.elapsedMs, Math.floor(elapsedMs)),
+    updatedAt: now(),
+  });
+}
+
+export function markExecutionGraphLimit(graph: ExecutionGraph, reason: string): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  return assertExecutionGraph({
+    ...parsed,
+    status: 'failed',
+    revision: parsed.revision + 1,
+    controlLog: [...parsed.controlLog, { action: 'limit' as const, reason: compact(reason, 500) || '执行限制已触发', at: now() }].slice(-20),
+    updatedAt: now(),
+  });
+}
+
+function nodePlanFields(node: DagNode): Record<string, unknown> {
+  return {
+    id: node.id,
+    title: node.title,
+    objective: node.objective,
+    dependsOn: node.dependsOn,
+    completionCriteria: node.completionCriteria,
+    suggestedTools: node.suggestedTools,
+    effect: node.effect,
+    resources: node.resources,
+    parallelSafe: node.parallelSafe,
+    priority: node.priority,
+  };
+}
+
+export function retryExecutionGraphNodes(
+  graph: ExecutionGraph,
+  nodeIds: string[] | undefined,
+  reason: string,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  if (parsed.retryCount >= parsed.maxRetries) {
+    throw new Error('执行图重试次数已耗尽');
+  }
+  const fallbackIds = parsed.nodes.filter((node) => node.status !== 'completed').map((node) => node.id);
+  if (!fallbackIds.length && parsed.nodes.length) fallbackIds.push(parsed.nodes[parsed.nodes.length - 1].id);
+  const ids = new Set(nodeIds?.length ? nodeIds : fallbackIds);
+  for (const id of ids) {
+    const node = parsed.nodes.find((item) => item.id === id);
+    if (!node) throw new Error(`重试节点不存在: ${id}`);
+    if (node.status === 'running' || node.status === 'awaiting_approval') {
+      throw new Error(`不能重试正在运行或审批中的节点: ${id}`);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of parsed.nodes) {
+      if (node.dependsOn.some((dependency) => ids.has(dependency)) && !ids.has(node.id)) {
+        ids.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  const nextNodes = parsed.nodes.map((node) => ids.has(node.id)
+    ? { ...node, status: 'pending' as const, output: undefined, state: undefined, approvals: undefined, startedAt: undefined, completedAt: undefined, error: undefined }
+    : node);
+  return graphNow({
+    ...parsed,
+    status: 'pending',
+    retryCount: parsed.retryCount + 1,
+    revision: parsed.revision + 1,
+    controlLog: [...parsed.controlLog, { action: 'retry' as const, reason: compact(reason, 500) || 'verifier 请求重试', at: now() }].slice(-20),
+  }, nextNodes);
+}
+
+export function reviseExecutionGraph(
+  graph: ExecutionGraph,
+  plan: unknown,
+  reason: string,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  if (parsed.retryCount >= parsed.maxRetries) {
+    throw new Error('执行图动态调整次数已耗尽');
+  }
+  const revised = createExecutionGraph(plan);
+  const oldById = new Map(parsed.nodes.map((node) => [node.id, node]));
+  const revisedById = new Map(revised.nodes.map((node) => [node.id, node]));
+  for (const oldNode of parsed.nodes) {
+    if (oldNode.status !== 'completed' && oldNode.status !== 'running') continue;
+    const nextNode = revisedById.get(oldNode.id);
+    if (!nextNode) throw new Error(`受控改图不能删除已开始节点: ${oldNode.id}`);
+    if (JSON.stringify(nodePlanFields(oldNode)) !== JSON.stringify(nodePlanFields(nextNode))) {
+      throw new Error(`受控改图不能修改已开始节点: ${oldNode.id}`);
+    }
+  }
+  const nodes = revised.nodes.map((node) => {
+    const old = oldById.get(node.id);
+    return old?.status === 'completed' || old?.status === 'running' ? old : node;
+  });
+  if (nodes.every((node) => node.status === 'completed')) {
+    throw new Error('受控改图必须增加至少一个未执行节点');
+  }
+  return graphNow({
+    ...parsed,
+    // A verifier may reshape unfinished work, but it must not widen the
+    // planner-approved resource and retry envelope.
+    status: 'pending',
+    sessionCommitted: false,
+    revision: parsed.revision + 1,
+    retryCount: parsed.retryCount + 1,
+    controlLog: [...parsed.controlLog, { action: 'revise' as const, reason: compact(reason, 500) || 'verifier 请求调整任务图', at: now() }].slice(-20),
+  }, nodes);
 }
 
 export function checkpointExecutionGraphNode(
@@ -449,7 +630,16 @@ export function continueExecutionGraph(graph: ExecutionGraph | undefined): Execu
 
 export function restartExecutionGraph(graph: ExecutionGraph | undefined): ExecutionGraph | undefined {
   if (!graph) return undefined;
-  return graphNow({ ...graph, status: 'pending', sessionCommitted: false }, graph.nodes.map((node) => ({
+  return graphNow({
+    ...graph,
+    status: 'pending',
+    sessionCommitted: false,
+    usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+    elapsedMs: 0,
+    revision: 0,
+    retryCount: 0,
+    controlLog: [],
+  }, graph.nodes.map((node) => ({
     ...node,
     status: 'pending',
     output: undefined,
@@ -535,6 +725,48 @@ export function completeTeamNode(
   next.status = next.nodes.every((item) => item.status === 'completed') ? 'completed' : 'running';
   next.updatedAt = now();
   return assertGraph(next);
+}
+
+export function resetTeamVerifier(task: TeamTask): TeamTask {
+  if (task.nodes[3].status === 'completed') return task;
+  return assertGraph({
+    ...task,
+    status: 'running',
+    pendingVerification: undefined,
+    nodes: task.nodes.map((node, index) => index === 3
+      ? { ...node, status: 'pending', output: undefined, startedAt: undefined, completedAt: undefined, error: undefined }
+      : node),
+    updatedAt: now(),
+  });
+}
+
+export function reopenTeamExecution(task: TeamTask, executionGraph: ExecutionGraph): TeamTask {
+  return assertGraph({
+    ...task,
+    status: 'running',
+    executionGraph,
+    pendingVerification: undefined,
+    nodes: task.nodes.map((node, index) => index < 2
+      ? node
+      : { ...node, status: 'pending', output: undefined, startedAt: undefined, completedAt: undefined, error: undefined }),
+    updatedAt: now(),
+  });
+}
+
+export function checkpointTeamVerification(
+  task: TeamTask,
+  pending: PendingTeamVerification,
+): TeamTask {
+  const parsedPending = pendingTeamVerificationSchema.parse(pending);
+  return assertGraph({
+    ...task,
+    status: 'paused',
+    pendingVerification: parsedPending,
+    nodes: task.nodes.map((node, index) => index === 3
+      ? { ...node, status: 'pending', output: undefined, startedAt: undefined, completedAt: undefined, error: undefined }
+      : node),
+    updatedAt: now(),
+  });
 }
 
 /** Only the planner may refine the route's preliminary contract. */

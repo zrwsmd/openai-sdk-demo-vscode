@@ -29,6 +29,7 @@ import {
 } from './taskPlan';
 import {
   applyTeamPlannerReport,
+  checkpointTeamVerification,
   completeTeamNode,
   continueTeamTask,
   createForcedTeamTask,
@@ -37,9 +38,14 @@ import {
   checkpointExecutionGraphNode,
   failExecutionGraphNode,
   getExecutionGraphReadyNodes,
+  markExecutionGraphLimit,
   pauseExecutionGraphNode,
+  reopenTeamExecution,
+  retryExecutionGraphNodes,
+  reviseExecutionGraph,
   resumeExecutionGraphNode,
   startExecutionGraphNode,
+  updateExecutionGraphControl,
   failTeamNode,
   failTeamTask,
   pauseTeamTask,
@@ -47,6 +53,7 @@ import {
   resumeTeamTask,
   startTeamNode,
   type TeamTask,
+  type ExecutionGraph,
 } from '../orchestration/teamTask';
 
 export type RuntimeEvent =
@@ -286,9 +293,11 @@ export class RunCoordinator {
               routingController.signal,
               sessionItems,
             );
-          if (run.teamTask && !this.isClearing(generation) && !this.stopRequested) {
+          if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
             await this.store.update(run);
+          }
+          if (run.teamTask && !this.isClearing(generation) && !this.stopRequested) {
             await this.audit('team_routed', run, {
               route: 'team',
               reason: run.teamTask.routeReason,
@@ -322,9 +331,11 @@ export class RunCoordinator {
             planningController.signal,
             sessionItems,
           );
-          if (run.plan && !this.isClearing(generation) && !this.stopRequested) {
+          if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
             await this.store.update(run);
+          }
+          if (run.plan && !this.isClearing(generation) && !this.stopRequested) {
             this.ensureProtocolFactory(run);
             this.emitProtocol(this.protocolFactory!.next({
               type: 'run.progress',
@@ -371,11 +382,73 @@ export class RunCoordinator {
     try {
       if (this.isClearing(generation)) return;
       const run = await this.store.getActive();
-      if (!run || run.id !== runId || run.status !== 'awaiting_approval' || !run.state) return;
+      if (!run || run.id !== runId || run.status !== 'awaiting_approval') return;
       if (!run.approvals.some((approval) => approval.id === approvalId)) return;
 
       this.writeLog(`[run:${run.id}] 用户${approved ? '允许' : '拒绝'} ${approvalId}`);
       await this.audit('approval_decided', run, { approvalId, approved });
+      const pendingVerification = run.teamTask?.pendingVerification;
+      if (pendingVerification?.id === approvalId) {
+        this.ensureProtocolFactory(run);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'approval.resolved',
+          payload: { approvalId, approved, reason: approved ? undefined : 'user_rejected' },
+        }));
+        if (!approved) {
+          const reason = '用户拒绝了 verifier 提出的后续调整。';
+          run.status = 'refused';
+          run.state = undefined;
+          run.approvals = [];
+          run.canContinue = false;
+          run.error = undefined;
+          run.result = createAgentResult({ status: 'refused', reason, usage: run.usage });
+          run.teamTask = failTeamTask({ ...run.teamTask!, pendingVerification: undefined });
+          await this.store.update(run);
+          await this.audit('run_refused', run, { reason, source: 'verifier' });
+          this.emit({ type: 'refused', message: reason, canRetry: false });
+          this.emitProtocol(this.protocolFactory!.next({ type: 'run.refused', payload: { reason } }));
+          return;
+        }
+        const graph = run.teamTask?.executionGraph;
+        if (!graph) throw new Error('Verifier 调整缺少执行图');
+        let adjusted: ExecutionGraph;
+        try {
+          if (pendingVerification.action === 'revise') {
+            if (!pendingVerification.revisedGraph) throw new Error('Verifier 未提供动态调整后的执行图');
+            adjusted = reviseExecutionGraph(graph, pendingVerification.revisedGraph, pendingVerification.question);
+          } else {
+            adjusted = retryExecutionGraphNodes(graph, pendingVerification.retryNodeIds, pendingVerification.question);
+          }
+        } catch (error) {
+          const reason = `Verifier 调整被控制策略拒绝：${this.formatError(error)}`;
+          run.teamTask = failTeamNode({
+            ...run.teamTask!,
+            pendingVerification: undefined,
+            executionGraph: markExecutionGraphLimit(graph, reason),
+          }, 'verifier', reason, true);
+          run.status = 'failed';
+          run.state = undefined;
+          run.approvals = [];
+          run.canContinue = false;
+          run.error = reason;
+          run.result = createAgentResult({ status: 'failed', error: reason, usage: run.usage });
+          await this.store.update(run);
+          await this.audit('team_verification_failed', run, { reason, source: 'verifier_adjustment' });
+          this.emit({ type: 'error', message: reason, canRetry: true });
+          this.emitProtocol(this.protocolFactory!.next({ type: 'run.failed', payload: { error: reason } }));
+          return;
+        }
+        run.teamTask = reopenTeamExecution(run.teamTask!, adjusted);
+        run.status = 'running';
+        run.state = undefined;
+        run.approvals = [];
+        run.canContinue = false;
+        await this.store.update(run);
+        this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
+        await this.execute(run, apiKey);
+        return;
+      }
+      if (!run.state) return;
       run.status = 'running';
       await this.store.update(run);
       if (this.isClearing(generation)) return;
@@ -1112,6 +1185,31 @@ export class RunCoordinator {
     let usage: TurnUsage = { ...run.usage };
     let decisions = options.decisions;
     const history = await this.session.getItems();
+    const executionStartedAt = Date.now();
+    const elapsedBeforeRun = graph.elapsedMs;
+    const persistGraph = async (): Promise<void> => {
+      run.teamTask = { ...run.teamTask!, executionGraph: graph };
+      run.usage = usage;
+      await this.store.update(run);
+    };
+    const timeoutError = (message: string): Error => Object.assign(new Error(message), {
+      name: 'ExecutionTimeoutError',
+      status: 408,
+    });
+    const globalTimeoutError = (message: string): Error => Object.assign(new Error(message), {
+      name: 'ExecutionGlobalTimeoutError',
+      executionTimeoutScope: 'global',
+    });
+    const isGlobalTimeoutError = (error: unknown): boolean =>
+      typeof error === 'object' && error !== null &&
+      (error as { executionTimeoutScope?: unknown }).executionTimeoutScope === 'global';
+    const budgetExceeded = (): string | undefined => {
+      const budget = graph.budget;
+      if (budget.maxInputTokens !== undefined && usage.inputTokens >= budget.maxInputTokens) return `输入 token 预算已耗尽（${usage.inputTokens}/${budget.maxInputTokens}）`;
+      if (budget.maxOutputTokens !== undefined && usage.outputTokens >= budget.maxOutputTokens) return `输出 token 预算已耗尽（${usage.outputTokens}/${budget.maxOutputTokens}）`;
+      if (budget.maxRequests !== undefined && usage.requests >= budget.maxRequests) return `模型请求预算已耗尽（${usage.requests}/${budget.maxRequests}）`;
+      return undefined;
+    };
     const addUsage = (next: TurnUsage): void => {
       usage = {
         inputTokens: usage.inputTokens + next.inputTokens,
@@ -1136,7 +1234,24 @@ export class RunCoordinator {
       if (this.isRunInvalidated(generation)) {
         return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
       }
+      graph = updateExecutionGraphControl(
+        graph,
+        usage,
+        elapsedBeforeRun + (Date.now() - executionStartedAt),
+      );
+      const elapsed = graph.elapsedMs;
       if (graph.status === 'completed') return completedResult();
+      if (elapsed >= graph.timeoutMs) {
+        graph = markExecutionGraphLimit(graph, `任务级超时（${graph.timeoutMs}ms）`);
+        await persistGraph();
+        throw new Error(`Team 任务超过全局超时 ${graph.timeoutMs}ms`);
+      }
+      const limit = budgetExceeded();
+      if (limit) {
+        graph = markExecutionGraphLimit(graph, limit);
+        await persistGraph();
+        throw new Error(limit);
+      }
       const waiting = graph.nodes.find((node) => node.status === 'awaiting_approval');
       if (waiting) {
         const hasDecision = !!decisions && waiting.approvals?.some((approval) => Object.prototype.hasOwnProperty.call(decisions, approval.id));
@@ -1152,7 +1267,10 @@ export class RunCoordinator {
         await this.store.update(run);
         decisions = undefined;
       }
-      const ready = getExecutionGraphReadyNodes(graph);
+      let ready = getExecutionGraphReadyNodes(graph);
+      if (graph.budget.maxRequests !== undefined) {
+        ready = ready.slice(0, Math.max(0, graph.budget.maxRequests - usage.requests));
+      }
       if (!ready.length) {
         if (graph.nodes.some((node) => node.status === 'failed' || node.status === 'blocked')) throw new Error('执行图存在失败节点，无法继续完成依赖节点');
         if (signal.aborted) return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
@@ -1173,6 +1291,17 @@ export class RunCoordinator {
           '只完成本节点，不要代替其他节点，也不要在未获得审批时执行副作用操作。',
         ].join('\n');
         const safeNode = node.effect === 'none' || node.effect === 'read';
+        const nodeController = new AbortController();
+        const abort = () => nodeController.abort();
+        signal.addEventListener('abort', abort, { once: true });
+        const remainingTaskMs = Math.max(1, graph.timeoutMs - (elapsedBeforeRun + (Date.now() - executionStartedAt)));
+        const globalDeadlineWins = remainingTaskMs <= graph.nodeTimeoutMs;
+        const effectiveTimeoutMs = Math.min(graph.nodeTimeoutMs, remainingTaskMs);
+        const timeoutHandle = setTimeout(() => nodeController.abort(), effectiveTimeoutMs);
+        let timedOut = false;
+        const workerTimeoutError = (): Error => globalDeadlineWins
+          ? globalTimeoutError(`Team 任务超过全局超时 ${graph.timeoutMs}ms`)
+          : timeoutError(`节点 ${node.id} 超过 ${effectiveTimeoutMs}ms`);
         try {
           const result = await this.executeAgent(
             {
@@ -1191,7 +1320,7 @@ export class RunCoordinator {
               initialState: node.state,
               decisions,
               teamTask: run.teamTask,
-              signal,
+              signal: nodeController.signal,
               protocol: {
                 runId: run.id,
                 operationId: run.operationId,
@@ -1202,9 +1331,18 @@ export class RunCoordinator {
               },
             },
           );
+          timedOut = !signal.aborted && nodeController.signal.aborted;
+          if (timedOut) return { node, error: workerTimeoutError(), usage: result.usage };
           return { node, result };
         } catch (error) {
+          timedOut = timedOut || (!signal.aborted && nodeController.signal.aborted);
+          if (timedOut && !(error instanceof Error && error.name === 'ExecutionTimeoutError')) {
+            return { node, error: workerTimeoutError() };
+          }
           return { node, error };
+        } finally {
+          clearTimeout(timeoutHandle);
+          signal.removeEventListener('abort', abort);
         }
       }));
       let awaiting: AgentRunResult | undefined;
@@ -1224,7 +1362,19 @@ export class RunCoordinator {
             graph = failExecutionGraphNode(graph, item.node.id, item.result.result.status === 'refused' ? item.result.result.reason : '节点执行未完成');
           }
         } else {
+          if ('usage' in item && item.usage) addUsage(item.usage);
           const message = this.formatError(item.error);
+          if (isGlobalTimeoutError(item.error)) {
+            graph = updateExecutionGraphControl(
+              graph,
+              usage,
+              elapsedBeforeRun + (Date.now() - executionStartedAt),
+            );
+            graph = failExecutionGraphNode(graph, item.node.id, message);
+            graph = markExecutionGraphLimit(graph, message);
+            await persistGraph();
+            throw item.error;
+          }
           if (signal.aborted || isRetryableAgentError(item.error)) {
             graph = pauseExecutionGraphNode(graph, item.node.id, getResumableAgentState(item.error));
             run.teamTask = { ...run.teamTask, executionGraph: graph };
@@ -1237,7 +1387,22 @@ export class RunCoordinator {
       }
       run.teamTask = { ...run.teamTask, executionGraph: graph };
       run.usage = usage;
+      graph = updateExecutionGraphControl(
+        graph,
+        usage,
+        elapsedBeforeRun + (Date.now() - executionStartedAt),
+      );
+      const overrun = graph.budget.maxInputTokens !== undefined && usage.inputTokens > graph.budget.maxInputTokens
+        ? `输入 token 超出预算（${usage.inputTokens}/${graph.budget.maxInputTokens}）`
+        : graph.budget.maxOutputTokens !== undefined && usage.outputTokens > graph.budget.maxOutputTokens
+          ? `输出 token 超出预算（${usage.outputTokens}/${graph.budget.maxOutputTokens}）`
+          : graph.budget.maxRequests !== undefined && usage.requests > graph.budget.maxRequests
+            ? `模型请求超出预算（${usage.requests}/${graph.budget.maxRequests}）`
+            : undefined;
+      if (overrun) graph = markExecutionGraphLimit(graph, overrun);
+      run.teamTask = { ...run.teamTask, executionGraph: graph };
       await this.store.update(run);
+      if (overrun) throw new Error(overrun);
       this.emitTeamProgress(run, 'team.graph.nodes_completed', ready.map((node) => node.id).join(', '));
       if (awaiting) return awaiting;
       if (paused) return paused;
@@ -1342,15 +1507,111 @@ export class RunCoordinator {
         signal,
       );
       if (!report.passed) {
+        // Older verifier implementations only returned passed/summary/gaps.
+        // Preserve their terminal-failure behavior unless they explicitly opt
+        // into one of the controlled recovery decisions.
+        const decision = report.decision;
+        let reason = report.summary || report.gaps.join('；') || report.nextAction || '验收未通过';
+        if (decision === 'ask_user') {
+          const graph = run.teamTask.executionGraph;
+          if (graph && graph.retryCount >= graph.maxRetries) {
+            reason = `${reason}（执行图重试/调整次数已耗尽）`;
+            run.teamTask = { ...run.teamTask, executionGraph: markExecutionGraphLimit(graph, reason) };
+          } else {
+            const approvalId = `team-verification:${graph?.revision ?? 0}:${graph?.retryCount ?? 0}`;
+            const action = report.questionAction ?? (report.revisedGraph ? 'revise' : 'retry');
+            const question = report.userQuestion || report.nextAction || reason;
+            run.teamTask = checkpointTeamVerification(run.teamTask, {
+              id: approvalId,
+              question,
+              action,
+              retryNodeIds: report.retryNodeIds,
+              revisedGraph: report.revisedGraph,
+            });
+            run.status = 'awaiting_approval';
+            run.canContinue = false;
+            run.state = `team-verification:${approvalId}`;
+            run.approvals = [{ id: approvalId, name: 'team_verification', args: JSON.stringify({ question, action }) }];
+            run.error = undefined;
+            await this.store.update(run);
+            await this.audit('approval_requested', run, { approvals: run.approvals, source: 'verifier' });
+            this.emitTeamProgress(run, 'team.verification.user_input_required', question);
+            this.emit({ type: 'awaitingApproval', runId: run.id, approvals: run.approvals });
+            this.emitProtocol(this.protocolFactory!.next({
+              type: 'approval.requested',
+              payload: { approvalId, toolName: 'team_verification', args: run.approvals[0].args },
+            }));
+            return false;
+          }
+        }
+        if ((decision === 'retry' || decision === 'revise') && run.teamTask.executionGraph) {
+          let adjusted: ExecutionGraph;
+          try {
+            if (decision === 'revise') {
+              if (!report.revisedGraph) throw new Error('Verifier 未提供动态调整后的执行图');
+              adjusted = reviseExecutionGraph(run.teamTask.executionGraph, report.revisedGraph, reason);
+            } else {
+              adjusted = retryExecutionGraphNodes(run.teamTask.executionGraph, report.retryNodeIds, reason);
+            }
+          } catch (error) {
+            this.writeLog(`[team] verifier 调整被控制策略拒绝: ${this.formatError(error)}`);
+            adjusted = markExecutionGraphLimit(run.teamTask.executionGraph, this.formatError(error));
+            run.teamTask = { ...run.teamTask, executionGraph: adjusted };
+          }
+          if (adjusted.status !== 'failed') {
+            run.teamTask = reopenTeamExecution(run.teamTask, adjusted);
+            run.status = 'running';
+            run.state = undefined;
+            run.approvals = [];
+            run.error = undefined;
+            await this.store.update(run);
+            this.emitTeamProgress(run, `team.verification.${decision}`, reason);
+            await this.prepareTeam(run, apiKey, signal, generation);
+            const retryResult = await this.executeTeamGraph(run, apiKey, signal, generation, {});
+            if (retryResult.status === 'awaiting_approval') {
+              run.status = 'awaiting_approval';
+              run.state = retryResult.state;
+              run.approvals = retryResult.approvals ?? [];
+              run.output = retryResult.output;
+              run.result = retryResult.result;
+              run.usage = retryResult.usage;
+              await this.store.update(run);
+              await this.audit('approval_requested', run, { approvals: run.approvals, source: 'verifier_retry' });
+              this.emit({ type: 'awaitingApproval', runId: run.id, approvals: run.approvals });
+              for (const approval of run.approvals) {
+                this.emitProtocol(this.protocolFactory!.next({
+                  type: 'approval.requested',
+                  payload: { approvalId: approval.id, toolName: approval.name, args: approval.args },
+                }));
+              }
+              return false;
+            }
+            if (retryResult.status === 'cancelled') {
+              throw Object.assign(new Error('Verifier 后续执行被中止'), { name: 'AbortError' });
+            }
+            if (retryResult.status !== 'completed') throw new Error('Verifier 后续执行未完成');
+            run.output = retryResult.output;
+            run.result = retryResult.result;
+            run.usage = retryResult.usage;
+            return this.completeAndVerifyTeam(
+              run,
+              apiKey,
+              retryResult.output,
+              [retryResult.output, JSON.stringify(retryResult.result)],
+              signal,
+              generation,
+            );
+          }
+        }
         run.teamTask = failTeamNode(
           run.teamTask,
           'verifier',
-          report.summary || report.gaps.join('；') || '验收未通过',
+          reason,
           true,
         );
         run.status = 'failed';
         run.canContinue = false;
-        run.error = `Team 验收未通过：${report.summary || report.gaps.join('；') || '证据不足'}`;
+        run.error = `Team 验收未通过：${reason}`;
         run.result = createAgentResult({ status: 'failed', error: run.error, usage: run.usage });
         await this.store.update(run);
         await this.audit('team_verification_failed', run, {
