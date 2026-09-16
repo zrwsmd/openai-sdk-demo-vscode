@@ -477,6 +477,8 @@ function handleProtocolEvent(event) {
         } else if (payload.stage === 'plan.restored' && payload.plan && Array.isArray(payload.plan.steps)) {
           const current = payload.plan.currentStepId ? `，当前 ${payload.plan.currentStepId}` : '';
           addNote('tool-note', `已恢复线性计划（${payload.plan.steps.length} 步${current}）`);
+        } else if (payload.stage === 'plan.step.verification_failed') {
+          addNote('tool-note', `计划 ${payload.stepId || ''} 自检未通过，正在调整${payload.message ? `：${payload.message}` : ''}`);
         } else if (payload.stage === 'plan.step.started' || payload.stage === 'plan.step.completed') {
           const phase = payload.stage.endsWith('completed') ? '完成' : '开始';
           addNote('tool-note', `计划 ${payload.stepId || ''} ${phase}${payload.message ? `：${payload.message}` : ''}`);

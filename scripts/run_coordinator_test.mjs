@@ -23,9 +23,30 @@ async function fixture(executeAgent, planTask) {
   const test = await fixture(async (_cfg, _session, _userText, options) => {
     receivedPlan = options.taskPlan;
     await options.onPlanProgress({ stepId: 'step-1', phase: 'started', note: '准备完成' });
-    await options.onPlanProgress({ stepId: 'step-1', phase: 'completed', note: '输入已确认' });
+    await options.onPlanProgress({
+      stepId: 'step-1',
+      phase: 'completed',
+      note: '发现输入不完整，继续补充',
+      verification: {
+        verdict: 'retry',
+        evidence: '读取到的输入缺少目标参数',
+        issue: '缺少目标参数',
+        nextAction: '补充读取必要参数',
+      },
+    });
+    await options.onPlanProgress({
+      stepId: 'step-1',
+      phase: 'completed',
+      note: '输入已确认',
+      verification: { verdict: 'passed', evidence: '已读取并确认全部必要输入' },
+    });
     await options.onPlanProgress({ stepId: 'step-2', phase: 'started' });
-    await options.onPlanProgress({ stepId: 'step-2', phase: 'completed', note: '目标已完成' });
+    await options.onPlanProgress({
+      stepId: 'step-2',
+      phase: 'completed',
+      note: '目标已完成',
+      verification: { verdict: 'passed', evidence: '执行结果满足本步骤完成标准' },
+    });
     return { status: 'completed', output: 'planned result', usage };
   }, async () => {
     plannerCalls += 1;
@@ -43,7 +64,12 @@ async function fixture(executeAgent, planTask) {
   });
   await test.coordinator.start('通用多步任务', config, 'key');
   const planned = await test.store.getLast();
-  if (plannerCalls !== 1 || receivedPlan?.steps.length !== 2 || planned?.plan?.status !== 'completed') {
+  if (
+    plannerCalls !== 1 ||
+    receivedPlan?.steps.length !== 2 ||
+    planned?.plan?.status !== 'completed' ||
+    planned.plan.steps.some((step) => step.verification?.verdict !== 'passed')
+  ) {
     throw new Error('linear plan was not executed or persisted');
   }
   const planEvents = test.events
@@ -51,7 +77,8 @@ async function fixture(executeAgent, planTask) {
     .map((event) => event.event)
     .filter((event) => event.type === 'run.progress' && String(event.payload.stage).startsWith('plan.'));
   if (!planEvents.some((event) => event.payload.stage === 'plan.created') ||
-      planEvents.filter((event) => String(event.payload.stage).startsWith('plan.step.')).length !== 4) {
+      !planEvents.some((event) => event.payload.stage === 'plan.step.verification_failed') ||
+      planEvents.filter((event) => String(event.payload.stage).startsWith('plan.step.')).length !== 5) {
     throw new Error('linear plan progress events are missing');
   }
 }

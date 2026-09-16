@@ -1224,21 +1224,45 @@ export async function runAgent(
   const planProgressTool = activePlan
     ? tool({
         name: "report_plan_progress",
-        description: "报告通用线性计划中一个步骤的开始或完成。只能按计划顺序调用，不执行外部副作用。",
+        description:
+          "报告通用线性计划中一个步骤的开始或完成。完成步骤时必须基于本步骤实际工具回执提交自检结论；只有 verdict=passed 才会推进下一步。retry 或 revise 会保留当前步骤，并把纠正方向返回给你。此工具不执行外部副作用。",
         parameters: z.object({
           stepId: z.string().describe("计划中的步骤 ID，例如 step-1"),
           phase: z.enum(["started", "completed"]),
           note: z.string().optional().describe("简短说明本步骤的实际进展或完成依据"),
+          verification: z.object({
+            verdict: z.enum(["passed", "retry", "revise"]),
+            evidence: z.string().describe("基于真实工具回执、文件内容或已确认输入的具体证据，不能只说‘已完成’"),
+            issue: z.string().optional().describe("未通过时发现的具体问题"),
+            nextAction: z.string().optional().describe("未通过时下一次要执行的修正动作"),
+          }).optional().describe("仅在 phase=completed 时提供；没有实际证据时选择 retry 或 revise"),
         }),
         execute: async (progress) => {
           activePlan = updateTaskPlan(activePlan!, progress as TaskPlanProgress);
           await options.onPlanProgress?.(progress as TaskPlanProgress);
+          const verification = progress.verification;
+          const advanced = progress.phase !== "completed" || verification?.verdict === "passed";
+          if (!advanced) {
+            return toolResult({
+              ok: false,
+              error: "步骤自检未通过，计划未推进。请根据 issue 和 nextAction 继续修正当前步骤，取得新的真实证据后再报告完成。",
+              data: {
+                stepId: progress.stepId,
+                phase: progress.phase,
+                planStatus: activePlan.status,
+                verification,
+              },
+              effect: "none",
+              risk: "plan",
+            });
+          }
           return toolResult({
             ok: true,
             data: {
               stepId: progress.stepId,
               phase: progress.phase,
               planStatus: activePlan.status,
+              verification,
             },
             effect: "none",
             risk: "plan",
@@ -1254,7 +1278,9 @@ export async function runAgent(
     ? GENERIC_PLAN_SYSTEM_PROMPT +
       "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种 PLC/ST 场景；以计划目标和用户原始要求为准。" +
       "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
-      "开始每一步前调用 report_plan_progress(stepId, started)；达到该步完成标准后调用 report_plan_progress(stepId, completed)。" +
+      "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
+      "verification.evidence 必须具体说明观察到的证据；证据不足、工具失败或结果不符合标准时，填写 verdict=retry（继续修正）或 revise（换一种完成当前步骤的办法），并提供 issue 与 nextAction。" +
+      "只有 verdict=passed 会推进步骤；收到未通过的工具回执后必须继续处理当前步骤，不能跳到下一步或给最终答复。" +
       "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
       renderTaskPlan(activePlan)
     : SYSTEM_PROMPT;

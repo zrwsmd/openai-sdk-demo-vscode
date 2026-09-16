@@ -623,14 +623,19 @@ export class RunCoordinator {
             run.plan = updateTaskPlan(run.plan, progress);
             await this.store.update(run);
             if (!this.isRunInvalidated(runGeneration)) {
+              const verification = progress.verification;
+              const stage = progress.phase === 'completed' && verification && verification.verdict !== 'passed'
+                ? 'plan.step.verification_failed'
+                : `plan.step.${progress.phase}`;
               this.emitProtocol(this.protocolFactory!.next({
                 type: 'run.progress',
                 payload: {
-                  stage: `plan.step.${progress.phase}`,
+                  stage,
                   message: progress.note,
                   planId: run.plan.id,
                   stepId: progress.stepId,
                   planStatus: run.plan.status,
+                  verification: run.plan.steps.find((step) => step.id === progress.stepId)?.verification,
                 },
               }));
             }

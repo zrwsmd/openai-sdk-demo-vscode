@@ -18,6 +18,17 @@ export type TaskPlanDecision = z.infer<typeof taskPlanDecisionSchema>;
 export const taskStepStatusSchema = z.enum(['pending', 'running', 'completed']);
 export type TaskStepStatus = z.infer<typeof taskStepStatusSchema>;
 
+/** Evidence-based self-check made by the executor before advancing a step. */
+export const taskStepVerificationSchema = z.object({
+  verdict: z.enum(['passed', 'retry', 'revise']),
+  evidence: z.string().min(1),
+  issue: z.string().optional(),
+  nextAction: z.string().optional(),
+  checkedAt: z.string().min(1),
+}).strict();
+export type TaskStepVerification = z.infer<typeof taskStepVerificationSchema>;
+export type TaskStepVerificationInput = Omit<TaskStepVerification, 'checkedAt'>;
+
 export const taskPlanStatusSchema = z.enum([
   'pending',
   'running',
@@ -42,6 +53,7 @@ export const taskPlanSchema = z.object({
     suggestedTools: z.array(z.string()),
     status: taskStepStatusSchema,
     note: z.string().optional(),
+    verification: taskStepVerificationSchema.optional(),
   })).min(2).max(8),
 });
 
@@ -50,6 +62,8 @@ export type TaskPlanProgress = {
   stepId: string;
   phase: 'started' | 'completed';
   note?: string;
+  /** Required when completing a step; controls whether the plan may advance. */
+  verification?: TaskStepVerificationInput;
 };
 
 function compact(value: string, maxLength: number): string {
@@ -120,9 +134,29 @@ export function updateTaskPlan(plan: TaskPlan, progress: TaskPlanProgress): Task
     next.status = 'running';
   } else {
     if (step.status === 'pending') throw new Error(`计划步骤尚未开始: ${step.id}`);
-    step.status = 'completed';
-    next.currentStepId = next.steps[index + 1]?.id;
-    next.status = next.steps.every((item) => item.status === 'completed') ? 'completed' : 'running';
+    if (!progress.verification) {
+      throw new Error(`步骤完成前必须提供自检结论: ${step.id}`);
+    }
+    const verification: TaskStepVerification = {
+      verdict: progress.verification.verdict,
+      evidence: compact(progress.verification.evidence, 1_000),
+      issue: compact(progress.verification.issue ?? '', 500) || undefined,
+      nextAction: compact(progress.verification.nextAction ?? '', 500) || undefined,
+      checkedAt: new Date().toISOString(),
+    };
+    if (!verification.evidence) throw new Error(`步骤自检缺少证据: ${step.id}`);
+    step.verification = verification;
+    if (verification.verdict === 'passed') {
+      step.status = 'completed';
+      next.currentStepId = next.steps[index + 1]?.id;
+      next.status = next.steps.every((item) => item.status === 'completed') ? 'completed' : 'running';
+    } else {
+      // Failed self-checks deliberately leave the step running. The caller
+      // returns issue/nextAction to the model so it retries or changes course.
+      step.status = 'running';
+      next.currentStepId = step.id;
+      next.status = 'running';
+    }
   }
   const note = compact(progress.note ?? '', 500);
   if (note) step.note = note;
@@ -157,6 +191,7 @@ export function restartTaskPlan(plan: TaskPlan | undefined): TaskPlan | undefine
       ...step,
       status: 'pending',
       note: undefined,
+      verification: undefined,
     })),
   });
 }
@@ -166,7 +201,10 @@ export function renderTaskPlan(plan: TaskPlan): string {
     `目标: ${plan.goal}`,
     ...plan.steps.map((step, index) => {
       const tools = step.suggestedTools.length ? `；可用工具建议: ${step.suggestedTools.join(', ')}` : '';
-      return `${index + 1}. [${step.id}] ${step.title}: ${step.objective}；完成标准: ${step.completionCriteria}${tools}`;
+      const verification = step.verification
+        ? `；最近自检: ${step.verification.verdict}（${step.verification.evidence}）`
+        : '';
+      return `${index + 1}. [${step.id}] ${step.title}: ${step.objective}；完成标准: ${step.completionCriteria}${tools}${verification}`;
     }),
   ].join('\n');
 }
