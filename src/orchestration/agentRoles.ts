@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { toolResult } from '../tools/toolContract';
 import { industrialAgentOutputDefinition } from '../runtime/output';
 
-export type IndustrialAgentMode = 'single' | 'team';
+/** auto lets the model route a request; single/team remain explicit overrides. */
+export type IndustrialAgentMode = 'auto' | 'single' | 'team';
 
 export const plcReviewReportSchema = z.object({
   approved: z.boolean(),
@@ -36,7 +37,12 @@ export function reviewReportToToolResult(finalOutput: unknown): string {
 export function createIndustrialAgentTeam(
   model: string | Model,
   tools: Tool[],
-  options: { executorStructuredOutput?: boolean; executorModelSettings?: ModelSettings } = {},
+  options: {
+    executorStructuredOutput?: boolean;
+    executorModelSettings?: ModelSettings;
+    /** Supplied only by V3's already-reviewed serial Team coordinator. */
+    executorInstructions?: string;
+  } = {},
 ) {
   const reviewer = new Agent({
     name: 'PLC Safety Reviewer',
@@ -62,6 +68,14 @@ export function createIndustrialAgentTeam(
     instructions:
       '你是受控执行角色。只执行已给出的具体步骤；写文件、运行命令或设备写入必须经过审批。' +
       '所有结论必须基于结构化工具结果，工具失败时立即停止相关动作。',
+      // Keep role ownership explicit: the coordinator supplies the reviewed
+      // contract; this agent is still the sole holder of side-effect tools.
+      ...(options.executorInstructions ? {
+        instructions:
+          '你是受控执行角色。只执行已给出的具体步骤；写文件、运行命令或设备写入必须经过审批。' +
+          '所有结论必须基于结构化工具结果，工具失败时立即停止相关动作。\n\n' +
+          options.executorInstructions,
+      } : {}),
   });
   const planner = Agent.create({
     name: 'PLC Workflow Planner',

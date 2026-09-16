@@ -12,6 +12,8 @@ import {
   type AgentProvider,
 } from './modelAdapter';
 import { parseTaskPlan, type TaskPlan } from './taskPlan';
+import { parseTeamTask, type TeamTask } from '../orchestration/teamTask';
+import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 
 export type DurableRunStatus =
   | 'running'
@@ -33,7 +35,7 @@ export interface DurableRunConfig {
   workspaceRoots?: string[];
   /** Host-configured policy limits persisted with the run for safe resume/retry. */
   policyContext?: ToolPolicyOverrides;
-  orchestration?: 'single' | 'team';
+  orchestration?: IndustrialAgentMode;
 }
 
 export interface DurableRunRecord {
@@ -50,6 +52,8 @@ export interface DurableRunRecord {
   canContinue: boolean;
   /** Generic linear plan produced before execution, when the task needs one. */
   plan?: TaskPlan;
+  /** V3 team contract and serial role progress for complex tasks. */
+  teamTask?: TeamTask;
   approvals: ApprovalRequest[];
   /** Canonical structured result. Absent only while the run is still active. */
   result?: AgentResult<unknown>;
@@ -116,6 +120,7 @@ export interface RunStore {
     sessionItemCountBefore: number,
     operationId?: string,
     plan?: TaskPlan,
+    teamTask?: TeamTask,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -214,7 +219,7 @@ export class JsonRunStore implements RunStore {
             (!Array.isArray(run.config.policyContext.allowedDevices) ||
               run.config.policyContext.allowedDevices.some((device) => typeof device !== 'string'))) ||
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
-      (run.config.orchestration !== undefined && !['single', 'team'].includes(run.config.orchestration)) ||
+      (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
@@ -250,6 +255,13 @@ export class JsonRunStore implements RunStore {
         parseTaskPlan(run.plan);
       } catch {
         throw new Error(`invalid ${field} task plan`);
+      }
+    }
+    if (run.teamTask !== undefined) {
+      try {
+        parseTeamTask(run.teamTask);
+      } catch {
+        throw new Error(`invalid ${field} team task`);
       }
     }
   }
@@ -311,6 +323,7 @@ export class JsonRunStore implements RunStore {
     sessionItemCountBefore: number,
     operationId: string = randomUUID(),
     plan?: TaskPlan,
+    teamTask?: TeamTask,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -324,6 +337,7 @@ export class JsonRunStore implements RunStore {
       approvals: [],
       canContinue: false,
       plan,
+      teamTask,
       output: '',
       usage: { ...EMPTY_USAGE },
       createdAt: now,

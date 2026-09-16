@@ -82,6 +82,17 @@ import {
   type TaskPlanProgress,
   updateTaskPlan,
 } from "./taskPlan";
+import {
+  createTeamTask,
+  teamPlannerReportSchema,
+  teamReviewReportSchema,
+  teamRouteDecisionSchema,
+  teamVerificationReportSchema,
+  type TeamTask,
+  type TeamPlannerReport,
+  type TeamReviewReport,
+  type TeamVerificationReport,
+} from "../orchestration/teamTask";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -149,6 +160,8 @@ export interface AgentRunOptions {
   onCheckpoint?: (checkpoint: AgentRunCheckpoint) => Promise<void> | void;
   /** Durable linear plan selected by the model before execution. */
   taskPlan?: TaskPlan;
+  /** V3 serial Team contract. The executor still uses this same run/session. */
+  teamTask?: TeamTask;
   /** Persists validated step transitions outside the SDK session. */
   onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
@@ -1196,6 +1209,110 @@ export async function planTask(
   return createTaskPlan(result.finalOutput, userText);
 }
 
+function teamTracingDisabled(cfg: AgentConfig, adapter: ModelAdapter): boolean {
+  return !(adapter.provider === "openai" && adapter.apiFormat === "responses" && !cfg.baseUrl.trim());
+}
+
+async function runTeamRole<T>(
+  cfg: AgentConfig,
+  name: string,
+  instructions: string,
+  outputType: z.ZodType<T>,
+  input: string | AgentInputItem[],
+  signal?: AbortSignal,
+): Promise<T> {
+  const adapter = buildModelAdapter(cfg);
+  const role = new Agent({
+    name,
+    model: adapter.model,
+    instructions,
+    outputType,
+  });
+  const result = await new Runner({ tracingDisabled: teamTracingDisabled(cfg, adapter) }).run(role, input, {
+    stream: false,
+    maxTurns: 1,
+    signal,
+  });
+  return outputType.parse(result.finalOutput);
+}
+
+/**
+ * Model-selected Team routing. It has no tools or side effects; an unavailable
+ * router is intentionally allowed to fall back to the existing single path.
+ */
+export async function routeTeamTask(
+  cfg: AgentConfig,
+  userText: string,
+  signal?: AbortSignal,
+  history: AgentInputItem[] = [],
+): Promise<TeamTask | undefined> {
+  const input: string | AgentInputItem[] = history.length
+    ? [...history, { type: "message", role: "user", content: userText }]
+    : userText;
+  const decision = await runTeamRole(
+    cfg,
+    "协作任务路由器",
+    "你是任务复杂度路由器，不执行工具。只在任务确实需要独立规划、审查、执行和结果验证四个职责协作时选择 team。" +
+      "普通问答、解释、一次性读取、简单改写或单一已知操作必须选择 single。" +
+      "team 时给出可执行的 planSummary、审查重点和可验证的完成标准；single 时三个字段给出简短说明或空数组。" +
+      "必须严格返回 schema，不要输出 markdown。",
+    teamRouteDecisionSchema,
+    input,
+    signal,
+  );
+  return createTeamTask(decision, userText);
+}
+
+export async function planTeamTask(
+  cfg: AgentConfig,
+  task: TeamTask,
+  signal?: AbortSignal,
+): Promise<TeamPlannerReport> {
+  return runTeamRole(
+    cfg,
+    "Team Planner",
+    "你是协作任务的规划角色，不执行工具。把给定目标整理成执行角色可直接遵循的紧凑计划，" +
+      "列出审查重点和可观察的验证标准。不要增加用户未要求的副作用，必须严格返回 schema。",
+    teamPlannerReportSchema,
+    `目标：${task.goal}\n路由初稿：${task.planSummary}`,
+    signal,
+  );
+}
+
+export async function reviewTeamTask(
+  cfg: AgentConfig,
+  task: TeamTask,
+  signal?: AbortSignal,
+): Promise<TeamReviewReport> {
+  return runTeamRole(
+    cfg,
+    "Team Reviewer",
+    "你是只读审查角色，不执行工具。审查计划是否超出用户目标、遗漏安全/审批约束，或缺少完成条件。" +
+      "只有不存在阻断性问题才 approved=true。所有 requiredChanges 必须可操作，必须严格返回 schema。",
+    teamReviewReportSchema,
+    `目标：${task.goal}\n计划：${task.planSummary}\n审查重点：${task.reviewFocus.join('；') || '范围、风险、审批与证据'}`,
+    signal,
+  );
+}
+
+export async function verifyTeamTask(
+  cfg: AgentConfig,
+  task: TeamTask,
+  executorSummary: string,
+  evidence: string[],
+  signal?: AbortSignal,
+): Promise<TeamVerificationReport> {
+  return runTeamRole(
+    cfg,
+    "Team Verifier",
+    "你是只读结果验证角色，不执行工具。仅依据给定执行结果与证据，判断是否满足目标和验证标准。" +
+      "证据不足、执行失败或结果不完整时 passed=false；不要猜测成功。必须严格返回 schema。",
+    teamVerificationReportSchema,
+    `目标：${task.goal}\n计划：${task.planSummary}\n验证标准：${task.verificationCriteria.join('；') || '结果满足用户请求且有真实证据'}\n执行结果：${executorSummary}\n证据：${evidence.join('；') || '无额外证据'}`,
+    signal,
+  );
+}
+
 export async function runAgent(
   cfg: AgentConfig,
   session: Session,
@@ -1216,6 +1333,7 @@ export async function runAgent(
     modelAdapter.provider === "openai" &&
     modelAdapter.apiFormat === "chat_completions" &&
     cfg.orchestration !== "team" &&
+    options.teamTask === undefined &&
     options.taskPlan === undefined &&
     requiredTool === undefined;
   const structuredMode = !textStreamingMode;
@@ -1283,13 +1401,21 @@ export async function runAgent(
       "只有 verdict=passed 会推进步骤；收到未通过的工具回执后必须继续处理当前步骤，不能跳到下一步或给最终答复。" +
       "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
       renderTaskPlan(activePlan)
-    : SYSTEM_PROMPT;
+    : options.teamTask
+      ? GENERIC_PLAN_SYSTEM_PROMPT +
+        "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
+        "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
+        "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
+      : SYSTEM_PROMPT;
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
     const forceToolChoice =
       forcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: forcedTool }
         : undefined;
-    if (cfg.orchestration === "team") {
+    // The legacy native handoff team remains available for direct callers.
+    // Coordinated V3 runs always provide teamTask and use this controlled
+    // executor, so their durable graph remains the source of truth.
+    if (cfg.orchestration === "team" && !options.teamTask) {
       const team = createIndustrialAgentTeam(model, tools, {
         executorStructuredOutput: true,
         executorModelSettings: forceToolChoice,

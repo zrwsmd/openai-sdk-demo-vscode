@@ -9,6 +9,7 @@ export * from '../src/tools/toolContract';
 export * from '../src/plc/plcAdapter';
 export * from '../src/observability/audit';
 export * from '../src/orchestration/agentRoles';
+export * from '../src/orchestration/teamTask';
 export * from '../src/protocol';
 export * from '../src/runtime/streaming';
 export * from '../src/runtime/output';

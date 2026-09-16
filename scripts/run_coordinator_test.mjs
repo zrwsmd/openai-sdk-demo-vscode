@@ -1,18 +1,41 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { JsonFileSession, JsonRunStore, RunCoordinator } from './agent.testbundle.mjs';
+import {
+  JsonFileSession,
+  JsonRunStore,
+  RunCoordinator,
+  createTeamTask,
+} from './agent.testbundle.mjs';
 
 const config = { baseUrl: 'http://mock/v1', model: 'mock', exportDir: '', workspaceRoot: '' };
 const usage = { inputTokens: 1, outputTokens: 2, requests: 1 };
 
-async function fixture(executeAgent, planTask) {
+async function fixture(executeAgent, planTask, team = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-coordinator-test-'));
   const session = new JsonFileSession(path.join(dir, 'session.json'));
   const store = new JsonRunStore(path.join(dir, 'runs.json'));
   const events = [];
-  const coordinator = new RunCoordinator({ session, store, executeAgent, planTask, emit: (event) => events.push(event) });
+  const coordinator = new RunCoordinator({
+    session,
+    store,
+    executeAgent,
+    planTask,
+    ...team,
+    emit: (event) => events.push(event),
+  });
   return { dir, session, store, events, coordinator };
+}
+
+function completedAgentResult(message) {
+  return {
+    protocolVersion: 1,
+    status: 'completed',
+    output: { message, diagnostics: [], artifacts: [], data: null },
+    diagnostics: [],
+    artifacts: [],
+    usage,
+  };
 }
 
 // A model-selected generic plan is persisted and progress is validated in
@@ -93,6 +116,171 @@ async function fixture(executeAgent, planTask) {
   );
   await test.coordinator.start('team task', { ...config, orchestration: 'team' }, 'key');
   if (plannerCalls !== 0) throw new Error('team orchestration invoked the generic planner');
+}
+
+// A model-routed Team is durable and serial: planner and reviewer must finish
+// before the existing executor runs, and verifier decides the final outcome.
+{
+  const calls = [];
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    calls.push('executor');
+    if (!options.teamTask || options.teamTask.nodes[1].status !== 'completed') {
+      throw new Error('executor received an unreviewed Team task');
+    }
+    return {
+      status: 'completed',
+      output: 'workspace change completed',
+      usage,
+      result: completedAgentResult('workspace change completed'),
+    };
+  }, undefined, {
+    routeTeamTask: async () => {
+      calls.push('route');
+      return createTeamTask({
+        route: 'team',
+        goal: 'Complete a complex workspace change',
+        reason: 'Needs planning, review, execution and verification',
+        planSummary: 'Inspect, change, then verify',
+        reviewFocus: ['scope'],
+        verificationCriteria: ['evidence is present'],
+      }, 'Complete a complex workspace change');
+    },
+    planTeamTask: async () => {
+      calls.push('planner');
+      return {
+        planSummary: 'Inspect current state, make change, verify output',
+        reviewFocus: ['scope and approval'],
+        verificationCriteria: ['real evidence confirms the change'],
+      };
+    },
+    reviewTeamTask: async () => {
+      calls.push('reviewer');
+      return { approved: true, summary: 'approved', findings: ['scope bounded'], requiredChanges: [] };
+    },
+    verifyTeamTask: async () => {
+      calls.push('verifier');
+      return { passed: true, summary: 'verified', evidence: ['workspace change completed'], gaps: [] };
+    },
+  });
+  await test.coordinator.start('Complete a complex workspace change', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    calls.join(',') !== 'route,planner,reviewer,executor,verifier' ||
+    completed?.status !== 'completed' ||
+    completed.teamTask?.status !== 'completed' ||
+    completed.teamTask.nodes.some((node) => node.status !== 'completed')
+  ) {
+    throw new Error('model-routed Team was not persisted and completed serially');
+  }
+}
+
+// If the executor receives a retryable gateway failure before the SDK exposes
+// RunState, continue preserves planner/reviewer and restarts at executor.
+{
+  let routeCalls = 0;
+  let plannerCalls = 0;
+  let reviewerCalls = 0;
+  let executorCalls = 0;
+  let verifierCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    if (executorCalls === 1) throw Object.assign(new Error('502 gateway unavailable'), { status: 502 });
+    return {
+      status: 'completed',
+      output: 'resumed change completed',
+      usage,
+      result: completedAgentResult('resumed change completed'),
+    };
+  }, undefined, {
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      return createTeamTask({
+        route: 'team',
+        goal: 'Resume a complex task',
+        reason: 'Needs separate roles',
+        planSummary: 'Execute task',
+        reviewFocus: [],
+        verificationCriteria: ['task completed'],
+      }, 'Resume a complex task');
+    },
+    planTeamTask: async () => {
+      plannerCalls += 1;
+      return { planSummary: 'Execute task', reviewFocus: [], verificationCriteria: ['task completed'] };
+    },
+    reviewTeamTask: async () => {
+      reviewerCalls += 1;
+      return { approved: true, summary: 'approved', findings: [], requiredChanges: [] };
+    },
+    verifyTeamTask: async () => {
+      verifierCalls += 1;
+      return { passed: true, summary: 'verified', evidence: ['resumed change completed'], gaps: [] };
+    },
+  });
+  await test.coordinator.start('Resume a complex task', { ...config, orchestration: 'auto' }, 'key');
+  const paused = await test.store.getLast();
+  if (
+    paused?.status !== 'paused' ||
+    paused.teamTask?.nodes[0].status !== 'completed' ||
+    paused.teamTask.nodes[1].status !== 'completed' ||
+    paused.teamTask.nodes[2].status !== 'running'
+  ) {
+    throw new Error('Team gateway failure did not preserve executor boundary');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (
+    routeCalls !== 1 || plannerCalls !== 1 || reviewerCalls !== 1 ||
+    executorCalls !== 2 || verifierCalls !== 1 ||
+    completed?.status !== 'completed' || completed.teamTask?.status !== 'completed'
+  ) {
+    throw new Error('Team continuation replayed completed roles or missed verification');
+  }
+}
+
+// A verifier gateway failure must not replay the already-completed executor:
+// continue resumes only the durable verification node.
+{
+  let executorCalls = 0;
+  let verifierCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return {
+      status: 'completed',
+      output: 'executor evidence',
+      usage,
+      result: completedAgentResult('executor evidence'),
+    };
+  }, undefined, {
+    routeTeamTask: async () => createTeamTask({
+      route: 'team',
+      goal: 'Verify a complex task',
+      reason: 'Requires separate verification',
+      planSummary: 'Execute and verify',
+      reviewFocus: [],
+      verificationCriteria: ['verified'],
+    }, 'Verify a complex task'),
+    planTeamTask: async () => ({ planSummary: 'Execute and verify', reviewFocus: [], verificationCriteria: ['verified'] }),
+    reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
+    verifyTeamTask: async () => {
+      verifierCalls += 1;
+      if (verifierCalls === 1) throw Object.assign(new Error('502 verifier gateway unavailable'), { status: 502 });
+      return { passed: true, summary: 'verified', evidence: ['executor evidence'], gaps: [] };
+    },
+  });
+  await test.coordinator.start('Verify a complex task', { ...config, orchestration: 'auto' }, 'key');
+  const paused = await test.store.getLast();
+  if (
+    paused?.status !== 'paused' ||
+    paused.teamTask?.nodes[2].status !== 'completed' ||
+    paused.teamTask.nodes[3].status !== 'running'
+  ) {
+    throw new Error('verifier failure did not preserve completed executor evidence');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (executorCalls !== 1 || verifierCalls !== 2 || completed?.teamTask?.status !== 'completed') {
+    throw new Error('verifier continuation replayed the executor');
+  }
 }
 
 // Stopping during the planner call aborts planning, creates no agent call, and

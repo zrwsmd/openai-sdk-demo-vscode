@@ -16,7 +16,11 @@ export type AuditEventType =
   | 'tool_requested'
   | 'tool_completed'
   | 'checkpoint_saved'
-  | 'retry_started';
+  | 'retry_started'
+  | 'team_routed'
+  | 'team_role_started'
+  | 'team_role_completed'
+  | 'team_verification_failed';
 
 export interface AuditEvent {
   id: string;

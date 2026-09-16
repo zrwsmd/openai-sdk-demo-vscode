@@ -4,6 +4,10 @@ import {
   getResumableAgentState,
   isRetryableAgentError,
   planTask,
+  routeTeamTask,
+  planTeamTask,
+  reviewTeamTask,
+  verifyTeamTask,
   MaxTurnsExceededError,
   MAX_TURNS,
   type AgentRunOptions,
@@ -21,6 +25,19 @@ import {
   updateTaskPlan,
   type TaskPlanProgress,
 } from './taskPlan';
+import {
+  applyTeamPlannerReport,
+  completeTeamNode,
+  continueTeamTask,
+  createForcedTeamTask,
+  failTeamNode,
+  failTeamTask,
+  pauseTeamTask,
+  restartTeamTask,
+  resumeTeamTask,
+  startTeamNode,
+  type TeamTask,
+} from '../orchestration/teamTask';
 
 export type RuntimeEvent =
   | { type: 'agentEvent'; event: AgentProtocolEvent }
@@ -34,6 +51,11 @@ export interface RunCoordinatorDependencies {
   executeAgent?: typeof runAgent;
   /** Optional model planner. Tests and embedders can omit it to retain the single path. */
   planTask?: typeof planTask;
+  /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
+  routeTeamTask?: typeof routeTeamTask;
+  planTeamTask?: typeof planTeamTask;
+  reviewTeamTask?: typeof reviewTeamTask;
+  verifyTeamTask?: typeof verifyTeamTask;
   audit?: AuditSink;
 }
 
@@ -57,6 +79,10 @@ export class RunCoordinator {
   private readonly writeLog: (line: string) => void;
   private readonly executeAgent: typeof runAgent;
   private readonly planTask?: typeof planTask;
+  private readonly routeTeamTask?: typeof routeTeamTask;
+  private readonly planTeamTask?: typeof planTeamTask;
+  private readonly reviewTeamTask?: typeof reviewTeamTask;
+  private readonly verifyTeamTask?: typeof verifyTeamTask;
   private readonly auditSink?: AuditSink;
   private busy = false;
   private transitioning = false;
@@ -84,6 +110,10 @@ export class RunCoordinator {
     this.writeLog = dependencies.log ?? (() => {});
     this.executeAgent = dependencies.executeAgent ?? runAgent;
     this.planTask = dependencies.planTask;
+    this.routeTeamTask = dependencies.routeTeamTask ?? routeTeamTask;
+    this.planTeamTask = dependencies.planTeamTask ?? planTeamTask;
+    this.reviewTeamTask = dependencies.reviewTeamTask ?? reviewTeamTask;
+    this.verifyTeamTask = dependencies.verifyTeamTask ?? verifyTeamTask;
     this.auditSink = dependencies.audit;
   }
 
@@ -119,6 +149,7 @@ export class RunCoordinator {
       active.status = 'failed';
       active.error = '扩展进程在运行期间中断，本轮已回滚，可以安全重试。';
       if (active.plan) active.plan = failTaskPlan(active.plan);
+      if (active.teamTask) active.teamTask = failTeamTask(active.teamTask);
       active.result = createAgentResult({
         status: 'failed',
         error: active.error,
@@ -140,6 +171,7 @@ export class RunCoordinator {
           payload: { stage: 'plan.restored', plan: active.plan },
         }));
       }
+      if (active.teamTask) this.emitTeamProgress(active, 'team.restored', '已恢复 Team 任务图');
       this.emit({
         type: 'runRestored',
         runId: active.id,
@@ -189,7 +221,37 @@ export class RunCoordinator {
       if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: userText, runId: run.id });
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
-      if (this.planTask && config.orchestration !== 'team') {
+      if (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask)) {
+        const routeTeam = this.routeTeamTask;
+        const routingController = new AbortController();
+        this.transitionController = routingController;
+        try {
+          run.teamTask = config.orchestration === 'team'
+            ? createForcedTeamTask(userText)
+            : await routeTeam!(
+              { ...config, apiKey },
+              userText,
+              routingController.signal,
+              sessionItems,
+            );
+          if (run.teamTask && !this.isClearing(generation) && !this.stopRequested) {
+            await this.store.update(run);
+            await this.audit('team_routed', run, {
+              route: 'team',
+              reason: run.teamTask.routeReason,
+            });
+            this.ensureProtocolFactory(run);
+            this.emitTeamProgress(run, 'team.routed', '已路由到串行 Team');
+          }
+        } catch (error) {
+          if (config.orchestration === 'team') throw error;
+          this.writeLog(`[team] 路由失败，退回现有 single 路径: ${this.formatError(error)}`);
+          run.teamTask = undefined;
+        } finally {
+          if (this.transitionController === routingController) this.transitionController = undefined;
+        }
+      }
+      if (!run.teamTask && this.planTask && config.orchestration !== 'team') {
         this.emit({ type: 'planning' });
         const planningController = new AbortController();
         this.transitionController = planningController;
@@ -342,6 +404,7 @@ export class RunCoordinator {
           previous.sessionItemCountBefore,
           previous.operationId,
           restartTaskPlan(previous.plan),
+          continueTeamTask(previous.teamTask),
         );
       if (this.isClearing(generation)) return;
       await this.audit('run_resumed', run, {
@@ -363,6 +426,7 @@ export class RunCoordinator {
           payload: { stage: 'plan.restored', plan: run.plan },
         }));
       }
+      if (run.teamTask) this.emitTeamProgress(run, 'team.restored', '已恢复 Team 任务图');
       await this.execute(run, apiKey, canResumeSdkState ? { initialState: run.state } : {});
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
@@ -394,6 +458,7 @@ export class RunCoordinator {
     run.canContinue = false;
     run.approvals = [];
     if (run.plan) run.plan = failTaskPlan(run.plan);
+    if (run.teamTask) run.teamTask = failTeamTask(run.teamTask);
     await this.store.update(run);
     await this.audit('run_cancelled', run);
     if (notify) {
@@ -436,6 +501,7 @@ export class RunCoordinator {
     });
     if (!hasSdkState) active.approvals = [];
     if (active.plan) active.plan = pauseTaskPlan(active.plan);
+    if (active.teamTask) active.teamTask = pauseTeamTask(active.teamTask);
     await this.store.update(active);
     await this.audit('run_paused', active, {
       strategy: hasSdkState ? 'sdk_state' : 'safe_restart',
@@ -475,6 +541,7 @@ export class RunCoordinator {
         previous.sessionItemCountBefore,
         previous.operationId,
         restartTaskPlan(previous.plan),
+        restartTeamTask(previous.teamTask),
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
@@ -574,6 +641,35 @@ export class RunCoordinator {
 
     const baseOutput = run.output;
     try {
+      await this.prepareTeam(run, apiKey, controller.signal, runGeneration);
+      if (this.isRunInvalidated(runGeneration)) return;
+      // The executor may have completed before a transient verifier failure.
+      // In that case its durable output is authoritative: resume verification
+      // only, never replay a potentially side-effecting executor turn.
+      const completedExecutor = run.teamTask?.nodes.find((node) => node.id === 'executor');
+      if (completedExecutor?.status === 'completed' && completedExecutor.output) {
+        const verification = await this.completeAndVerifyTeam(
+          run,
+          apiKey,
+          completedExecutor.output.summary,
+          completedExecutor.output.evidence,
+          controller.signal,
+          runGeneration,
+        );
+        if (!verification || this.isRunInvalidated(runGeneration)) return;
+        run.status = 'completed';
+        run.state = undefined;
+        run.canContinue = false;
+        await this.store.update(run);
+        if (this.isRunInvalidated(runGeneration)) return;
+        await this.audit('run_completed', run, { usage: run.usage, orchestration: 'team', resumedVerifier: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.completed',
+          payload: { result: run.result },
+        }));
+        this.emit({ type: 'done', usage: run.usage, canRetry: true });
+        return;
+      }
       const result = await this.executeAgent(
         {
           ...run.config,
@@ -595,6 +691,7 @@ export class RunCoordinator {
         {
           ...options,
           taskPlan: run.plan,
+          teamTask: run.teamTask,
           signal: controller.signal,
           protocol: {
             runId: run.id,
@@ -655,8 +752,16 @@ export class RunCoordinator {
         && typeof result.state === 'string'
         && result.state.length > 0;
       run.state = result.status === 'awaiting_approval' || resumable ? result.state : undefined;
-      run.status = manuallyPaused ? 'paused' : result.status;
+      // Keep the run active while the separate verifier is evaluating the
+      // executor's completed result. This prevents a crash in that narrow
+      // window from exposing an unverified completion as final.
+      const verifyingTeam = !!run.teamTask && result.status === 'completed';
+      run.status = manuallyPaused ? 'paused' : verifyingTeam ? 'running' : result.status;
       run.canContinue = manuallyPaused;
+      if (run.teamTask && manuallyPaused) run.teamTask = pauseTeamTask(run.teamTask);
+      if (run.teamTask && (result.status === 'refused' || result.status === 'cancelled') && !manuallyPaused) {
+        run.teamTask = failTeamTask(run.teamTask);
+      }
       if (run.plan) {
         if (manuallyPaused) run.plan = pauseTaskPlan(run.plan);
         else if (result.status === 'refused' || result.status === 'cancelled') run.plan = failTaskPlan(run.plan);
@@ -727,6 +832,32 @@ export class RunCoordinator {
           type: 'run.refused',
           payload: { reason },
         }));
+      } else if (run.teamTask && result.status === 'completed') {
+        const verification = await this.completeAndVerifyTeam(
+          run,
+          apiKey,
+          result.output,
+          [
+            result.output,
+            result.result ? JSON.stringify(result.result) : '执行器未提供额外结构化结果',
+          ],
+          controller.signal,
+          runGeneration,
+        );
+        if (!verification) return;
+        run.status = 'completed';
+        await this.store.update(run);
+        if (this.isRunInvalidated(runGeneration)) return;
+        await this.audit('run_completed', run, { usage: result.usage, orchestration: 'team' });
+        if (this.isRunInvalidated(runGeneration)) return;
+        this.writeLog(
+          `[run:${run.id}] Team 完成: 文本 ${run.output.length} 字符 | tokens ${result.usage.inputTokens}/${result.usage.outputTokens}`,
+        );
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.completed',
+          payload: { result: result.result },
+        }));
+        this.emit({ type: 'done', usage: result.usage, canRetry: true });
       } else {
         await this.audit('run_completed', run, { usage: result.usage });
         if (this.isRunInvalidated(runGeneration)) return;
@@ -749,7 +880,8 @@ export class RunCoordinator {
         : undefined;
       const hasSdkState = typeof errorState === 'string' && errorState.length > 0;
       if (this.isRunInvalidated(runGeneration)) return;
-      if (!hasSdkState) {
+      const executorAlreadyCompleted = run.teamTask?.nodes.find((node) => node.id === 'executor')?.status === 'completed';
+      if (!hasSdkState && !executorAlreadyCompleted) {
         await this.session.truncate(run.sessionItemCountBefore);
         if (this.isRunInvalidated(runGeneration)) return;
       }
@@ -768,6 +900,9 @@ export class RunCoordinator {
       run.canContinue = continuable;
       if (run.plan) {
         run.plan = continuable ? pauseTaskPlan(run.plan) : failTaskPlan(run.plan);
+      }
+      if (run.teamTask) {
+        run.teamTask = continuable ? pauseTeamTask(run.teamTask) : failTeamTask(run.teamTask);
       }
       await this.store.update(run);
       if (this.isRunInvalidated(runGeneration)) return;
@@ -827,6 +962,145 @@ export class RunCoordinator {
       this.pauseRequested = false;
       if (!this.isRunInvalidated(runGeneration)) this.emit({ type: 'idle' });
     }
+  }
+
+  private async prepareTeam(
+    run: DurableRunRecord,
+    apiKey: string,
+    signal: AbortSignal,
+    generation: number,
+  ): Promise<void> {
+    if (!run.teamTask) return;
+    if (run.teamTask.status === 'paused') {
+      run.teamTask = resumeTeamTask(run.teamTask);
+      await this.store.update(run);
+    }
+    const task = run.teamTask;
+    if (task.nodes[0].status === 'pending') {
+      run.teamTask = startTeamNode(task, 'planner');
+      await this.persistTeamRole(run, 'planner', 'started', generation);
+      const report = await this.planTeamTask!(
+        { ...run.config, apiKey },
+        run.teamTask,
+        signal,
+      );
+      run.teamTask = applyTeamPlannerReport(run.teamTask, report);
+      run.teamTask = completeTeamNode(run.teamTask, 'planner', {
+        summary: report.planSummary,
+        evidence: ['Team Planner 返回结构化计划、审查重点和验证标准'],
+      });
+      await this.persistTeamRole(run, 'planner', 'completed', generation);
+    }
+    if (run.teamTask.nodes[1].status === 'pending') {
+      run.teamTask = startTeamNode(run.teamTask, 'reviewer');
+      await this.persistTeamRole(run, 'reviewer', 'started', generation);
+      const report = await this.reviewTeamTask!(
+        { ...run.config, apiKey },
+        run.teamTask,
+        signal,
+      );
+      if (!report.approved) {
+        run.teamTask = failTeamNode(run.teamTask, 'reviewer', report.summary || report.requiredChanges.join('；'));
+        await this.persistTeamRole(run, 'reviewer', 'failed', generation);
+        throw new Error(`Team 审查未通过：${report.summary || report.requiredChanges.join('；')}`);
+      }
+      run.teamTask = completeTeamNode(run.teamTask, 'reviewer', {
+        summary: report.summary || '审查通过',
+        evidence: [...report.findings, ...report.requiredChanges].slice(0, 12),
+      });
+      await this.persistTeamRole(run, 'reviewer', 'completed', generation);
+    }
+    if (run.teamTask.nodes[2].status === 'pending') {
+      run.teamTask = startTeamNode(run.teamTask, 'executor');
+      await this.persistTeamRole(run, 'executor', 'started', generation);
+    }
+  }
+
+  private async completeAndVerifyTeam(
+    run: DurableRunRecord,
+    apiKey: string,
+    output: string,
+    evidence: string[],
+    signal: AbortSignal,
+    generation: number,
+  ): Promise<boolean> {
+    if (!run.teamTask) return true;
+    if (run.teamTask.nodes[2].status === 'running') {
+      run.teamTask = completeTeamNode(run.teamTask, 'executor', {
+        summary: output || '执行器完成',
+        evidence,
+      });
+      await this.persistTeamRole(run, 'executor', 'completed', generation);
+    }
+    if (run.teamTask.nodes[3].status === 'pending') {
+      run.teamTask = startTeamNode(run.teamTask, 'verifier');
+      await this.persistTeamRole(run, 'verifier', 'started', generation);
+      const report = await this.verifyTeamTask!(
+        { ...run.config, apiKey },
+        run.teamTask,
+        output,
+        evidence,
+        signal,
+      );
+      if (!report.passed) {
+        run.teamTask = failTeamNode(
+          run.teamTask,
+          'verifier',
+          report.summary || report.gaps.join('；') || '验收未通过',
+          true,
+        );
+        run.status = 'failed';
+        run.canContinue = false;
+        run.error = `Team 验收未通过：${report.summary || report.gaps.join('；') || '证据不足'}`;
+        run.result = createAgentResult({ status: 'failed', error: run.error, usage: run.usage });
+        await this.store.update(run);
+        await this.audit('team_verification_failed', run, {
+          summary: report.summary,
+          gaps: report.gaps,
+          nextAction: report.nextAction,
+        });
+        this.emitTeamProgress(run, 'team.verification_failed', run.error);
+        this.emit({ type: 'error', message: run.error, canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.failed',
+          payload: { error: run.error, recoverable: false },
+        }));
+        return false;
+      }
+      run.teamTask = completeTeamNode(run.teamTask, 'verifier', {
+        summary: report.summary || '验收通过',
+        evidence: report.evidence,
+      });
+      await this.persistTeamRole(run, 'verifier', 'completed', generation);
+    }
+    return true;
+  }
+
+  private async persistTeamRole(
+    run: DurableRunRecord,
+    role: 'planner' | 'reviewer' | 'executor' | 'verifier',
+    phase: 'started' | 'completed' | 'failed',
+    generation: number,
+  ): Promise<void> {
+    await this.store.update(run);
+    if (this.isRunInvalidated(generation)) return;
+    await this.audit(phase === 'started' ? 'team_role_started' : 'team_role_completed', run, {
+      role,
+      phase,
+      taskId: run.teamTask?.id,
+    });
+    if (!this.isRunInvalidated(generation)) {
+      this.emitTeamProgress(run, `team.${role}.${phase}`, `${role} ${phase}`);
+    }
+  }
+
+  private emitTeamProgress(run: DurableRunRecord, stage: string, message?: string): void {
+    if (!run.teamTask) return;
+    this.ensureProtocolFactory(run);
+    this.emitProtocol(this.protocolFactory!.next({
+      type: 'run.progress',
+      payload: { stage, message, teamTask: run.teamTask },
+    }));
   }
 
   private emitProtocol(event: AgentProtocolEvent): void {

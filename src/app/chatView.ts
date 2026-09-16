@@ -215,7 +215,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       model,
       provider,
       apiFormat,
-      orchestration: cfg.get<'single' | 'team'>('orchestration') ?? 'single',
+      orchestration: cfg.get<'auto' | 'single' | 'team'>('orchestration') ?? 'auto',
       policyContext: {
         allowedCommands,
         allowedDevices,
