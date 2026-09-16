@@ -118,6 +118,78 @@ function completedAgentResult(message) {
   if (plannerCalls !== 0) throw new Error('team orchestration invoked the generic planner');
 }
 
+// A gateway failure during automatic routing is a coordinator checkpoint even
+// before the SDK has created a RunState. Continue retries routing, then enters
+// the normal Team lifecycle instead of reporting that no checkpoint exists.
+{
+  let routeCalls = 0;
+  let executorCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return { status: 'completed', output: 'routed and completed', usage, result: completedAgentResult('routed and completed') };
+  }, undefined, {
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      if (routeCalls === 1) throw Object.assign(new Error('502 Model gateway is unavailable'), { status: 502 });
+      return createTeamTask({
+        route: 'team', goal: 'route resume', reason: 'complex', planSummary: 'execute', reviewFocus: [], verificationCriteria: ['done'],
+      }, 'route resume');
+    },
+    planTeamTask: async () => ({ planSummary: 'execute', reviewFocus: [], verificationCriteria: ['done'] }),
+    reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
+    verifyTeamTask: async () => ({ passed: true, summary: 'verified', evidence: ['done'], gaps: [] }),
+  });
+  await test.coordinator.start('route resume', { ...config, orchestration: 'auto' }, 'key');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.resumeStage !== 'routing' || !paused.canContinue) {
+    throw new Error('routing gateway failure did not persist a preflight checkpoint');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (routeCalls !== 2 || executorCalls !== 1 || completed?.status !== 'completed') {
+    throw new Error('continue did not resume automatic routing from its checkpoint');
+  }
+}
+
+// The Team planner can provide a real DAG: independent read nodes overlap,
+// while a dependent write node runs alone and still reaches verification.
+{
+  let active = 0;
+  let maxActive = 0;
+  const calls = [];
+  const test = await fixture(async (cfg, _session, text) => {
+    const isWrite = text.includes('写入');
+    calls.push({ text, dryRun: cfg.policyContext?.dryRun === true });
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, isWrite ? 1 : 20));
+    active -= 1;
+    return { status: 'completed', output: isWrite ? '写入完成' : '读取完成', usage, result: completedAgentResult(isWrite ? '写入完成' : '读取完成') };
+  }, undefined, {
+    routeTeamTask: async () => createTeamTask({
+      route: 'team', goal: 'DAG', reason: 'parallel reads', planSummary: 'read then write', reviewFocus: [], verificationCriteria: ['done'],
+    }, 'DAG'),
+    planTeamTask: async () => ({
+      planSummary: 'read then write', reviewFocus: [], verificationCriteria: ['done'],
+      executionGraph: {
+        maxParallelism: 2,
+        nodes: [
+          { id: 'read-a', title: '读取 A', objective: '读取 A', dependsOn: [], completionCriteria: '有结果', suggestedTools: ['read_file'], effect: 'read', resources: ['a'], parallelSafe: true },
+          { id: 'read-b', title: '读取 B', objective: '读取 B', dependsOn: [], completionCriteria: '有结果', suggestedTools: ['read_file'], effect: 'read', resources: ['b'], parallelSafe: true },
+          { id: 'write', title: '写入结果', objective: '写入结果', dependsOn: ['read-a', 'read-b'], completionCriteria: '写入成功', suggestedTools: ['write_file'], effect: 'write', resources: ['workspace'], parallelSafe: false },
+        ],
+      },
+    }),
+    reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
+    verifyTeamTask: async () => ({ passed: true, summary: 'verified', evidence: ['done'], gaps: [] }),
+  });
+  await test.coordinator.start('DAG', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (maxActive !== 2 || calls.length !== 3 || !calls.filter((call) => call.text.includes('读取')).every((call) => call.dryRun) || calls.find((call) => call.text.includes('写入'))?.dryRun || completed?.status !== 'completed') {
+    throw new Error('DAG scheduler did not enforce parallel-safe and side-effect boundaries');
+  }
+}
+
 // A model-routed Team is durable and serial: planner and reviewer must finish
 // before the existing executor runs, and verifier decides the final outcome.
 {

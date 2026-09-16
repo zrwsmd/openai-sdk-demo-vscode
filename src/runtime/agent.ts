@@ -1271,6 +1271,7 @@ export async function planTeamTask(
   return runTeamRole(
     cfg,
     "Team Planner",
+    "Return executionGraph with 1-12 DAG nodes. Every node must include dependsOn, completionCriteria, suggestedTools, effect, resources and parallelSafe. Only read-only or no-effect nodes may set parallelSafe=true; file writes, commands and device writes must remain serial. " +
     "你是协作任务的规划角色，不执行工具。把给定目标整理成执行角色可直接遵循的紧凑计划，" +
       "列出审查重点和可观察的验证标准。不要增加用户未要求的副作用，必须严格返回 schema。",
     teamPlannerReportSchema,

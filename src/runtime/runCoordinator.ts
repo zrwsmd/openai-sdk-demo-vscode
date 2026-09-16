@@ -11,6 +11,8 @@ import {
   MaxTurnsExceededError,
   MAX_TURNS,
   type AgentRunOptions,
+  type AgentRunResult,
+  type TurnUsage,
 } from './agent';
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
@@ -30,6 +32,14 @@ import {
   completeTeamNode,
   continueTeamTask,
   createForcedTeamTask,
+  completeExecutionGraphNode,
+  commitExecutionGraphSession,
+  checkpointExecutionGraphNode,
+  failExecutionGraphNode,
+  getExecutionGraphReadyNodes,
+  pauseExecutionGraphNode,
+  resumeExecutionGraphNode,
+  startExecutionGraphNode,
   failTeamNode,
   failTeamTask,
   pauseTeamTask,
@@ -63,6 +73,37 @@ export interface RecoverableSession extends Session {
   getItems(limit?: number): Promise<AgentInputItem[]>;
   clearSession(): Promise<void>;
   truncate(length: number): Promise<void>;
+}
+
+/** A node must not append its internal prompt/result to the user session. */
+class DagWorkerSession implements Session {
+  private static sequence = 0;
+  private readonly id = `dag-worker-${++DagWorkerSession.sequence}`;
+  private items: AgentInputItem[];
+
+  constructor(items: AgentInputItem[]) {
+    this.items = items.map((item) => ({ ...item }));
+  }
+
+  async getSessionId(): Promise<string> {
+    return this.id;
+  }
+
+  async getItems(limit?: number): Promise<AgentInputItem[]> {
+    return limit === undefined ? [...this.items] : this.items.slice(-limit);
+  }
+
+  async addItems(items: AgentInputItem[]): Promise<void> {
+    this.items.push(...items.map((item) => ({ ...item })));
+  }
+
+  async popItem(): Promise<AgentInputItem | undefined> {
+    return this.items.pop();
+  }
+
+  async clearSession(): Promise<void> {
+    this.items = [];
+  }
 }
 
 /**
@@ -131,6 +172,14 @@ export class RunCoordinator {
     const active = await this.store.getActive();
     if (this.isClearing(generation)) return;
     if (active?.status === 'running') {
+      if (active.resumeStage === 'routing' || active.resumeStage === 'planning') {
+        active.status = 'paused';
+        active.canContinue = true;
+        active.result = createAgentResult({ status: 'cancelled', reason: 'user_paused', usage: active.usage });
+        await this.store.update(active);
+        this.emit({ type: 'runRecovered', message: '规划阶段中断，已保存继续断点。', canContinue: true });
+        return;
+      }
       if (this.busy || this.transitioning) {
         await this.replayHistory(generation);
         if (this.isClearing(generation)) return;
@@ -188,6 +237,7 @@ export class RunCoordinator {
       canRetry: !!last && last.status !== 'refused',
       canContinue:
         (last?.status === 'paused' && last.canContinue === true) ||
+        (last?.status === 'paused' && !!last.resumeStage) ||
         recoverableFailure,
     });
     if (last?.plan) {
@@ -222,6 +272,8 @@ export class RunCoordinator {
       this.emit({ type: 'user', text: userText, runId: run.id });
       this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       if (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask)) {
+        run.resumeStage = 'routing';
+        await this.store.update(run);
         const routeTeam = this.routeTeamTask;
         const routingController = new AbortController();
         this.transitionController = routingController;
@@ -235,6 +287,7 @@ export class RunCoordinator {
               sessionItems,
             );
           if (run.teamTask && !this.isClearing(generation) && !this.stopRequested) {
+            run.resumeStage = undefined;
             await this.store.update(run);
             await this.audit('team_routed', run, {
               route: 'team',
@@ -244,14 +297,21 @@ export class RunCoordinator {
             this.emitTeamProgress(run, 'team.routed', '已路由到串行 Team');
           }
         } catch (error) {
-          if (config.orchestration === 'team') throw error;
+          if (this.isClearing(generation)) return;
+          if (this.stopRequested || isRetryableAgentError(error) || config.orchestration === 'team') {
+            await this.pauseBeforeSdkTurn(run, 'routing', error, generation);
+            return;
+          }
           this.writeLog(`[team] 路由失败，退回现有 single 路径: ${this.formatError(error)}`);
           run.teamTask = undefined;
+          run.resumeStage = undefined;
+          await this.store.update(run);
         } finally {
           if (this.transitionController === routingController) this.transitionController = undefined;
         }
       }
       if (!run.teamTask && this.planTask && config.orchestration !== 'team') {
+        run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
         const planningController = new AbortController();
         this.transitionController = planningController;
@@ -263,6 +323,7 @@ export class RunCoordinator {
             sessionItems,
           );
           if (run.plan && !this.isClearing(generation) && !this.stopRequested) {
+            run.resumeStage = undefined;
             await this.store.update(run);
             this.ensureProtocolFactory(run);
             this.emitProtocol(this.protocolFactory!.next({
@@ -277,8 +338,15 @@ export class RunCoordinator {
         } catch (error) {
           // Planning is an optimization layer. A provider that cannot return
           // the structured plan must not break the existing single-agent UX.
+          if (this.isClearing(generation)) return;
+          if (this.stopRequested || isRetryableAgentError(error)) {
+            await this.pauseBeforeSdkTurn(run, 'planning', error, generation);
+            return;
+          }
           this.writeLog(`[plan] 规划失败，退回单任务执行: ${this.formatError(error)}`);
           run.plan = undefined;
+          run.resumeStage = undefined;
+          await this.store.update(run);
         } finally {
           if (this.transitionController === planningController) this.transitionController = undefined;
         }
@@ -406,6 +474,8 @@ export class RunCoordinator {
           restartTaskPlan(previous.plan),
           continueTeamTask(previous.teamTask),
         );
+      run.resumeStage = previous.resumeStage;
+      await this.store.update(run);
       if (this.isClearing(generation)) return;
       await this.audit('run_resumed', run, {
         resumedRunId: previous.id,
@@ -427,11 +497,69 @@ export class RunCoordinator {
         }));
       }
       if (run.teamTask) this.emitTeamProgress(run, 'team.restored', '已恢复 Team 任务图');
+      if (run.resumeStage) {
+        await this.resumePreflight(run, apiKey, generation);
+        if (this.isClearing(generation)) return;
+      }
       await this.execute(run, apiKey, canResumeSdkState ? { initialState: run.state } : {});
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
       this.endTransition();
+    }
+  }
+
+  private async pauseBeforeSdkTurn(
+    run: DurableRunRecord,
+    stage: 'routing' | 'planning',
+    error: unknown,
+    generation: number,
+  ): Promise<void> {
+    if (this.isRunInvalidated(generation)) return;
+    run.status = 'paused';
+    run.canContinue = true;
+    run.resumeStage = stage;
+    run.state = undefined;
+    run.approvals = [];
+    run.error = this.formatError(error);
+    run.result = createAgentResult({ status: 'cancelled', reason: 'user_paused', usage: run.usage });
+    await this.store.update(run);
+    if (this.isRunInvalidated(generation)) return;
+    await this.audit('run_paused', run, { strategy: 'preflight', stage, error: run.error });
+    this.emit({ type: 'paused', canContinue: true, canRetry: true, resumeStrategy: 'safe_restart' });
+    this.emit({ type: 'idle' });
+  }
+
+  private async resumePreflight(
+    run: DurableRunRecord,
+    apiKey: string,
+    generation: number,
+  ): Promise<void> {
+    const stage = run.resumeStage;
+    if (!stage || this.isRunInvalidated(generation)) return;
+    const sessionItems = await this.session.getItems();
+    if (stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
+      try {
+        run.teamTask = run.config.orchestration === 'team'
+          ? createForcedTeamTask(run.userText)
+          : await this.routeTeamTask!({ ...run.config, apiKey }, run.userText, new AbortController().signal, sessionItems);
+      } catch (error) {
+        await this.pauseBeforeSdkTurn(run, 'routing', error, generation);
+        return;
+      }
+      run.resumeStage = undefined;
+      await this.store.update(run);
+    }
+    if (!run.teamTask && this.planTask && run.config.orchestration !== 'team') {
+      run.resumeStage = 'planning';
+      try {
+        run.plan = await this.planTask({ ...run.config, apiKey }, run.userText, new AbortController().signal, sessionItems);
+      } catch (error) {
+        await this.pauseBeforeSdkTurn(run, 'planning', error, generation);
+        return;
+      }
+      run.resumeStage = undefined;
+      await this.store.update(run);
     }
   }
 
@@ -657,6 +785,7 @@ export class RunCoordinator {
           runGeneration,
         );
         if (!verification || this.isRunInvalidated(runGeneration)) return;
+        if (!await this.commitTeamGraphSession(run, runGeneration)) return;
         run.status = 'completed';
         run.state = undefined;
         run.canContinue = false;
@@ -670,7 +799,11 @@ export class RunCoordinator {
         this.emit({ type: 'done', usage: run.usage, canRetry: true });
         return;
       }
-      const result = await this.executeAgent(
+      let result: AgentRunResult;
+      if (run.teamTask?.executionGraph) {
+        result = await this.executeTeamGraph(run, apiKey, controller.signal, runGeneration, options);
+      } else {
+        result = await this.executeAgent(
         {
           ...run.config,
           apiKey,
@@ -739,6 +872,7 @@ export class RunCoordinator {
           },
         },
       );
+      }
 
       // clear() may have invalidated this run while the SDK was settling its
       // final promise. Its cleanup owns the final Session/RunStore state.
@@ -845,6 +979,7 @@ export class RunCoordinator {
           runGeneration,
         );
         if (!verification) return;
+        if (!await this.commitTeamGraphSession(run, runGeneration)) return;
         run.status = 'completed';
         await this.store.update(run);
         if (this.isRunInvalidated(runGeneration)) return;
@@ -962,6 +1097,170 @@ export class RunCoordinator {
       this.pauseRequested = false;
       if (!this.isRunInvalidated(runGeneration)) this.emit({ type: 'idle' });
     }
+  }
+
+  /** Execute a planner-produced DAG using isolated node sessions. */
+  private async executeTeamGraph(
+    run: DurableRunRecord,
+    apiKey: string,
+    signal: AbortSignal,
+    generation: number,
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions'>,
+  ): Promise<AgentRunResult> {
+    if (!run.teamTask?.executionGraph) throw new Error('Team 执行图不存在');
+    let graph = run.teamTask.executionGraph;
+    let usage: TurnUsage = { ...run.usage };
+    let decisions = options.decisions;
+    const history = await this.session.getItems();
+    const addUsage = (next: TurnUsage): void => {
+      usage = {
+        inputTokens: usage.inputTokens + next.inputTokens,
+        outputTokens: usage.outputTokens + next.outputTokens,
+        requests: usage.requests + next.requests,
+      };
+    };
+    const completedResult = async (): Promise<AgentRunResult> => {
+      const summary = graph.nodes
+        .filter((node) => node.status === 'completed' && node.output)
+        .map((node) => `${node.title}: ${node.output?.summary ?? ''}`.trim())
+        .join('\n');
+      const output = {
+        message: summary || '执行图完成',
+        diagnostics: [],
+        artifacts: [],
+        data: null,
+      };
+      return { result: createAgentResult({ status: 'completed', output, usage }), output: output.message, usage, status: 'completed' };
+    };
+    while (true) {
+      if (this.isRunInvalidated(generation)) {
+        return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
+      }
+      if (graph.status === 'completed') return completedResult();
+      const waiting = graph.nodes.find((node) => node.status === 'awaiting_approval');
+      if (waiting) {
+        const hasDecision = !!decisions && waiting.approvals?.some((approval) => Object.prototype.hasOwnProperty.call(decisions, approval.id));
+        if (!hasDecision) {
+          const approvals = waiting.approvals ?? [];
+          return {
+            result: createAgentResult({ status: 'awaiting_approval', state: waiting.state ?? '', approvals, usage }),
+            output: waiting.output?.summary ?? '', usage, status: 'awaiting_approval', state: waiting.state, approvals,
+          };
+        }
+        graph = resumeExecutionGraphNode(graph, waiting.id);
+        run.teamTask = { ...run.teamTask, executionGraph: graph };
+        await this.store.update(run);
+        decisions = undefined;
+      }
+      const ready = getExecutionGraphReadyNodes(graph);
+      if (!ready.length) {
+        if (graph.nodes.some((node) => node.status === 'failed' || node.status === 'blocked')) throw new Error('执行图存在失败节点，无法继续完成依赖节点');
+        if (signal.aborted) return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
+        throw new Error('执行图没有可运行节点，可能存在未满足的依赖');
+      }
+      for (const node of ready) graph = startExecutionGraphNode(graph, node.id);
+      run.teamTask = { ...run.teamTask, executionGraph: graph };
+      run.status = 'running';
+      await this.store.update(run);
+      this.emitTeamProgress(run, 'team.graph.nodes_started', ready.map((node) => node.id).join(', '));
+      const results = await Promise.all(ready.map(async (node) => {
+        const nodePrompt = [
+          `执行 Team 执行图节点：${node.title}`,
+          `节点目标：${node.objective}`,
+          `完成标准：${node.completionCriteria}`,
+          `建议工具：${node.suggestedTools.join(', ') || '由你判断'}`,
+          `副作用等级：${node.effect}；资源：${node.resources.join(', ') || '无'}`,
+          '只完成本节点，不要代替其他节点，也不要在未获得审批时执行副作用操作。',
+        ].join('\n');
+        const safeNode = node.effect === 'none' || node.effect === 'read';
+        try {
+          const result = await this.executeAgent(
+            {
+              ...run.config,
+              apiKey,
+              policyContext: safeNode ? { ...run.config.policyContext, dryRun: true } : run.config.policyContext,
+              executeEffect: (toolName, input, invoke) => this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
+              audit: async (event) => {
+                if (!this.auditSink) return;
+                await this.auditSink.append({ ...event, runId: run.id, operationId: run.operationId, traceId: run.id, metadata: { ...(event.metadata ?? {}), dagNodeId: node.id } });
+              },
+            },
+            new DagWorkerSession(history),
+            nodePrompt,
+            {
+              initialState: node.state,
+              decisions,
+              teamTask: run.teamTask,
+              signal,
+              protocol: {
+                runId: run.id,
+                operationId: run.operationId,
+                eventFactory: this.protocolFactory,
+                onEvent: (event: AgentProtocolEvent) => {
+                  if (event.type !== 'text.delta' && !this.isRunInvalidated(generation)) this.emitProtocol(event);
+                },
+              },
+            },
+          );
+          return { node, result };
+        } catch (error) {
+          return { node, error };
+        }
+      }));
+      let awaiting: AgentRunResult | undefined;
+      let paused: AgentRunResult | undefined;
+      for (const item of results) {
+        if (item.result) {
+          addUsage(item.result.usage);
+          if (item.result.status === 'completed') {
+            graph = completeExecutionGraphNode(graph, item.node.id, { summary: item.result.output || `${item.node.title} 完成`, evidence: [item.result.output, JSON.stringify(item.result.result)].filter((value): value is string => !!value) });
+          } else if (item.result.status === 'awaiting_approval') {
+            graph = checkpointExecutionGraphNode(graph, item.node.id, item.result.state ?? '', item.result.approvals ?? []);
+            awaiting = item.result;
+          } else if (item.result.status === 'cancelled') {
+            graph = pauseExecutionGraphNode(graph, item.node.id, item.result.state);
+            paused = item.result;
+          } else {
+            graph = failExecutionGraphNode(graph, item.node.id, item.result.result.status === 'refused' ? item.result.result.reason : '节点执行未完成');
+          }
+        } else {
+          const message = this.formatError(item.error);
+          if (signal.aborted || isRetryableAgentError(item.error)) {
+            graph = pauseExecutionGraphNode(graph, item.node.id, getResumableAgentState(item.error));
+            run.teamTask = { ...run.teamTask, executionGraph: graph };
+            run.usage = usage;
+            await this.store.update(run);
+            throw item.error;
+          }
+          graph = failExecutionGraphNode(graph, item.node.id, message);
+        }
+      }
+      run.teamTask = { ...run.teamTask, executionGraph: graph };
+      run.usage = usage;
+      await this.store.update(run);
+      this.emitTeamProgress(run, 'team.graph.nodes_completed', ready.map((node) => node.id).join(', '));
+      if (awaiting) return awaiting;
+      if (paused) return paused;
+    }
+  }
+
+  private async commitTeamGraphSession(run: DurableRunRecord, generation: number): Promise<boolean> {
+    const task = run.teamTask;
+    const graph = task?.executionGraph;
+    if (!task || !graph || graph.sessionCommitted) return true;
+    if (this.isRunInvalidated(generation)) return false;
+    const summary = graph.nodes
+      .filter((node) => node.status === 'completed' && node.output)
+      .map((node) => `${node.title}: ${node.output?.summary ?? ''}`.trim())
+      .join('\n');
+    await this.session.addItems([
+      { type: 'message', role: 'user', content: run.userText } as unknown as AgentInputItem,
+      { type: 'message', role: 'assistant', content: summary || run.output } as unknown as AgentInputItem,
+    ]);
+    if (this.isRunInvalidated(generation)) return false;
+    run.teamTask = { ...task, executionGraph: commitExecutionGraphSession(graph) };
+    await this.store.update(run);
+    return !this.isRunInvalidated(generation);
   }
 
   private async prepareTeam(

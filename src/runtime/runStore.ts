@@ -24,6 +24,8 @@ export type DurableRunStatus =
   | 'refused'
   | 'failed';
 
+export type DurableRunResumeStage = 'routing' | 'planning' | 'execution';
+
 export interface DurableRunConfig {
   baseUrl: string;
   model: string;
@@ -50,6 +52,8 @@ export interface DurableRunRecord {
   state?: string;
   /** True only when the SDK state can resume this exact run. */
   canContinue: boolean;
+  /** Coordinator-level checkpoint used when the SDK has not started a turn. */
+  resumeStage?: DurableRunResumeStage;
   /** Generic linear plan produced before execution, when the task needs one. */
   plan?: TaskPlan;
   /** V3 team contract and serial role progress for complex tasks. */
@@ -222,6 +226,7 @@ export class JsonRunStore implements RunStore {
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||
+      (run.resumeStage !== undefined && !['routing', 'planning', 'execution'].includes(run.resumeStage)) ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||

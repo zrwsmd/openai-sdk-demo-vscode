@@ -6,7 +6,38 @@ import {
   continueTeamTask,
   pauseTeamTask,
   restartTeamTask,
+  createExecutionGraph,
+  getExecutionGraphReadyNodes,
+  startExecutionGraphNode,
+  completeExecutionGraphNode,
+  failExecutionGraphNode,
+  pauseExecutionGraphNode,
+  continueExecutionGraph,
 } from './agent.testbundle.mjs';
+
+let dag = createExecutionGraph({
+  maxParallelism: 2,
+  nodes: [
+    { id: 'read-a', title: '读取 A', objective: '读取 A', dependsOn: [], completionCriteria: '有结果', suggestedTools: ['read_file'], effect: 'read', resources: ['file:a'], parallelSafe: true },
+    { id: 'read-b', title: '读取 B', objective: '读取 B', dependsOn: [], completionCriteria: '有结果', suggestedTools: ['read_file'], effect: 'read', resources: ['file:b'], parallelSafe: true },
+    { id: 'write', title: '写入', objective: '写入结果', dependsOn: ['read-a', 'read-b'], completionCriteria: '写入成功', suggestedTools: ['write_file'], effect: 'write', resources: ['workspace'], parallelSafe: false },
+  ],
+});
+if (getExecutionGraphReadyNodes(dag).map((node) => node.id).join(',') !== 'read-a,read-b') {
+  throw new Error('DAG did not select independent read-only nodes in parallel');
+}
+dag = startExecutionGraphNode(startExecutionGraphNode(dag, 'read-a'), 'read-b');
+if (getExecutionGraphReadyNodes(dag).length !== 0) throw new Error('DAG scheduled a node while reads were running');
+dag = completeExecutionGraphNode(dag, 'read-a', { summary: 'A', evidence: ['a'] });
+dag = completeExecutionGraphNode(dag, 'read-b', { summary: 'B', evidence: ['b'] });
+if (getExecutionGraphReadyNodes(dag).map((node) => node.id).join(',') !== 'write') throw new Error('DAG did not unlock dependent write');
+dag = startExecutionGraphNode(dag, 'write');
+dag = pauseExecutionGraphNode(dag, 'write', 'checkpoint');
+dag = continueExecutionGraph(dag);
+if (getExecutionGraphReadyNodes(dag).map((node) => node.id).join(',') !== 'write') throw new Error('DAG continuation did not resume paused node');
+dag = startExecutionGraphNode(dag, 'write');
+dag = failExecutionGraphNode(dag, 'write', 'write failed');
+if (dag.status !== 'failed' || dag.nodes.find((node) => node.id === 'write')?.status !== 'failed') throw new Error('DAG failure state not persisted');
 
 let task = createForcedTeamTask('检查项目并安全修改文件');
 task = startTeamNode(task, 'planner');

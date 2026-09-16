@@ -18,6 +18,20 @@ export type TeamRole = z.infer<typeof teamRoleSchema>;
 export const teamNodeStatusSchema = z.enum(['pending', 'running', 'completed', 'failed']);
 export type TeamNodeStatus = z.infer<typeof teamNodeStatusSchema>;
 
+export const dagNodeEffectSchema = z.enum(['none', 'read', 'write', 'command', 'device', 'unknown']);
+export type DagNodeEffect = z.infer<typeof dagNodeEffectSchema>;
+
+export const dagNodeStatusSchema = z.enum([
+  'pending',
+  'running',
+  'awaiting_approval',
+  'paused',
+  'completed',
+  'failed',
+  'blocked',
+]);
+export type DagNodeStatus = z.infer<typeof dagNodeStatusSchema>;
+
 export const teamTaskStatusSchema = z.enum([
   'pending',
   'running',
@@ -38,6 +52,52 @@ export const teamNodeOutputSchema = z.object({
   evidence: z.array(z.string()).max(12),
 }).strict();
 export type TeamNodeOutput = z.infer<typeof teamNodeOutputSchema>;
+
+/** Model-produced execution DAG. Only read/none nodes may opt into parallelism. */
+export const dagNodePlanSchema = z.object({
+  id: z.string().min(1).max(64),
+  title: z.string().min(1).max(200),
+  objective: z.string().min(1).max(1_000),
+  dependsOn: z.array(z.string().min(1).max(64)).max(12),
+  completionCriteria: z.string().min(1).max(600),
+  suggestedTools: z.array(z.string().min(1).max(80)).max(8),
+  effect: dagNodeEffectSchema,
+  resources: z.array(z.string().min(1).max(300)).max(12),
+  parallelSafe: z.boolean(),
+}).strict();
+export type DagNodePlan = z.infer<typeof dagNodePlanSchema>;
+
+export const dagNodeSchema = dagNodePlanSchema.extend({
+  status: dagNodeStatusSchema,
+  output: teamNodeOutputSchema.optional(),
+  state: z.string().optional(),
+  approvals: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    args: z.string(),
+  }).strict()).optional(),
+  startedAt: z.string().optional(),
+  completedAt: z.string().optional(),
+  error: z.string().optional(),
+}).strict();
+export type DagNode = z.infer<typeof dagNodeSchema>;
+
+export const executionGraphPlanSchema = z.object({
+  maxParallelism: z.number().int().min(1).max(4).optional(),
+  nodes: z.array(dagNodePlanSchema).min(1).max(12),
+}).strict();
+export type ExecutionGraphPlan = z.infer<typeof executionGraphPlanSchema>;
+
+export const executionGraphSchema = z.object({
+  schemaVersion: z.literal(1),
+  status: z.enum(['pending', 'running', 'paused', 'completed', 'failed']),
+  maxParallelism: z.number().int().min(1).max(4),
+  nodes: z.array(dagNodeSchema).min(1).max(12),
+  sessionCommitted: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+}).strict();
+export type ExecutionGraph = z.infer<typeof executionGraphSchema>;
 
 export const teamTaskNodeSchema = z.object({
   id: teamRoleSchema,
@@ -60,6 +120,8 @@ export const teamTaskSchema = z.object({
   planSummary: z.string().min(1),
   reviewFocus: z.array(z.string()).max(8),
   verificationCriteria: z.array(z.string()).max(8),
+  /** V2 scheduler graph. Omitted only for V1 records; planner application supplies a safe fallback. */
+  executionGraph: executionGraphSchema.optional(),
   status: teamTaskStatusSchema,
   nodes: z.array(teamTaskNodeSchema).length(4),
   createdAt: z.string(),
@@ -93,6 +155,7 @@ export const teamPlannerReportSchema = z.object({
   planSummary: z.string(),
   reviewFocus: z.array(z.string()),
   verificationCriteria: z.array(z.string()),
+  executionGraph: executionGraphPlanSchema.optional(),
 }).strict();
 export type TeamPlannerReport = z.infer<typeof teamPlannerReportSchema>;
 export type TeamPlannerOutput = TeamPlannerReport;
@@ -162,7 +225,240 @@ function assertGraph(task: TeamTask): TeamTask {
       throw new Error(`协作节点依赖无效: ${node.id}`);
     }
   }
+  if (parsed.executionGraph) assertExecutionGraph(parsed.executionGraph);
   return parsed;
+}
+
+function isReadOnlyEffect(effect: DagNodeEffect): boolean {
+  return effect === 'none' || effect === 'read';
+}
+
+function assertExecutionGraph(graph: ExecutionGraph): ExecutionGraph {
+  const parsed = executionGraphSchema.parse(graph);
+  const ids = new Set<string>();
+  for (const node of parsed.nodes) {
+    if (ids.has(node.id)) throw new Error('执行图节点重复: ' + node.id);
+    ids.add(node.id);
+    if (node.dependsOn.includes(node.id)) throw new Error('执行图节点不能依赖自身: ' + node.id);
+    if (node.parallelSafe && !isReadOnlyEffect(node.effect)) {
+      throw new Error('有副作用节点不能声明并行安全: ' + node.id);
+    }
+  }
+  for (const node of parsed.nodes) {
+    for (const dependency of node.dependsOn) {
+      if (!ids.has(dependency)) throw new Error('执行图依赖不存在: ' + node.id + ' -> ' + dependency);
+    }
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): void => {
+    if (visited.has(id)) return;
+    if (visiting.has(id)) throw new Error('执行图存在循环依赖: ' + id);
+    visiting.add(id);
+    const node = parsed.nodes.find((item) => item.id === id)!;
+    node.dependsOn.forEach(visit);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  parsed.nodes.forEach((node) => visit(node.id));
+  return parsed;
+}
+
+function graphNow(graph: ExecutionGraph, nodes: DagNode[]): ExecutionGraph {
+  const terminal = nodes.every((node) => node.status === 'completed');
+  const failed = nodes.some((node) => node.status === 'failed' || node.status === 'blocked');
+  return assertExecutionGraph({
+    ...graph,
+    nodes,
+    status: terminal ? 'completed' : failed && nodes.every((node) => ['completed', 'failed', 'blocked'].includes(node.status))
+      ? 'failed'
+      : graph.status,
+    updatedAt: now(),
+  });
+}
+
+export function createExecutionGraph(plan: unknown): ExecutionGraph {
+  const parsed = executionGraphPlanSchema.parse(plan);
+  const timestamp = now();
+  return assertExecutionGraph({
+    schemaVersion: 1,
+    status: 'pending',
+    maxParallelism: parsed.maxParallelism ?? 3,
+    nodes: parsed.nodes.map((node) => ({ ...node, status: 'pending' })),
+    sessionCommitted: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+}
+
+export function getExecutionGraphReadyNodes(graph: ExecutionGraph): DagNode[] {
+  const parsed = assertExecutionGraph(graph);
+  const byId = new Map(parsed.nodes.map((node) => [node.id, node]));
+  const running = parsed.nodes.filter((node) => node.status === 'running');
+  const runningResources = new Set(running.flatMap((node) => node.resources));
+  const hasRunningExclusive = running.some((node) => !node.parallelSafe || !isReadOnlyEffect(node.effect));
+  const ready = parsed.nodes.filter((node) =>
+    node.status === 'pending' && node.dependsOn.every((dependency) => byId.get(dependency)?.status === 'completed'),
+  );
+  if (hasRunningExclusive) return [];
+  const exclusive = ready.find((node) => !node.parallelSafe || !isReadOnlyEffect(node.effect));
+  if (exclusive) return running.length === 0 ? [exclusive] : [];
+  const selected: DagNode[] = [];
+  const selectedResources = new Set(runningResources);
+  const slots = Math.max(0, parsed.maxParallelism - running.length);
+  for (const node of ready) {
+    if (selected.length >= slots) break;
+    if (node.resources.some((resource) => selectedResources.has(resource))) continue;
+    selected.push(node);
+    node.resources.forEach((resource) => selectedResources.add(resource));
+  }
+  return selected;
+}
+
+export function startExecutionGraphNode(graph: ExecutionGraph, nodeId: string): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const node = parsed.nodes.find((item) => item.id === nodeId);
+  if (!node || node.status !== 'pending') throw new Error('执行图节点不可启动: ' + nodeId);
+  if (!getExecutionGraphReadyNodes(parsed).some((item) => item.id === nodeId)) {
+    throw new Error('执行图节点尚未就绪或存在资源冲突: ' + nodeId);
+  }
+  return graphNow({ ...parsed, status: 'running' }, parsed.nodes.map((item) => item.id !== nodeId ? item : {
+    ...item,
+    status: 'running',
+    startedAt: item.startedAt ?? now(),
+    error: undefined,
+  }));
+}
+
+export function completeExecutionGraphNode(
+  graph: ExecutionGraph,
+  nodeId: string,
+  output: TeamNodeOutput,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const node = parsed.nodes.find((item) => item.id === nodeId);
+  if (!node || node.status !== 'running') throw new Error('执行图节点尚未运行: ' + nodeId);
+  return graphNow(parsed, parsed.nodes.map((item) => item.id !== nodeId ? item : {
+    ...item,
+    status: 'completed',
+    output: teamNodeOutputSchema.parse({
+      summary: compact(output.summary, 1_000),
+      evidence: output.evidence.map((entry) => compact(entry, 500)).filter(Boolean).slice(0, 12),
+    }),
+    completedAt: now(),
+    state: undefined,
+    approvals: undefined,
+    error: undefined,
+  }));
+}
+
+export function commitExecutionGraphSession(graph: ExecutionGraph): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  return assertExecutionGraph({ ...parsed, sessionCommitted: true, updatedAt: now() });
+}
+
+export function checkpointExecutionGraphNode(
+  graph: ExecutionGraph,
+  nodeId: string,
+  state: string,
+  approvals: Array<{ id: string; name: string; args: string }>,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const node = parsed.nodes.find((item) => item.id === nodeId);
+  if (!node || node.status !== 'running') throw new Error('执行图节点不能保存审批断点: ' + nodeId);
+  return graphNow(parsed, parsed.nodes.map((item) => item.id !== nodeId ? item : {
+    ...item,
+    status: 'awaiting_approval',
+    state,
+    approvals,
+  }));
+}
+
+export function resumeExecutionGraphNode(graph: ExecutionGraph, nodeId: string): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const node = parsed.nodes.find((item) => item.id === nodeId);
+  if (!node || node.status !== 'awaiting_approval') {
+    throw new Error('执行图节点没有可恢复的审批断点: ' + nodeId);
+  }
+  return graphNow({ ...parsed, status: 'running' }, parsed.nodes.map((item) => item.id !== nodeId ? item : {
+    ...item,
+    status: 'running',
+    approvals: undefined,
+  }));
+}
+
+export function pauseExecutionGraphNode(
+  graph: ExecutionGraph,
+  nodeId: string,
+  state?: string,
+): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const node = parsed.nodes.find((item) => item.id === nodeId);
+  if (!node || node.status !== 'running') throw new Error('执行图节点不能暂停: ' + nodeId);
+  return graphNow({ ...parsed, status: 'paused' }, parsed.nodes.map((item) => item.id !== nodeId ? item : {
+    ...item,
+    status: 'paused',
+    state,
+  }));
+}
+
+export function failExecutionGraphNode(graph: ExecutionGraph, nodeId: string, error: string): ExecutionGraph {
+  const parsed = assertExecutionGraph(graph);
+  const failed = new Set<string>([nodeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of parsed.nodes) {
+      if (node.dependsOn.some((dependency) => failed.has(dependency)) && !failed.has(node.id)) {
+        failed.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  return graphNow(parsed, parsed.nodes.map((node) => !failed.has(node.id) ? node : node.id === nodeId ? {
+    ...node,
+    status: 'failed',
+    error: compact(error, 1_000) || '执行节点失败',
+    completedAt: now(),
+    state: undefined,
+    approvals: undefined,
+  } : {
+    ...node,
+    status: node.status === 'completed' ? node.status : 'blocked',
+    error: node.status === 'completed' ? node.error : '依赖节点 ' + nodeId + ' 未完成',
+    state: undefined,
+    approvals: undefined,
+  }));
+}
+
+export function pauseExecutionGraph(graph: ExecutionGraph | undefined): ExecutionGraph | undefined {
+  if (!graph || graph.status === 'completed' || graph.status === 'failed') return graph;
+  return graphNow({ ...graph, status: 'paused' }, graph.nodes.map((node) =>
+    node.status === 'running' ? { ...node, status: 'paused' } : node,
+  ));
+}
+
+export function continueExecutionGraph(graph: ExecutionGraph | undefined): ExecutionGraph | undefined {
+  if (!graph || graph.status === 'completed' || graph.status === 'failed') return graph;
+  return graphNow({ ...graph, status: 'running' }, graph.nodes.map((node) =>
+    node.status === 'paused' || node.status === 'running'
+      ? { ...node, status: 'pending', approvals: undefined }
+      : node,
+  ));
+}
+
+export function restartExecutionGraph(graph: ExecutionGraph | undefined): ExecutionGraph | undefined {
+  if (!graph) return undefined;
+  return graphNow({ ...graph, status: 'pending', sessionCommitted: false }, graph.nodes.map((node) => ({
+    ...node,
+    status: 'pending',
+    output: undefined,
+    state: undefined,
+    approvals: undefined,
+    startedAt: undefined,
+    completedAt: undefined,
+    error: undefined,
+  })));
 }
 
 export function createTeamTask(decision: unknown, userText: string): TeamTask | undefined {
@@ -252,6 +548,23 @@ export function applyTeamPlannerReport(task: TeamTask, report: unknown): TeamTas
     .map((item) => compact(item, 300)).filter(Boolean).slice(0, 8);
   next.verificationCriteria = parsed.verificationCriteria
     .map((item) => compact(item, 300)).filter(Boolean).slice(0, 8);
+  next.executionGraph = parsed.executionGraph
+    ? createExecutionGraph(parsed.executionGraph)
+    : next.executionGraph
+      ? assertExecutionGraph(next.executionGraph)
+      : createExecutionGraph({
+      nodes: [{
+        id: 'execute-task',
+        title: '执行已审查任务',
+        objective: next.planSummary,
+        dependsOn: [],
+        completionCriteria: next.verificationCriteria.join('；') || '完成用户请求并提供真实证据',
+        suggestedTools: [],
+        effect: 'unknown',
+        resources: ['workspace:primary'],
+        parallelSafe: false,
+      }],
+    });
   next.updatedAt = now();
   return assertGraph(next);
 }
@@ -281,12 +594,22 @@ export function failTeamTask(task: TeamTask): TeamTask {
 
 export function pauseTeamTask(task: TeamTask): TeamTask {
   if (task.status === 'completed' || task.status === 'verification_failed' || task.status === 'failed') return task;
-  return assertGraph({ ...task, status: 'paused', updatedAt: now() });
+  return assertGraph({
+    ...task,
+    status: 'paused',
+    executionGraph: pauseExecutionGraph(task.executionGraph),
+    updatedAt: now(),
+  });
 }
 
 export function resumeTeamTask(task: TeamTask): TeamTask {
   if (task.status !== 'paused') return task;
-  return assertGraph({ ...task, status: 'running', updatedAt: now() });
+  return assertGraph({
+    ...task,
+    status: 'running',
+    executionGraph: continueExecutionGraph(task.executionGraph),
+    updatedAt: now(),
+  });
 }
 
 /**
@@ -303,6 +626,7 @@ export function continueTeamTask(task: TeamTask | undefined): TeamTask | undefin
   return assertGraph({
     ...task,
     status: 'pending',
+    executionGraph: continueExecutionGraph(task.executionGraph),
     nodes: task.nodes.map((node, index) => index < firstIncomplete
       ? node
       : {
@@ -323,6 +647,7 @@ export function restartTeamTask(task: TeamTask | undefined): TeamTask | undefine
   return assertGraph({
     ...task,
     status: 'pending',
+    executionGraph: restartExecutionGraph(task.executionGraph),
     nodes: task.nodes.map((node) => ({
       ...node,
       status: 'pending',
