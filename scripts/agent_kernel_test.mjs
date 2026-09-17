@@ -219,6 +219,19 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8b2] 工具成功但模型把 SDK/artifact 内部错误当最终总结 → 后端改用工具结果兜底
+{
+  await fs.writeFile(path.join(dir, 'lk.txt'), 'artifact兜底内容', 'utf8');
+  const r = await runTestTurn('artifact坏总结读取 lk.txt 文件里面的内容', noApproval);
+  console.log('[8b2] artifact 坏总结兜底:输出 =', JSON.stringify(r.output));
+  if (r.output.includes('no available artifacts') || r.output.includes('Tool call')) {
+    throw new Error('artifact 内部错误文案泄漏到了最终输出');
+  }
+  if (!r.output.includes('已读取 lk.txt') || !r.output.includes('artifact兜底内容')) {
+    throw new Error('artifact 坏总结没有回退到 read_file 工具结果');
+  }
+}
+
 // [8d] 工具失败且模型最终 schema message 为空 → 后端用失败回执合成兜底文字并停止重试
 {
   const r = await runTestTurn('读取缺失文件', noApproval);

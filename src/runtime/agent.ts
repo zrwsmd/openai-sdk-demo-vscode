@@ -1909,6 +1909,14 @@ export async function runAgent(
     return undefined;
   };
 
+  const isInternalToolArtifactComplaint = (message: string): boolean => {
+    const text = message.trim();
+    if (!text) return false;
+    return /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
+      /tool returned an empty dict or a non-dict value/is.test(text) ||
+      /unexpected response format.*tool implementation/is.test(text);
+  };
+
   const hasAttemptedRequiredAction = (): boolean => {
     if (!requiredTool) return true;
     return [...toolResults.values()].some((call) => call.name === requiredTool);
@@ -2288,9 +2296,13 @@ export async function runAgent(
         }
       }
       assertPlanCompleted();
-      const message = structuredOutput.message.trim()
+      const fallbackMessage = fallbackRequiredToolMessage();
+      const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
-        : fallbackRequiredToolMessage() ?? structuredOutput.message;
+        : "";
+      const message = rawMessage && !isInternalToolArtifactComplaint(rawMessage)
+        ? rawMessage
+        : fallbackMessage ?? structuredOutput.message;
       const gate = runCompletionGate(message);
       if (!gate.passed) {
         continueAfterCompletionGateFailure(state, gate);

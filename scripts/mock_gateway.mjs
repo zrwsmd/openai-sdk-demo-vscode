@@ -421,6 +421,12 @@ const server = http.createServer((req, res) => {
         artifacts: [{ kind: 'file', name: 'lk.txt', uri: null, mimeType: null, content: null }],
         data: null,
       }));
+    } else if (last.role === 'tool' && userText.includes('artifact坏总结读取')) {
+      await streamStructuredText(
+        res,
+        model,
+        'Tool call "read_file" (id 748659933) has no available artifacts. The tool returned an empty dict or a non-dict value. This might indicate a bug in the tool implementation or an unexpected response format. Consider checking the tool source code or reporting this as an issue.',
+      );
     } else if (last.role === 'tool' && userText.includes('通用闭环') && completionGateRepair) {
       const text = '之前读取 typo.txt 失败，已改为读取 fixed.txt 并成功取得内容。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
