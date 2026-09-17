@@ -9,6 +9,7 @@ import {
   reviewTeamTask,
   verifyTeamTask,
   MaxTurnsExceededError,
+  AgentActionVerificationError,
   MAX_TURNS,
   type AgentRunOptions,
   type AgentRunResult,
@@ -912,79 +913,107 @@ export class RunCoordinator {
         this.emit({ type: 'done', usage: run.usage, canRetry: true });
         return;
       }
+      const executeSingleAgent = (
+        agentOptions: Pick<AgentRunOptions, 'initialState' | 'decisions'>,
+      ): Promise<AgentRunResult> =>
+        this.executeAgent(
+          {
+            ...run.config,
+            apiKey,
+            executeEffect: (toolName, input, invoke) =>
+              this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
+            audit: async (event) => {
+              if (!this.auditSink) return;
+              await this.auditSink.append({
+                ...event,
+                runId: run.id,
+                operationId: run.operationId,
+                traceId: run.id,
+              });
+            },
+          },
+          this.session,
+          run.userText,
+          {
+            ...agentOptions,
+            taskPlan: run.plan,
+            teamTask: run.teamTask,
+            signal: controller.signal,
+            protocol: {
+              runId: run.id,
+              operationId: run.operationId,
+              eventFactory: this.protocolFactory,
+              onEvent: (event: AgentProtocolEvent) => {
+                if (!this.isRunInvalidated(runGeneration)) this.emitProtocol(event);
+              },
+            },
+            onCheckpoint: async (checkpoint) => {
+              if (this.isRunInvalidated(runGeneration)) {
+                controller.abort();
+                return;
+              }
+              run.status = 'awaiting_approval';
+              run.canContinue = false;
+              run.state = checkpoint.state;
+              run.approvals = checkpoint.approvals;
+              run.output = baseOutput + checkpoint.output;
+              run.usage = checkpoint.usage;
+              await this.store.update(run);
+              await this.audit('checkpoint_saved', run, { approvalCount: checkpoint.approvals.length });
+            },
+            onPlanProgress: async (progress: TaskPlanProgress) => {
+              if (!run.plan || this.isRunInvalidated(runGeneration)) return;
+              run.plan = updateTaskPlan(run.plan, progress);
+              await this.store.update(run);
+              if (!this.isRunInvalidated(runGeneration)) {
+                const verification = progress.verification;
+                const stage = progress.phase === 'completed' && verification && verification.verdict !== 'passed'
+                  ? 'plan.step.verification_failed'
+                  : `plan.step.${progress.phase}`;
+                this.emitProtocol(this.protocolFactory!.next({
+                  type: 'run.progress',
+                  payload: {
+                    stage,
+                    message: progress.note,
+                    planId: run.plan.id,
+                    stepId: progress.stepId,
+                    planStatus: run.plan.status,
+                    verification: run.plan.steps.find((step) => step.id === progress.stepId)?.verification,
+                  },
+                }));
+              }
+            },
+          },
+        );
+
       let result: AgentRunResult;
       if (run.teamTask?.executionGraph) {
         result = await this.executeTeamGraph(run, apiKey, controller.signal, runGeneration, options);
       } else {
-        result = await this.executeAgent(
-        {
-          ...run.config,
-          apiKey,
-          executeEffect: (toolName, input, invoke) =>
-            this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
-          audit: async (event) => {
-            if (!this.auditSink) return;
-            await this.auditSink.append({
-              ...event,
-              runId: run.id,
-              operationId: run.operationId,
-              traceId: run.id,
-            });
-          },
-        },
-        this.session,
-        run.userText,
-        {
-          ...options,
-          taskPlan: run.plan,
-          teamTask: run.teamTask,
-          signal: controller.signal,
-          protocol: {
-            runId: run.id,
-            operationId: run.operationId,
-            eventFactory: this.protocolFactory,
-            onEvent: (event: AgentProtocolEvent) => {
-              if (!this.isRunInvalidated(runGeneration)) this.emitProtocol(event);
-            },
-          },
-          onCheckpoint: async (checkpoint) => {
-            if (this.isRunInvalidated(runGeneration)) {
-              controller.abort();
-              return;
-            }
-            run.status = 'awaiting_approval';
-            run.canContinue = false;
-            run.state = checkpoint.state;
-            run.approvals = checkpoint.approvals;
-            run.output = baseOutput + checkpoint.output;
-            run.usage = checkpoint.usage;
-            await this.store.update(run);
-            await this.audit('checkpoint_saved', run, { approvalCount: checkpoint.approvals.length });
-          },
-          onPlanProgress: async (progress: TaskPlanProgress) => {
-            if (!run.plan || this.isRunInvalidated(runGeneration)) return;
-            run.plan = updateTaskPlan(run.plan, progress);
-            await this.store.update(run);
-            if (!this.isRunInvalidated(runGeneration)) {
-              const verification = progress.verification;
-              const stage = progress.phase === 'completed' && verification && verification.verdict !== 'passed'
-                ? 'plan.step.verification_failed'
-                : `plan.step.${progress.phase}`;
-              this.emitProtocol(this.protocolFactory!.next({
-                type: 'run.progress',
-                payload: {
-                  stage,
-                  message: progress.note,
-                  planId: run.plan.id,
-                  stepId: progress.stepId,
-                  planStatus: run.plan.status,
-                  verification: run.plan.steps.find((step) => step.id === progress.stepId)?.verification,
-                },
-              }));
-            }
-          },
-        },
-      );
+        try {
+          result = await executeSingleAgent(options);
+        } catch (error) {
+          if (!run.plan || run.teamTask || !this.isLinearPlanIncompleteError(error)) throw error;
+          const failedPlanId = run.plan.id;
+          const message = '线性计划未推进，已退回单任务执行';
+          await this.session.truncate(run.sessionItemCountBefore);
+          if (this.isRunInvalidated(runGeneration)) return;
+          run.plan = undefined;
+          run.resumeStage = undefined;
+          run.state = undefined;
+          run.approvals = [];
+          run.error = undefined;
+          run.status = 'running';
+          run.canContinue = false;
+          await this.store.update(run);
+          if (this.isRunInvalidated(runGeneration)) return;
+          this.writeLog(`[plan] ${message}: ${this.formatError(error)}`);
+          this.emitProtocol(this.protocolFactory!.next({
+            type: 'run.progress',
+            payload: { stage: 'plan.fallback', message, planId: failedPlanId },
+          }));
+          result = await executeSingleAgent({});
+        }
       }
 
       // clear() may have invalidated this run while the SDK was settling its
@@ -1740,6 +1769,15 @@ export class RunCoordinator {
     } catch (error) {
       this.writeLog(`[audit] ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private isLinearPlanIncompleteError(error: unknown): boolean {
+    if (error instanceof AgentActionVerificationError) {
+      return error.message.includes('线性计划尚未完成');
+    }
+    return error instanceof Error
+      && error.name === 'AgentActionVerificationError'
+      && error.message.includes('线性计划尚未完成');
   }
 
   private formatError(error: unknown): string {

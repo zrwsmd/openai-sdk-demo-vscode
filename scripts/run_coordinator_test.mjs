@@ -6,6 +6,7 @@ import {
   JsonRunStore,
   RunCoordinator,
   createTeamTask,
+  AgentActionVerificationError,
 } from './agent.testbundle.mjs';
 
 const config = { baseUrl: 'http://mock/v1', model: 'mock', exportDir: '', workspaceRoot: '' };
@@ -130,6 +131,52 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
       !planEvents.some((event) => event.payload.stage === 'plan.step.verification_failed') ||
       planEvents.filter((event) => String(event.payload.stage).startsWith('plan.step.')).length !== 5) {
     throw new Error('linear plan progress events are missing');
+  }
+}
+
+// If a simple request was misplanned and the executor never advances the
+// linear plan, fall back to the ordinary single-agent path instead of failing
+// the run with AgentActionVerificationError.
+{
+  let executorCalls = 0;
+  const receivedPlans = [];
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    executorCalls += 1;
+    receivedPlans.push(options.taskPlan);
+    if (executorCalls === 1) {
+      throw new AgentActionVerificationError('线性计划尚未完成: step-1 检查git版本');
+    }
+    if (options.taskPlan !== undefined) {
+      throw new Error('fallback executor should not receive the stale linear plan');
+    }
+    return { status: 'completed', output: 'git version 2.51.0\njava version 21', usage, result: completedAgentResult('versions complete') };
+  }, async () => ({
+    schemaVersion: 1,
+    id: 'plan-version',
+    goal: '查看一下git和java的版本',
+    reason: 'planner incorrectly split independent checks',
+    status: 'pending',
+    steps: [
+      { id: 'step-1', title: '检查git版本', objective: '检查 git 版本', completionCriteria: '看到 git version', suggestedTools: ['run_command'], status: 'pending' },
+      { id: 'step-2', title: '检查java版本', objective: '检查 java 版本', completionCriteria: '看到 java version', suggestedTools: ['run_command'], status: 'pending' },
+    ],
+  }));
+  await test.coordinator.start('查看一下git和java的版本', config, 'key');
+  const completed = await test.store.getLast();
+  const fallbackEvent = test.events
+    .filter((event) => event.type === 'agentEvent')
+    .map((event) => event.event)
+    .find((event) => event.type === 'run.progress' && event.payload.stage === 'plan.fallback');
+  if (
+    executorCalls !== 2 ||
+    receivedPlans[0]?.id !== 'plan-version' ||
+    receivedPlans[1] !== undefined ||
+    completed?.status !== 'completed' ||
+    completed.plan !== undefined ||
+    !completed.output.includes('git version') ||
+    !fallbackEvent
+  ) {
+    throw new Error('linear plan fallback did not retry as a single-agent run');
   }
 }
 

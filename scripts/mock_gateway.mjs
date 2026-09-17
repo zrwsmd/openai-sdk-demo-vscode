@@ -378,6 +378,8 @@ const server = http.createServer((req, res) => {
         { name: 'read_file', args: JSON.stringify({ path: 'pa.txt' }) },
         { name: 'read_file', args: JSON.stringify({ path: 'pb.txt' }) },
       ]);
+    } else if (userText.includes('读取缺失') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'no_such.txt' }));
     } else if (userText.includes('读取') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'lk.txt' }));
     } else if (last.role === 'tool' && userText.includes('思考')) {
@@ -411,6 +413,13 @@ const server = http.createServer((req, res) => {
         message: '',
         diagnostics: [],
         artifacts: [{ kind: 'file', name: 'lk.txt', uri: null, mimeType: null, content: null }],
+        data: null,
+      }));
+    } else if (last.role === 'tool' && userText.includes('读取缺失')) {
+      await streamText(res, model, JSON.stringify({
+        message: '',
+        diagnostics: [],
+        artifacts: [],
         data: null,
       }));
     } else if (last.role === 'tool' && userText.includes('读取')) {

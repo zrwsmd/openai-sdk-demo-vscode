@@ -219,6 +219,23 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8d] 工具失败且模型最终 schema message 为空 → 后端用失败回执合成兜底文字并停止重试
+{
+  const r = await runTestTurn('读取缺失文件', noApproval);
+  const started = r.events.filter((e) => e.type === 'tool.started' && e.payload.toolName === 'read_file');
+  const completed = r.events.filter((e) => e.type === 'tool.completed' && e.payload.toolName === 'read_file');
+  console.log('[8d] 读取失败兜底:started =', started.length, '| completed =', completed.length, '| 输出 =', JSON.stringify(r.output));
+  if (started.length !== 1 || completed.length !== 1) {
+    throw new Error('读取失败后不应反复强制重试同一个 read_file 工具');
+  }
+  if (completed[0]?.payload.result?.ok !== false) {
+    throw new Error('读取缺失文件没有透出失败工具回执');
+  }
+  if (!r.output.includes('读取 no_such.txt 失败') || !r.output.includes('文件不存在:no_such.txt')) {
+    throw new Error('读取工具失败且空 message 时没有生成失败兜底输出');
+  }
+}
+
 // [8c] 同一轮多个独立工具调用 → 请求开启 parallel_tool_calls,SDK 并发执行并回喂全部结果
 {
   await fs.writeFile(path.join(dir, 'pa.txt'), '并行A', 'utf8');

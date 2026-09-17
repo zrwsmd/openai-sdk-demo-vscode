@@ -1298,6 +1298,7 @@ export async function planTask(
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
 ): Promise<TaskPlan | undefined> {
+  if (isSimpleSingleTurnRequest(userText)) return undefined;
   const adapter = buildModelAdapter(cfg);
   const planner = new Agent({
     name: "通用任务规划器",
@@ -1306,6 +1307,8 @@ export async function planTask(
       "你是通用任务规划器，不执行任何工具，也不输出领域专用方案。" +
       "判断用户目标是否包含两个或以上有先后关系、需要分别确认完成的动作。" +
       "单一问答、解释、改写或一次性操作返回 requiresPlan=false。" +
+      "多个彼此独立、可在同一轮并行完成的一次性查询也返回 requiresPlan=false，例如查看 git 和 Java 版本、读取几个文件、查询几个变量。" +
+      "只有上一步结果会决定下一步动作、需要跨步骤验证或有真实先后依赖时才返回 requiresPlan=true。" +
       "需要多步时只生成 2 到 8 个线性步骤，每一步都必须是可执行目标，并给出清晰完成标准。" +
       "不要臆造用户没有提出的动作；suggestedTools 只填写通用工具名或空数组。" +
       "必须严格返回 schema，不要输出 markdown。",
@@ -1324,6 +1327,22 @@ export async function planTask(
     signal,
   });
   return createTaskPlan(result.finalOutput, userText);
+}
+
+function isSimpleSingleTurnRequest(userText: string): boolean {
+  const text = userText.trim();
+  if (!text || text.length > 160) return false;
+  const hasMutationIntent =
+    /写入|修改|改成|保存|导出|删除|安装|升级|生成|创建|修复|提交|commit|install|upgrade|delete|write|save|export/i.test(text);
+  if (hasMutationIntent) return false;
+  const asksVersion =
+    /版本|version/i.test(text) &&
+    /查看|看一下|查询|检查|显示|获取|show|check|get/i.test(text);
+  if (asksVersion) return true;
+  const asksSimpleRead =
+    /^(读取|查看|列出|搜索|查询|检查|显示|获取)/.test(text) &&
+    !/然后|之后|再|接着|最后|并保存|并写入|导出|修改/.test(text);
+  return asksSimpleRead;
 }
 
 function teamTracingDisabled(cfg: AgentConfig, adapter: ModelAdapter): boolean {
@@ -1646,8 +1665,11 @@ export async function runAgent(
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
     if (!requiredTool) return [];
     const verified: Artifact[] = [];
-    for (const call of toolResults.values()) {
-      if (call.name !== requiredTool || !call.result.ok) continue;
+    const calls = [...toolResults.values()].filter(
+      (call) => call.name === requiredTool,
+    );
+    for (const call of calls) {
+      if (!call.result.ok) continue;
       // Every required side-effect must have a successful structured tool
       // result. File writes additionally get a read-back byte-for-byte check.
       if (requiredTool !== "write_file") continue;
@@ -1663,12 +1685,16 @@ export async function runAgent(
         await verifyWorkspaceWrite(workspace, args.path, args.content),
       );
     }
-    const successful = [...toolResults.values()].some(
-      (call) => call.name === requiredTool && call.result.ok,
-    );
-    if (!successful || (requiredTool === "write_file" && !verified.length)) {
+    const successful = calls.some((call) => call.result.ok);
+    if (!calls.length) {
       throw new AgentActionVerificationError(
-        `用户明确要求执行 ${requiredTool}，但本轮没有成功执行并确认该工具`,
+        `用户明确要求执行 ${requiredTool}，但本轮没有调用该工具`,
+      );
+    }
+    if (!successful) return verified;
+    if (requiredTool === "write_file" && !verified.length) {
+      throw new AgentActionVerificationError(
+        "工具 write_file 返回成功，但本轮没有完成文件回读校验",
       );
     }
     return verified;
@@ -1678,13 +1704,51 @@ export async function runAgent(
     if (!requiredTool) return undefined;
     const call = [...toolResults.values()]
       .reverse()
-      .find((item) => item.name === requiredTool && item.result.ok);
+      .find((item) => item.name === requiredTool);
     if (!call) return undefined;
     let args: Record<string, unknown> = {};
     try {
       args = JSON.parse(call.args) as Record<string, unknown>;
     } catch {
       args = {};
+    }
+    if (!call.result.ok) {
+      const errorText = typeof call.result.error === "string"
+        ? call.result.error.trim()
+        : "";
+      const diagnostics = Array.isArray(call.result.diagnostics)
+        ? call.result.diagnostics
+        : [];
+      const diagnosticMessage = diagnostics.find((item): item is { message: string } =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { message?: unknown }).message === "string" &&
+        Boolean((item as { message: string }).message.trim()),
+      )?.message.trim();
+      const error = errorText
+        || diagnosticMessage
+        || "工具执行失败";
+      if (requiredTool === "read_file") {
+        const pathValue = typeof args.path === "string" ? args.path : "目标文件";
+        return `读取 ${pathValue} 失败：${error}`;
+      }
+      if (requiredTool === "write_file") {
+        const pathValue = typeof args.path === "string" ? args.path : "目标文件";
+        return `写入 ${pathValue} 失败：${error}`;
+      }
+      if (requiredTool === "export_st_program") {
+        return `导出失败：${error}`;
+      }
+      if (requiredTool === "run_command") {
+        const data = call.result.data && typeof call.result.data === "object"
+          ? call.result.data as Record<string, unknown>
+          : {};
+        const commandOutput = typeof data.output === "string" && data.output.trim()
+          ? `\n${data.output.trim().slice(0, 1_000)}`
+          : "";
+        return `命令执行失败：${error}${commandOutput}`;
+      }
+      return `${requiredTool} 执行失败：${error}`;
     }
     const data = call.result.data && typeof call.result.data === "object"
       ? call.result.data as Record<string, unknown>
@@ -1721,11 +1785,9 @@ export async function runAgent(
     return undefined;
   };
 
-  const hasSuccessfulRequiredAction = (): boolean => {
+  const hasAttemptedRequiredAction = (): boolean => {
     if (!requiredTool) return true;
-    return [...toolResults.values()].some(
-      (call) => call.name === requiredTool && call.result.ok,
-    );
+    return [...toolResults.values()].some((call) => call.name === requiredTool);
   };
 
   const assertPlanCompleted = (): void => {
@@ -1994,7 +2056,7 @@ export async function runAgent(
     }
     if (
       requiredTool &&
-      !hasSuccessfulRequiredAction() &&
+      !hasAttemptedRequiredAction() &&
       !forcedToolFallbackUsed &&
       (outcome === "empty-bailed" || !state.getInterruptions().length)
     ) {
@@ -2038,9 +2100,19 @@ export async function runAgent(
         };
       }
       if (!structuredOutput) {
-        throw new AgentOutputValidationError(
-          "Agent 未返回符合 Schema 的最终结构化结果",
-        );
+        const fallbackMessage = fallbackRequiredToolMessage();
+        if (requiredTool && hasAttemptedRequiredAction() && fallbackMessage) {
+          structuredOutput = {
+            message: fallbackMessage,
+            diagnostics: [],
+            artifacts: [],
+            data: null,
+          };
+        } else {
+          throw new AgentOutputValidationError(
+            "Agent 未返回符合 Schema 的最终结构化结果",
+          );
+        }
       }
       assertPlanCompleted();
       const verifiedArtifacts = await verifyRequiredActions();
