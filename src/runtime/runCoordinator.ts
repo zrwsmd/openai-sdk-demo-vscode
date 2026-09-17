@@ -19,6 +19,11 @@ import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
 import type { AuditEventType, AuditSink } from '../observability/audit';
+import {
+  toolOptionsFromSettings,
+  type StAnalyzer,
+  type StAnalyzerSettings,
+} from '../analysis/stAnalyzer';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 import {

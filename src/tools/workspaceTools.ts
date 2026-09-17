@@ -43,6 +43,18 @@ async function* walkFiles(absDir: string, root: string, maxDepth = 6): AsyncGene
     }
   }
 }
+/**
+ * 遍历工作区文件并返回绝对路径列表(纯函数,供 analysis 层收集 ST 上下文用)。
+ * 复用与 list_files 相同的跳过规则(依赖/构建目录),路径边界同样走 resolveInWorkspace。
+ */
+export async function walkWorkspace(root: string, sub = '.', maxDepth = 6): Promise<string[]> {
+  const absRoot = resolveInWorkspace(root, sub);
+  const out: string[] = [];
+  for await (const file of walkFiles(absRoot, absRoot, maxDepth)) out.push(file);
+  return out;
+}
+
+
 
 export async function listFiles(root: string, sub = '.', cap = 400): Promise<string[]> {
   const absRoot = resolveInWorkspace(root, sub);

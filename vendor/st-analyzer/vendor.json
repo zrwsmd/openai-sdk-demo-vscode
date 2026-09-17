@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "bc2112d115eee60dbfefba0056e09ad3f43e2218",
+  "sourceDirty": true,
+  "bundleMtime": "2026-09-17T06:12:16.590Z",
+  "vendoredAt": "2026-09-17T06:23:35.914Z",
+  "sha256": {
+    "main": "441cb5b2ba7912f167028916f019a9ca6fdac742efcb2fa5e1614cd8b346457b",
+    "data": "b13c3a396c8028ef1f3cd1a431586a2fad1fcc6ed53b131a823dd6e02b73c1c5",
+    "bridge": "f5d390146edb585fbc7deedae64f2360c2d85a99c27420fdb75488636869f03a"
+  }
+}

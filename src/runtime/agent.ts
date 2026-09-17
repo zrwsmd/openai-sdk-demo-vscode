@@ -24,6 +24,8 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { createHash } from "node:crypto";
 import {
   listFiles,
   readFileRange,
@@ -46,6 +48,17 @@ import {
   workspaceScopeFromRoots,
 } from "../workspace/workspaceScope";
 import { MockPlcAdapter, type PlcAdapter } from "../plc/plcAdapter";
+import { FallbackStAnalyzer } from "../analysis/fallbackStAnalyzer";
+import { collectWorkspaceStContext } from "../analysis/workspaceStContext";
+import {
+  countStDiagnostics,
+  isStValidationFailure,
+  toProtocolDiagnostics,
+  type StAnalyzer,
+  type StAnalyzerToolOptions,
+  type StDiagnostic,
+  type StTarget,
+} from "../analysis/stAnalyzer";
 import type { AuditEvent } from "../observability/audit";
 import {
   createIndustrialAgentTeam,
@@ -125,6 +138,12 @@ export interface AgentConfig {
   policy?: ToolPolicy;
   policyContext?: ToolPolicyOverrides;
   plcAdapter?: PlcAdapter;
+  /**
+   * ST 校验端口。宿主注入;缺省用内置简易校验,
+   * 这样内核脱离宿主(CLI/边缘/单测)仍然可运行。
+   */
+  stAnalyzer?: StAnalyzer;
+  stAnalyzerOptions?: StAnalyzerToolOptions;
   audit?: (event: Omit<AuditEvent, "id" | "timestamp">) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
   actionPolicy?: ActionPolicy;
@@ -303,6 +322,53 @@ export function commandToolResult(
 function buildTools(cfg: AgentConfig) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
+  const stAnalyzer = cfg.stAnalyzer ?? new FallbackStAnalyzer();
+  const stToolOptions = cfg.stAnalyzerOptions ?? {};
+  /**
+   * 解析校验目标与上下文:目标优先用工作区真实文件(跨文件解析最准),
+   * 只有裸代码才落到系统临时目录下的虚拟 URI(桥只把它当 URI,不读盘)。
+   */
+  const resolveStValidationInput = async (
+    filePath: string | undefined,
+    code: string | undefined,
+    loadWorkspaceContext: boolean | undefined,
+  ) => {
+    if (!filePath && !code) throw new Error("必须提供 code 或 path 之一");
+    let target: StTarget;
+    let label: string;
+    let excludePaths: string[] = [];
+    if (filePath) {
+      const resolved = workspace.resolve(filePath);
+      const read = await readFileRange(resolved.root, resolved.relativePath);
+      target = { path: resolved.absolutePath, text: read.text };
+      label = resolved.relativePath.split(path.sep).join("/");
+      excludePaths = [resolved.relativePath];
+    } else {
+      const digest = createHash("sha1").update(code!).digest("hex").slice(0, 12);
+      target = {
+        path: path.join(os.tmpdir(), "plc-agent-st", `${digest}.st`),
+        text: code!,
+      };
+      label = "<inline st code>";
+    }
+    const useContext =
+      (loadWorkspaceContext ?? stToolOptions.loadWorkspaceContext !== false) &&
+      !!workspace.primaryRoot;
+    const collected = useContext
+      ? await collectWorkspaceStContext(workspace, {
+          maxFiles: stToolOptions.maxContextFiles,
+          maxFileBytes: stToolOptions.maxFileBytes,
+          excludePaths,
+        })
+      : { files: [] as StTarget[], truncated: false, skipped: 0 };
+    return {
+      target,
+      label,
+      context: collected.files,
+      contextTruncated: collected.truncated,
+      contextSkipped: collected.skipped,
+    };
+  };
   const workspace = workspaceScopeFromRoots(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
@@ -373,29 +439,74 @@ function buildTools(cfg: AgentConfig) {
   const validateStCode = tool({
     name: "validate_st_code",
     description:
-      "校验一段 IEC 61131-3 ST 代码，返回校验结果。参数 code 为完整 ST 源码。",
-    parameters: z.object({ code: z.string().describe("完整 ST 源码") }),
+      "用 ST 语言服务器(st-analyze)校验 IEC 61131-3 ST 代码,返回带行列号的诊断。" +
+      "优先用 path 校验工作区里的真实 .st 文件,只有裸代码才用 code。" +
+      "结果里 errorCount=0 才算通过校验;warningCount 只作提示,不阻断交付。" +
+      "该校验器不覆盖全部语义(例如内置 FB 参数类型),不要把它当成可上机运行的证明。",
+    parameters: z.object({
+      code: z.string().optional().describe("完整 ST 源码(PROGRAM ... END_PROGRAM)"),
+      path: z.string().optional().describe("工作区内的 .st 文件路径,优先于 code"),
+      loadWorkspaceContext: z
+        .boolean()
+        .optional()
+        .describe("是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要)"),
+    }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
-    execute: async ({ code }) => {
-      if (!code.toUpperCase().includes("END_PROGRAM")) {
+    execute: ({ code, path: p, loadWorkspaceContext }, _context, details) =>
+      guard(async () => {
+        const input = await resolveStValidationInput(p, code, loadWorkspaceContext);
+        const result = await stAnalyzer.verify(
+          {
+            workspaceRoot: workspace.primaryRoot,
+            targets: [input.target],
+            context: input.context,
+            ...(stToolOptions.maxDiagnostics ? { options: { maxDiagnostics: stToolOptions.maxDiagnostics } } : {}),
+          },
+          { signal: details?.signal },
+        );
+        const counts = countStDiagnostics(result);
+        const diagnostics = (result.results[0]?.diagnostics ?? []).map((diagnostic: StDiagnostic) => ({
+          ...diagnostic,
+          path: input.label,
+        }));
+        const failed = isStValidationFailure(result);
+        const summary = [
+          `引擎=${result.engine.id}`,
+          `error=${counts.error}`,
+          `warning=${counts.warning}`,
+          `上下文文件=${result.contextLoaded}`,
+        ].join(" ");
         return toolResult({
-          ok: false,
-          data: { errors: ["缺少 END_PROGRAM 结束标记"] },
+          ok: !failed,
+          data: {
+            engine: result.engine.id,
+            errorCount: counts.error,
+            warningCount: counts.warning,
+            infoCount: counts.info,
+            diagnostics,
+            context: {
+              files: result.contextLoaded,
+              truncated: input.contextTruncated,
+              ...(input.contextSkipped ? { skipped: input.contextSkipped } : {}),
+            },
+            elapsedMs: result.elapsedMs,
+            analyzer: {
+              ...(result.engine.detail ? { detail: result.engine.detail } : {}),
+              ...(result.engine.fallbackReason ? { fallbackReason: result.engine.fallbackReason } : {}),
+            },
+            summary,
+          },
+          ...(failed
+            ? {
+                error: `ST 校验未通过(${counts.error} 个 error);warning 只提示,不阻断。`,
+              }
+            : {}),
+          diagnostics: toProtocolDiagnostics(diagnostics),
           effect: "none",
           risk: "plan",
         });
-      }
-      if (code.includes("TON") && !code.includes("T#")) {
-        return toolResult({
-          ok: false,
-          data: { errors: ["使用了 TON 但未发现时间字面量(如 T#5s)"] },
-          effect: "none",
-          risk: "plan",
-        });
-      }
-      return contract({ errors: [] }, "plan");
-    },
+      }, "plan"),
   });
 
   // 会往磁盘写文件 → needsApproval:SDK 在真正执行前中断,由 UI 批准/拒绝
@@ -588,7 +699,8 @@ const SYSTEM_PROMPT =
   "你是工控行业的 PLC 编程助手，精通 IEC 61131-3。" +
   "编写程序前先调用 get_io_table 查询变量表，只使用表中已有的变量名。" +
   "生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，" +
-  "直到通过为止，最后把通过校验的代码展示给用户。" +
+  "直到工具回执显示 errorCount=0 为止(warning 不阻断交付,但要在最终答复里说明)," +
+    "最后把通过校验的代码展示给用户。" +
   '当用户明确要求"导出/保存为文件"时，调用 export_st_program。' +
   "你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、" +
   "search_files 搜索代码、write_file 写文件、run_command 执行命令" +
