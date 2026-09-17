@@ -749,6 +749,55 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// Stopping during resume preflight must abort the resumed planner too. This
+// covers a paused safe-restart run where the user types "继续" and stops again
+// before the SDK executor starts.
+{
+  let agentCalls = 0;
+  let plannerCalls = 0;
+  let firstAborted = false;
+  let secondAborted = false;
+  let firstPlannerStartedResolve;
+  let secondPlannerStartedResolve;
+  const firstPlannerStarted = new Promise((resolve) => { firstPlannerStartedResolve = resolve; });
+  const secondPlannerStarted = new Promise((resolve) => { secondPlannerStartedResolve = resolve; });
+  const test = await fixture(async () => {
+    agentCalls += 1;
+    return { status: 'completed', output: 'unexpected', usage };
+  }, async (_cfg, _text, signal) => {
+    plannerCalls += 1;
+    if (plannerCalls === 1) firstPlannerStartedResolve();
+    if (plannerCalls === 2) secondPlannerStartedResolve();
+    await new Promise((resolve, reject) => signal.addEventListener('abort', () => {
+      if (plannerCalls === 1) firstAborted = true;
+      if (plannerCalls === 2) secondAborted = true;
+      reject(Object.assign(new Error('planning aborted'), { name: 'AbortError' }));
+    }, { once: true }));
+  });
+  const starting = test.coordinator.start('stop resumed planning', config, 'key');
+  await firstPlannerStarted;
+  await test.coordinator.stop();
+  await starting;
+  const paused = await test.store.getLast();
+  if (!firstAborted || paused?.status !== 'paused' || paused.resumeStage !== 'planning') {
+    throw new Error('initial planner stop did not create a planning resume boundary');
+  }
+  const continuing = test.coordinator.continue('key', '继续');
+  await secondPlannerStarted;
+  await test.coordinator.stop();
+  await continuing;
+  const stoppedAgain = await test.store.getLast();
+  if (
+    !secondAborted ||
+    agentCalls !== 0 ||
+    stoppedAgain?.status !== 'paused' ||
+    stoppedAgain.resumeStage !== 'planning' ||
+    !stoppedAgain.canContinue
+  ) {
+    throw new Error('stop during resume preflight did not abort and preserve continuation');
+  }
+}
+
 // An immediate manual stop can happen before the SDK exposes a RunState. The
 // coordinator rolls back the partial turn and safely restarts it on continue.
 {

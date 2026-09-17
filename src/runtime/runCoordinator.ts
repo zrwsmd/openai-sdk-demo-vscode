@@ -394,6 +394,7 @@ export class RunCoordinator {
       if (!run.teamTask && this.planTask && config.orchestration !== 'team') {
         run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
+        await this.store.update(run);
         const planningController = new AbortController();
         this.transitionController = planningController;
         try {
@@ -644,8 +645,13 @@ export class RunCoordinator {
       }
       if (run.teamTask) this.emitTeamProgress(run, 'team.restored', '已恢复 Team 任务图');
       if (run.resumeStage) {
-        await this.resumePreflight(run, apiKey, generation);
-        if (this.isClearing(generation)) return;
+        const ready = await this.resumePreflight(run, apiKey, generation);
+        if (!ready || this.isClearing(generation)) return;
+      }
+      if (this.stopRequested) {
+        this.stopRequested = false;
+        await this.pausePending(run, false);
+        return;
       }
       await this.execute(run, apiKey, canResumeSdkState ? { initialState: run.state } : {});
     } catch (error) {
@@ -662,6 +668,11 @@ export class RunCoordinator {
     generation: number,
   ): Promise<void> {
     if (this.isRunInvalidated(generation)) return;
+    const active = await this.store.getActive();
+    if (!active || active.id !== run.id) {
+      if (this.stopRequested) this.stopRequested = false;
+      return;
+    }
     run.status = 'paused';
     run.canContinue = true;
     run.resumeStage = stage;
@@ -674,39 +685,52 @@ export class RunCoordinator {
     await this.audit('run_paused', run, { strategy: 'preflight', stage, error: run.error });
     this.emit({ type: 'paused', canContinue: true, canRetry: true, resumeStrategy: 'safe_restart' });
     this.emit({ type: 'idle' });
+    if (this.stopRequested) this.stopRequested = false;
   }
 
   private async resumePreflight(
     run: DurableRunRecord,
     apiKey: string,
     generation: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const stage = run.resumeStage;
-    if (!stage || this.isRunInvalidated(generation)) return;
+    if (!stage || this.isRunInvalidated(generation)) return false;
     const sessionItems = await this.session.getItems();
     if (stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
+      const routingController = new AbortController();
+      this.transitionController = routingController;
       try {
         run.teamTask = run.config.orchestration === 'team'
           ? createForcedTeamTask(run.userText)
-          : await this.routeTeamTask!({ ...run.config, apiKey }, run.userText, new AbortController().signal, sessionItems);
+          : await this.routeTeamTask!({ ...run.config, apiKey }, run.userText, routingController.signal, sessionItems);
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'routing', error, generation);
-        return;
+        return false;
+      } finally {
+        if (this.transitionController === routingController) this.transitionController = undefined;
       }
+      if (this.stopRequested || this.isRunInvalidated(generation)) return false;
       run.resumeStage = undefined;
       await this.store.update(run);
     }
     if (!run.teamTask && this.planTask && run.config.orchestration !== 'team') {
       run.resumeStage = 'planning';
+      await this.store.update(run);
+      const planningController = new AbortController();
+      this.transitionController = planningController;
       try {
-        run.plan = await this.planTask({ ...run.config, apiKey }, run.userText, new AbortController().signal, sessionItems);
+        run.plan = await this.planTask({ ...run.config, apiKey }, run.userText, planningController.signal, sessionItems);
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'planning', error, generation);
-        return;
+        return false;
+      } finally {
+        if (this.transitionController === planningController) this.transitionController = undefined;
       }
+      if (this.stopRequested || this.isRunInvalidated(generation)) return false;
       run.resumeStage = undefined;
       await this.store.update(run);
     }
+    return !this.stopRequested && !this.isRunInvalidated(generation);
   }
 
   private cancelPending(run: DurableRunRecord, notify: boolean): Promise<void> {

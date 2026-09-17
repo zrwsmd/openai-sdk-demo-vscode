@@ -25,6 +25,9 @@ let canRetry = false;
 let canContinue = false;
 let settingsRequestId = 0;
 let settingsSavePending = false;
+let pendingLocalUserText = null;
+let awaitingRunAck = false;
+let stopRequestedBeforeRunAck = false;
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 
@@ -51,6 +54,42 @@ function addMessage(kind, text) {
   messagesEl.appendChild(wrap);
   scrollBottom();
   return bubble;
+}
+
+function beginUserTurn(text, runId, reusePendingLocal = false) {
+  const displayText = String(text ?? '');
+  const hint = messagesEl.querySelector('.hint');
+  if (hint) hint.remove();
+  const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
+  if (!reuseExisting) addMessage('user', displayText);
+  currentRunId = runId || null;
+  agentText = '';
+  pendingAgentText = '';
+  pendingFinalText = null;
+  pendingToolCount = 0;
+  hadToolThisTurn = false;
+  canRetry = false;
+  canContinue = false;
+  if (!reuseExisting) {
+    agentBubble = addMessage('agent', '');
+    agentBubble.classList.add('streaming');
+  }
+  setRuntimeMode('running');
+  if (reusePendingLocal) pendingLocalUserText = null;
+}
+
+function clearPendingRunAck() {
+  awaitingRunAck = false;
+  stopRequestedBeforeRunAck = false;
+}
+
+function acknowledgeRunStart() {
+  const shouldStop = stopRequestedBeforeRunAck;
+  clearPendingRunAck();
+  if (shouldStop) {
+    setRuntimeMode('stopping');
+    vscode.postMessage({ type: 'stop' });
+  }
 }
 
 function addNote(className, text) {
@@ -313,12 +352,17 @@ function send() {
   if (!text) return;
   inputEl.value = '';
   autoGrow();
+  pendingLocalUserText = text;
+  awaitingRunAck = true;
+  stopRequestedBeforeRunAck = false;
+  beginUserTurn(text);
   vscode.postMessage({ type: 'send', text });
 }
 
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', () => {
   if (runtimeMode !== 'running' && runtimeMode !== 'awaiting') return;
+  if (awaitingRunAck && !currentRunId) stopRequestedBeforeRunAck = true;
   setRuntimeMode('stopping');
   vscode.postMessage({ type: 'stop' });
 });
@@ -722,21 +766,13 @@ window.addEventListener('message', (event) => {
   }
   switch (msg.type) {
     case 'user': {
-      const hint = messagesEl.querySelector('.hint');
-      if (hint) hint.remove();
-      addMessage('user', msg.text);
-      currentRunId = msg.runId || null;
-      agentText = '';
-      pendingAgentText = '';
-      pendingFinalText = null;
-      pendingToolCount = 0;
-      hadToolThisTurn = false;
-      canContinue = false;
-      agentBubble = addMessage('agent', '');
-      agentBubble.classList.add('streaming');
+      beginUserTurn(msg.text, msg.runId, true);
+      if (msg.runId) acknowledgeRunStart();
       break;
     }
     case 'done': {
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       flushPendingAgentText();
       const waitingForToolResult = pendingToolCount > 0;
       const empty = !agentText && !waitingForToolResult;
@@ -761,6 +797,8 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'error':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) agentBubble.remove();
@@ -783,7 +821,8 @@ window.addEventListener('message', (event) => {
       break;
     case 'busy':
       currentRunId = msg.runId || currentRunId;
-      setRuntimeMode('running');
+      if (msg.runId) acknowledgeRunStart();
+      if (runtimeMode !== 'stopping') setRuntimeMode('running');
       break;
     case 'planning':
       // Planning is an internal routing step. Keep the run busy so stop/cancel
@@ -795,6 +834,8 @@ window.addEventListener('message', (event) => {
       inputEl.focus();
       break;
     case 'cleared':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       messagesEl.textContent = '';
       agentBubble = null;
       agentText = '';
@@ -810,6 +851,8 @@ window.addEventListener('message', (event) => {
       break;
     case 'history': {
       // 面板重开:host 回放持久化历史
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       messagesEl.textContent = '';
       agentBubble = null;
       agentText = '';
@@ -844,6 +887,8 @@ window.addEventListener('message', (event) => {
       showApprovals(msg.runId, msg.approvals);
       break;
     case 'runAttached': {
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
       const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
       if (lastUser !== msg.userText) addMessage('user', msg.userText);
@@ -877,12 +922,15 @@ window.addEventListener('message', (event) => {
         agentBubble = addMessage('agent', '');
         agentBubble.classList.add('streaming');
       }
-      setRuntimeMode('running');
+      if (msg.runId) acknowledgeRunStart();
+      else setRuntimeMode('running');
       break;
     case 'stopping':
       setRuntimeMode('stopping');
       break;
     case 'cancelled':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) agentBubble.remove();
@@ -896,6 +944,8 @@ window.addEventListener('message', (event) => {
       setRuntimeMode('idle');
       break;
     case 'paused':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) agentBubble.remove();
@@ -913,6 +963,8 @@ window.addEventListener('message', (event) => {
       setRuntimeMode('idle');
       break;
     case 'refused':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) agentBubble.remove();
@@ -926,6 +978,8 @@ window.addEventListener('message', (event) => {
       setRuntimeMode('idle');
       break;
     case 'runRecovered':
+      clearPendingRunAck();
+      pendingLocalUserText = null;
       addNote('error-note', msg.message);
       canRetry = msg.canRetry === true;
       canContinue = false;
