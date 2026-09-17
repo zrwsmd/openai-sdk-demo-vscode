@@ -209,6 +209,16 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8b] 工具成功但模型最终 schema message 为空 → 后端用工具结果合成兜底文字
+{
+  await fs.writeFile(path.join(dir, 'lk.txt'), '兜底内容', 'utf8');
+  const r = await runTestTurn('空总结读取 lk.txt 文件里面的内容', noApproval);
+  console.log('[8b] 空总结读取兜底:输出 =', JSON.stringify(r.output));
+  if (!r.output.includes('已读取 lk.txt') || !r.output.includes('兜底内容')) {
+    throw new Error('读取工具成功但空 message 时没有生成兜底输出');
+  }
+}
+
 // [9] 新会话:clearSession 后文件清空
 {
   const asked = [];
@@ -237,7 +247,7 @@ async function runTestTurn(userText, decide) {
 }
 
 // [10] 复现"批准后无反馈"场景:批准后模型在工具结果回喂后返回空 completion(真实网关坏行为)。
-//     内核仍必须透出 tool_result 事件(带文件路径),UI 才有"✓ 成功"可显示;模型文本为空但不算出错
+//     内核必须透出 tool_result 事件,并用工具结果合成兜底总结,避免 UI 显示"模型无文本"。
 {
   const r = await runTestTurn('静默导出程序', async () => true);
   const results = r.events.filter((e) => e.type === 'tool.completed');
@@ -246,7 +256,9 @@ async function runTestTurn(userText, decide) {
     '| tool.completed =', JSON.stringify(results.map((e) => ({ n: e.payload.toolName, ok: e.payload.ok }))),
     '| 模型调用 =', r.usage.requests,
   );
-  if (r.output.length !== 0) throw new Error('场景9 预期模型无文本输出');
+  if (!r.output.includes('已导出') || !r.output.includes('StarDelta.st')) {
+    throw new Error('场景9 未用工具结果生成兜底输出');
+  }
   const okResult = results.find((e) => e.payload.toolName === 'export_st_program' && e.payload.ok);
   if (!okResult || !okResult.payload.summary.includes('StarDelta.st')) throw new Error('场景9 未透出成功的工具回执');
   // 熔断生效:空回复重试被截停在个位数(SDK 原生会一路重试到 maxTurns=10)
@@ -255,14 +267,16 @@ async function runTestTurn(userText, decide) {
 }
 
 // [11] 只吐 reasoning 不吐正文(套壳推理模型常见坏行为):诊断日志必须记录到 推理>0/正文=0,
-//      熔断照常截停,工具回执照常透出
+//      熔断照常截停,工具回执照常透出,并基于成功工具结果合成兜底总结
 {
   const before = diagLines.length;
   const r = await runTestTurn('思考导出程序', async () => true);
   const myLines = diagLines.slice(before);
   const respLine = myLines.find((l) => l.includes('正文=0') && /推理=[1-9]/.test(l));
   console.log('[10] 只思考不说话:模型文本长度 =', r.output.length, '| tool.completed ok =', r.events.some((e) => e.type === 'tool.completed' && e.payload.ok), '| 诊断行:', (respLine ?? myLines.at(-1) ?? '(无)').slice(0, 90));
-  if (r.output.length !== 0) throw new Error('场景10 预期无正文');
+  if (!r.output.includes('已导出') || !r.output.includes('StarDelta.st')) {
+    throw new Error('场景10 未用工具结果生成兜底输出');
+  }
   if (!respLine) throw new Error('场景10 诊断日志未识别出"正文0/推理>0"的响应');
   if (!r.events.some((e) => e.type === 'tool.completed' && e.payload.ok)) throw new Error('场景10 工具回执丢失');
 }

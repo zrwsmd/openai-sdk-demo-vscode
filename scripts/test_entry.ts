@@ -17,4 +17,5 @@ export * from '../src/policy/actionPolicy';
 export * from '../src/workspace/workspaceScope';
 export * from '../src/runtime/modelAdapter';
 export * from '../src/runtime/taskPlan';
+export * from '../src/runtime/contextManager';
 export * from '../src/app/settingsProfiles';

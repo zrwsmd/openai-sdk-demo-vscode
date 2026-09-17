@@ -138,6 +138,15 @@ export class JsonFileSession implements Session {
     });
   }
 
+  /** Atomically replace the complete stored history, preserving the session id. */
+  async replaceItems(items: AgentInputItem[]): Promise<void> {
+    await this.enqueue(async () => {
+      await this.loadFromDisk(true);
+      this.items = items.map((item) => ({ ...item }));
+      await this.persistSnapshot();
+    });
+  }
+
   /** Restore the session to a turn boundary before retrying a failed/cancelled run. */
   async truncate(length: number): Promise<void> {
     await this.enqueue(async () => {

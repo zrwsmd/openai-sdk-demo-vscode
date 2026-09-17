@@ -1151,7 +1151,7 @@ export type TurnUsage = UsageSummary;
 /** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
 export const MAX_TURNS = 10;
 
-function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
+export function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
   return createModelAdapter(cfg, {
     fetchImpl: makeLoggingFetch() as typeof fetch,
     createChatCompletionsModel: () => {
@@ -1552,6 +1552,53 @@ export async function runAgent(
     return verified;
   };
 
+  const fallbackRequiredToolMessage = (): string | undefined => {
+    if (!requiredTool) return undefined;
+    const call = [...toolResults.values()]
+      .reverse()
+      .find((item) => item.name === requiredTool && item.result.ok);
+    if (!call) return undefined;
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(call.args) as Record<string, unknown>;
+    } catch {
+      args = {};
+    }
+    const data = call.result.data && typeof call.result.data === "object"
+      ? call.result.data as Record<string, unknown>
+      : {};
+    if (requiredTool === "read_file") {
+      const pathValue = typeof args.path === "string" ? args.path : "目标文件";
+      const totalLines = typeof data.totalLines === "number" ? ` · ${data.totalLines} 行` : "";
+      const content = typeof data.content === "string" ? data.content : "";
+      if (content && content.length <= 2_000) {
+        return `已读取 ${pathValue}${totalLines}，内容如下：\n${content}`;
+      }
+      return `已读取 ${pathValue}${totalLines}${content ? "，内容较长，请查看上方工具执行详情。" : "。"}`;
+    }
+    if (requiredTool === "write_file") {
+      const file = typeof data.file === "string"
+        ? data.file
+        : typeof args.path === "string" ? args.path : "目标文件";
+      const bytes = typeof data.bytes === "number" ? ` · ${data.bytes} 字节` : "";
+      return `已写入 ${file}${bytes}。`;
+    }
+    if (requiredTool === "export_st_program") {
+      const file = typeof data.file === "string" ? data.file : ".st 文件";
+      return `已导出 ${file}。`;
+    }
+    if (requiredTool === "run_command") {
+      const exitCode = typeof data.exitCode === "number" || data.exitCode === null
+        ? `退出码 ${data.exitCode}`
+        : "命令已执行";
+      const commandOutput = typeof data.output === "string" && data.output.trim()
+        ? `，输出：${data.output.trim().slice(0, 1_000)}`
+        : "";
+      return `${exitCode}${commandOutput}`;
+    }
+    return undefined;
+  };
+
   const hasSuccessfulRequiredAction = (): boolean => {
     if (!requiredTool) return true;
     return [...toolResults.values()].some(
@@ -1875,8 +1922,12 @@ export async function runAgent(
       }
       assertPlanCompleted();
       const verifiedArtifacts = await verifyRequiredActions();
+      const message = structuredOutput.message.trim()
+        ? structuredOutput.message
+        : fallbackRequiredToolMessage() ?? structuredOutput.message;
       const canonicalOutput: IndustrialAgentOutput = {
         ...structuredOutput,
+        message,
         artifacts: [
           ...structuredOutput.artifacts,
           ...verifiedArtifacts.map((artifact) => ({
@@ -1901,7 +1952,7 @@ export async function runAgent(
       });
       return {
         result,
-        output: structuredOutput.message,
+        output: canonicalOutput.message,
         usage,
         status: "completed",
       };

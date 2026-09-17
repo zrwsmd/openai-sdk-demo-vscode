@@ -21,6 +21,11 @@ import type { AuditEventType, AuditSink } from '../observability/audit';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 import {
+  ensureContextCompacted,
+  type ContextCompactionResult,
+  type ContextManagerOptions,
+} from './contextManager';
+import {
   failTaskPlan,
   pauseTaskPlan,
   restartTaskPlan,
@@ -74,13 +79,21 @@ export interface RunCoordinatorDependencies {
   reviewTeamTask?: typeof reviewTeamTask;
   verifyTeamTask?: typeof verifyTeamTask;
   audit?: AuditSink;
+  compactContext?: ContextCompactor;
 }
 
 export interface RecoverableSession extends Session {
   getItems(limit?: number): Promise<AgentInputItem[]>;
   clearSession(): Promise<void>;
   truncate(length: number): Promise<void>;
+  replaceItems(items: AgentInputItem[]): Promise<void>;
 }
+
+export type ContextCompactor = (
+  session: RecoverableSession,
+  config: DurableRunConfig & { apiKey: string },
+  options?: ContextManagerOptions,
+) => Promise<ContextCompactionResult>;
 
 /** A node must not append its internal prompt/result to the user session. */
 class DagWorkerSession implements Session {
@@ -132,6 +145,7 @@ export class RunCoordinator {
   private readonly reviewTeamTask?: typeof reviewTeamTask;
   private readonly verifyTeamTask?: typeof verifyTeamTask;
   private readonly auditSink?: AuditSink;
+  private readonly compactContext: ContextCompactor;
   private busy = false;
   private transitioning = false;
   private controller?: AbortController;
@@ -163,6 +177,7 @@ export class RunCoordinator {
     this.reviewTeamTask = dependencies.reviewTeamTask ?? reviewTeamTask;
     this.verifyTeamTask = dependencies.verifyTeamTask ?? verifyTeamTask;
     this.auditSink = dependencies.audit;
+    this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
   }
 
   async initialize(): Promise<void> {
@@ -267,12 +282,37 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
-      const sessionItems = await this.session.getItems();
+      let sessionItems = await this.session.getItems();
       const run = await this.store.begin(
         userText,
         config,
         sessionItems.length,
       );
+      if (this.isClearing(generation)) return;
+      const compactionController = new AbortController();
+      this.transitionController = compactionController;
+      const compaction = await this.compactContext(
+        this.session,
+        { ...config, apiKey },
+        { signal: compactionController.signal },
+      );
+      if (this.transitionController === compactionController) this.transitionController = undefined;
+      if (this.isClearing(generation)) return;
+      if (this.stopRequested || compaction.reason === 'aborted') {
+        this.stopRequested = false;
+        await this.pausePending(run, false);
+        return;
+      }
+      if (compaction.compacted) {
+        this.writeLog(
+          `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
+        );
+        sessionItems = await this.session.getItems();
+        run.sessionItemCountBefore = sessionItems.length;
+        await this.store.update(run);
+      } else if (compaction.error) {
+        this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
+      }
       if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;

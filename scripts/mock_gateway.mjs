@@ -366,6 +366,13 @@ const server = http.createServer((req, res) => {
       const text = '好的,已按你的要求导出为 .st 文件。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
       else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('空总结读取')) {
+      await streamText(res, model, JSON.stringify({
+        message: '',
+        diagnostics: [],
+        artifacts: [{ kind: 'file', name: 'lk.txt', uri: null, mimeType: null, content: null }],
+        data: null,
+      }));
     } else if (last.role === 'tool' && userText.includes('读取')) {
       const text = '已读取 lk.txt 文件内容。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
