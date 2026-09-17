@@ -25,6 +25,8 @@ let canRetry = false;
 let canContinue = false;
 let settingsRequestId = 0;
 let settingsSavePending = false;
+const toolRuns = new Map();
+const anonymousToolRuns = new Map();
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -68,50 +70,171 @@ function parseJsonValue(value) {
 function toolArgsSummary(name, args) {
   const parsed = parseJsonValue(args);
   if (!parsed || typeof parsed !== 'object') return '';
+  if (name === 'read_file' && typeof parsed.path === 'string') return `文件 ${parsed.path}`;
   if (name === 'write_file' && typeof parsed.path === 'string') {
     const bytes = typeof parsed.content === 'string' ? new TextEncoder().encode(parsed.content).length : 0;
     return `文件 ${parsed.path}${bytes ? ` · ${bytes} 字节` : ''}`;
+  }
+  if (name === 'list_files' && typeof parsed.dir === 'string') return `目录 ${parsed.dir}`;
+  if (name === 'search_files' && typeof parsed.text === 'string') {
+    return `搜索：${parsed.text}${typeof parsed.glob === 'string' ? ` · ${parsed.glob}` : ''}`;
   }
   if (name === 'export_st_program') return '导出 IEC 61131-3 ST 程序';
   if (name === 'run_command' && typeof parsed.command === 'string') return `命令：${parsed.command}`;
   return '';
 }
 
-function formatToolResult(name, summary, result) {
+function truncateText(text, max = 140) {
+  const compact = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
+}
+
+function byteLength(text) {
+  return new TextEncoder().encode(String(text ?? '')).length;
+}
+
+function durationLabel(durationMs) {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return '';
+  if (durationMs < 1000) return `耗时 ${Math.round(durationMs)}ms`;
+  return `耗时 ${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+}
+
+function toolRunKey(payload) {
+  return payload.callId || payload.itemId || '';
+}
+
+function rememberToolRun(name, payload) {
+  const run = {
+    name,
+    args: typeof payload.arguments === 'string' ? payload.arguments : '',
+    startedAt: Date.now(),
+  };
+  const key = toolRunKey(payload);
+  if (key) {
+    toolRuns.set(key, run);
+  } else {
+    const queue = anonymousToolRuns.get(name) || [];
+    queue.push(run);
+    anonymousToolRuns.set(name, queue);
+  }
+  return run;
+}
+
+function takeToolRun(name, payload) {
+  const key = toolRunKey(payload);
+  if (key && toolRuns.has(key)) {
+    const run = toolRuns.get(key);
+    toolRuns.delete(key);
+    return run;
+  }
+  const queue = anonymousToolRuns.get(name);
+  if (queue?.length) {
+    const run = queue.shift();
+    if (!queue.length) anonymousToolRuns.delete(name);
+    return run;
+  }
+  return undefined;
+}
+
+function startToolHeadline(name, args) {
+  const target = toolArgsSummary(name, args);
+  if (name === 'read_file') return `正在读取${target ? ` · ${target.replace(/^文件 /, '')}` : '文件'}`;
+  if (name === 'write_file') return `正在写入${target ? ` · ${target.replace(/^文件 /, '')}` : '文件'}`;
+  if (name === 'list_files') return `正在列出${target ? ` · ${target.replace(/^目录 /, '')}` : '文件'}`;
+  if (name === 'search_files') return `正在搜索${target ? ` · ${target.replace(/^搜索：/, '')}` : '文件'}`;
+  if (name === 'run_command') return `正在运行${target ? ` · ${target.replace(/^命令：/, '')}` : '命令'}`;
+  if (name === 'export_st_program') return '正在导出 ST 程序';
+  return `正在执行 · ${name}`;
+}
+
+function formatToolResult(name, summary, result, run, durationMs) {
   const parsed = result && typeof result === 'object'
     ? result
     : parseJsonValue(summary);
+  const args = parseJsonValue(run?.args);
+  const duration = durationLabel(durationMs);
+  const metaParts = [name, duration].filter(Boolean);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const text = typeof summary === 'string' ? summary.trim() : '';
     return {
       headline: text && !/^[\[{]/.test(text) ? text : '工具执行成功',
+      summary: '',
+      meta: metaParts.join(' · '),
       detail: '',
     };
   }
   if (parsed.ok === false) {
-    return { headline: parsed.error ? `执行失败：${parsed.error}` : '执行失败', detail: parsed };
+    return {
+      headline: parsed.error ? `执行失败：${parsed.error}` : '执行失败',
+      summary: toolArgsSummary(name, run?.args),
+      meta: metaParts.join(' · '),
+      detail: parsed,
+    };
   }
   const data = parsed.data && typeof parsed.data === 'object' ? parsed.data : {};
   if (name === 'read_file') {
+    const path = args && typeof args.path === 'string' ? args.path : '文件';
     const lines = typeof data.totalLines === 'number' ? ` · ${data.totalLines} 行` : '';
-    return { headline: `已读取文件${lines}`, detail: parsed };
+    const content = typeof data.content === 'string' ? data.content : '';
+    const bytes = content ? ` · ${byteLength(content)} 字节` : '';
+    return {
+      headline: `已读取 ${path}${lines}`,
+      summary: content ? `结果摘要：${truncateText(content)}` : '',
+      meta: [...metaParts, bytes.replace(/^ · /, '')].filter(Boolean).join(' · '),
+      detail: parsed,
+    };
   }
   if (name === 'write_file' && typeof data.file === 'string') {
+    const file = args && typeof args.path === 'string' ? args.path : data.file;
     return {
-      headline: `已写入 ${data.file}${typeof data.bytes === 'number' ? ` · ${data.bytes} 字节` : ''}`,
+      headline: `已写入 ${file}${typeof data.bytes === 'number' ? ` · ${data.bytes} 字节` : ''}`,
+      summary: '',
+      meta: metaParts.join(' · '),
       detail: parsed,
     };
   }
   if (name === 'export_st_program' && typeof data.file === 'string') {
-    return { headline: `已导出 ${data.file}`, detail: parsed };
+    return {
+      headline: `已导出 ${data.file}`,
+      summary: '',
+      meta: metaParts.join(' · '),
+      detail: parsed,
+    };
   }
-  if (name === 'run_command' && data && typeof data.exitCode === 'number') {
-    return { headline: `命令执行完成 · 退出码 ${data.exitCode}`, detail: parsed };
+  if (name === 'run_command' && data && (typeof data.exitCode === 'number' || data.exitCode === null)) {
+    const output = typeof data.output === 'string' ? data.output : '';
+    return {
+      headline: data.exitCode === 0 ? '命令执行成功 · 退出码 0' : `命令执行结束 · 退出码 ${data.exitCode}`,
+      summary: output ? `输出摘要：${truncateText(output)}` : '',
+      meta: metaParts.join(' · '),
+      detail: parsed,
+    };
   }
-  return { headline: '工具执行成功', detail: parsed };
+  if (name === 'list_files' && Array.isArray(data.files)) {
+    return {
+      headline: `已列出文件 · ${data.files.length} 项`,
+      summary: `结果摘要：${truncateText(data.files.slice(0, 5).join('、'))}`,
+      meta: metaParts.join(' · '),
+      detail: parsed,
+    };
+  }
+  if (name === 'search_files' && Array.isArray(data.matches)) {
+    return {
+      headline: `搜索完成 · ${data.matches.length} 条结果`,
+      summary: data.matches.length ? `结果摘要：${truncateText(data.matches.slice(0, 3).join('；'))}` : '',
+      meta: metaParts.join(' · '),
+      detail: parsed,
+    };
+  }
+  return {
+    headline: '工具执行成功',
+    summary: '',
+    meta: metaParts.join(' · '),
+    detail: parsed,
+  };
 }
 
-function addToolResult(name, ok, summary, result) {
+function addToolResult(name, ok, summary, result, run, durationMs) {
   const note = document.createElement('div');
   note.className = `tool-result ${ok ? 'success' : 'failure'}`;
   const icon = document.createElement('span');
@@ -119,17 +242,24 @@ function addToolResult(name, ok, summary, result) {
   icon.textContent = ok ? '✓' : '!';
   const body = document.createElement('div');
   body.className = 'tool-result-body';
-  const formatted = formatToolResult(name, summary, result);
+  const formatted = formatToolResult(name, summary, result, run, durationMs);
   if (!ok) formatted.headline = formatted.headline.startsWith('执行失败')
     ? formatted.headline
     : `执行失败：${formatted.headline}`;
   const title = document.createElement('div');
   title.className = 'tool-result-title';
   title.textContent = formatted.headline;
+  body.appendChild(title);
+  if (formatted.summary) {
+    const summaryEl = document.createElement('div');
+    summaryEl.className = 'tool-result-summary';
+    summaryEl.textContent = formatted.summary;
+    body.appendChild(summaryEl);
+  }
   const meta = document.createElement('div');
   meta.className = 'tool-result-meta';
-  meta.textContent = name;
-  body.append(title, meta);
+  meta.textContent = formatted.meta || name;
+  body.appendChild(meta);
   if (formatted.detail) {
     const details = document.createElement('details');
     const summaryEl = document.createElement('summary');
@@ -417,7 +547,8 @@ function handleProtocolEvent(event) {
     case 'tool.started': {
       const name = payload.toolName || 'tool';
       if (name === 'report_plan_progress') break;
-      addNote('tool-note', `正在执行 · ${name}`);
+      rememberToolRun(name, payload);
+      addNote('tool-note', startToolHeadline(name, payload.arguments));
       hadToolThisTurn = true;
       pendingToolCount += 1;
       if (agentText) {
@@ -433,7 +564,12 @@ function handleProtocolEvent(event) {
       const summary = typeof payload.summary === 'string'
         ? payload.summary
         : JSON.stringify(payload.result ?? '');
-      addToolResult(name, payload.ok === true, summary, payload.result);
+      const run = takeToolRun(name, payload);
+      const measuredDuration = run ? Date.now() - run.startedAt : undefined;
+      const durationMs = typeof payload.durationMs === 'number'
+        ? payload.durationMs
+        : measuredDuration;
+      addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
       break;
@@ -469,7 +605,14 @@ function handleProtocolEvent(event) {
     case 'approval.requested':
     case 'approval.resolved':
     case 'usage.updated':
+    case 'reasoning.updated':
+      // Reasoning is not a user-facing execution fact. Show tool calls,
+      // file/command targets and results instead.
+      break;
     case 'run.started':
+      toolRuns.clear();
+      anonymousToolRuns.clear();
+      break;
     case 'run.progress':
       if (typeof payload.stage === 'string' && payload.stage.startsWith('plan.')) {
         if (payload.stage === 'plan.created' && payload.plan && Array.isArray(payload.plan.steps)) {
