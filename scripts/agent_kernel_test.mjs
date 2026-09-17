@@ -219,6 +219,31 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8c] 同一轮多个独立工具调用 → 请求开启 parallel_tool_calls,SDK 并发执行并回喂全部结果
+{
+  await fs.writeFile(path.join(dir, 'pa.txt'), '并行A', 'utf8');
+  await fs.writeFile(path.join(dir, 'pb.txt'), '并行B', 'utf8');
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn('并行读取 pa.txt 和 pb.txt', noApproval);
+  const started = r.events.filter((e) => e.type === 'tool.started' && e.payload.toolName === 'read_file');
+  const completed = r.events.filter((e) => e.type === 'tool.completed' && e.payload.toolName === 'read_file');
+  const contents = completed.map((e) => e.payload.result?.data?.content).sort();
+  const requestLines = diagLines.slice(capabilityLogStart).filter((line) => line.includes('[req]'));
+  console.log('[8c] 并行工具:started =', started.length, '| completed =', completed.length, '| 请求 =', requestLines[0] ?? '(无)');
+  if (!requestLines[0]?.includes('parallel=true')) {
+    throw new Error('并行工具请求未开启 parallel_tool_calls');
+  }
+  if (started.length !== 2 || completed.length !== 2) {
+    throw new Error('同一轮并行读取没有产生两个 read_file 工具调用和回执');
+  }
+  if (contents.join('|') !== '并行A|并行B') {
+    throw new Error(`并行读取结果不完整: ${contents.join('|')}`);
+  }
+  if (!r.output.includes('pa.txt') || !r.output.includes('pb.txt')) {
+    throw new Error('并行读取最终总结缺少文件名');
+  }
+}
+
 // [9] 新会话:clearSession 后文件清空
 {
   const asked = [];

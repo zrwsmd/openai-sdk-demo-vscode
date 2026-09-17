@@ -9,6 +9,7 @@ import http from 'node:http';
 
 const REPLY = '你好!我是 PLC 编程助手(插件内核验证),请告诉我你的控制任务。';
 const rejectCombined = process.env.MOCK_REJECT_COMBINED === '1';
+const rejectParallel = process.env.MOCK_REJECT_PARALLEL === '1';
 const ignoreCombinedToolChoice = process.env.MOCK_IGNORE_COMBINED === '1';
 const ST_CODE = [
   'PROGRAM StarDelta',
@@ -43,6 +44,17 @@ function toolCallChunk(model, name = 'get_io_table', args = '{}') {
   });
 }
 
+function multiToolCallChunk(model, calls) {
+  return chunk(model, {
+    tool_calls: calls.map((call, index) => ({
+      index,
+      id: `call_mock_${++seq}`,
+      type: 'function',
+      function: { name: call.name, arguments: call.args },
+    })),
+  });
+}
+
 async function streamText(res, model, text) {
   for (const ch of text) {
     sse(res, chunk(model, { content: ch }));
@@ -73,6 +85,14 @@ function endWithToolCall(res, model) {
 
 function endWithNamedToolCall(res, model, name, args) {
   sse(res, toolCallChunk(model, name, args));
+  sse(res, chunk(model, {}, 'tool_calls'));
+  sse(res, usageChunk(model, 90, 12));
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+function endWithNamedToolCalls(res, model, calls) {
+  sse(res, multiToolCallChunk(model, calls));
   sse(res, chunk(model, {}, 'tool_calls'));
   sse(res, usageChunk(model, 90, 12));
   res.write('data: [DONE]\n\n');
@@ -296,6 +316,17 @@ const server = http.createServer((req, res) => {
       }));
       return;
     }
+    if (rejectParallel && req_body.parallel_tool_calls) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          message: 'parallel_tool_calls is not supported by this mock gateway',
+          type: 'invalid_request_error',
+          code: 'unsupported_parallel_tool_calls',
+        },
+      }));
+      return;
+    }
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     sse(res, chunk(model, { role: 'assistant' }));
@@ -342,6 +373,11 @@ const server = http.createServer((req, res) => {
       endWithNamedToolCall(res, model, 'run_command', JSON.stringify({
         command: 'node -e "setTimeout(() => {}, 5000)"',
       }));
+    } else if (userText.includes('并行读取') && last.role !== 'tool') {
+      endWithNamedToolCalls(res, model, [
+        { name: 'read_file', args: JSON.stringify({ path: 'pa.txt' }) },
+        { name: 'read_file', args: JSON.stringify({ path: 'pb.txt' }) },
+      ]);
     } else if (userText.includes('读取') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'lk.txt' }));
     } else if (last.role === 'tool' && userText.includes('思考')) {
@@ -364,6 +400,10 @@ const server = http.createServer((req, res) => {
       res.end();
     } else if (last.role === 'tool' && userText.includes('导出')) {
       const text = '好的,已按你的要求导出为 .st 文件。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('并行读取')) {
+      const text = '已并行读取 pa.txt 和 pb.txt。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
       else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('空总结读取')) {

@@ -749,11 +749,17 @@ export type GatewayStructuredToolChoiceSupport =
   | "supported"
   | "unsupported";
 
+export type GatewayParallelToolCallsSupport =
+  | "unknown"
+  | "supported"
+  | "unsupported";
+
 export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   private emptyStreak = 0;
   private requiredToolOnce?: RequiredAgentTool;
   private structuredToolChoiceSupport: GatewayStructuredToolChoiceSupport =
     "unknown";
+  private parallelToolCallsSupport: GatewayParallelToolCallsSupport = "unknown";
 
   /** 每轮用户消息开始时清零,避免跨轮误伤 */
   resetEmptyStreak(): void {
@@ -769,6 +775,10 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     return this.structuredToolChoiceSupport;
   }
 
+  get parallelToolCallsCapability(): GatewayParallelToolCallsSupport {
+    return this.parallelToolCallsSupport;
+  }
+
   private async *streamWithCapabilityNegotiation(
     effectiveRequest: any,
     fallbackRequest: any,
@@ -776,10 +786,35 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     requiredTool?: RequiredAgentTool,
   ): AsyncGenerator<any> {
     if (!shouldNegotiate) {
-      for await (const ev of super.getStreamedResponse(
-        effectiveRequest,
-      ) as AsyncIterable<any>) {
-        yield ev;
+      let sawEvent = false;
+      try {
+        for await (const ev of super.getStreamedResponse(
+          effectiveRequest,
+        ) as AsyncIterable<any>) {
+          sawEvent = true;
+          if (
+            this.parallelToolCallsSupport === "unknown" &&
+            hasParallelToolCalls(effectiveRequest)
+          ) {
+            this.parallelToolCallsSupport = "supported";
+            agentLog("[capability] gateway supports parallel_tool_calls");
+          }
+          yield ev;
+        }
+      } catch (error) {
+        if (!sawEvent && isParallelToolCallsConflict(error)) {
+          this.parallelToolCallsSupport = "unsupported";
+          agentLog(
+            "[capability] gateway rejected parallel_tool_calls; retrying without it",
+          );
+          for await (const ev of super.getStreamedResponse(
+            withoutParallelToolCalls(effectiveRequest),
+          ) as AsyncIterable<any>) {
+            yield ev;
+          }
+          return;
+        }
+        throw error;
       }
       return;
     }
@@ -792,6 +827,13 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
         effectiveRequest,
       ) as AsyncIterable<any>) {
         sawEvent = true;
+        if (
+          this.parallelToolCallsSupport === "unknown" &&
+          hasParallelToolCalls(effectiveRequest)
+        ) {
+          this.parallelToolCallsSupport = "supported";
+          agentLog("[capability] gateway supports parallel_tool_calls");
+        }
         if (!sawRequiredTool) {
           bufferedEvents.push(ev);
           sawRequiredTool =
@@ -826,6 +868,24 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
       for (const bufferedEvent of bufferedEvents) yield bufferedEvent;
     } catch (error) {
       if (
+        !sawEvent &&
+        isParallelToolCallsConflict(error)
+      ) {
+        this.parallelToolCallsSupport = "unsupported";
+        agentLog(
+          "[capability] gateway rejected parallel_tool_calls; retrying without it",
+        );
+        for await (const ev of this.streamWithCapabilityNegotiation(
+          withoutParallelToolCalls(effectiveRequest),
+          withoutParallelToolCalls(fallbackRequest),
+          shouldNegotiate,
+          requiredTool,
+        ) as AsyncIterable<any>) {
+          yield ev;
+        }
+        return;
+      }
+      if (
         !shouldNegotiate ||
         sawEvent ||
         !isStructuredToolChoiceConflict(error)
@@ -859,14 +919,22 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     const shouldNegotiate = Boolean(
       requiredTool && hasStructuredOutput(request.outputType),
     );
-    const effectiveRequest =
+    const structuredEffectiveRequest =
       shouldNegotiate && this.structuredToolChoiceSupport === "unsupported"
         ? withoutStructuredOutput(forcedRequest)
         : forcedRequest;
+    const effectiveRequest =
+      this.parallelToolCallsSupport === "unsupported"
+        ? withoutParallelToolCalls(structuredEffectiveRequest)
+        : structuredEffectiveRequest;
+    const fallbackRequest =
+      this.parallelToolCallsSupport === "unsupported"
+        ? withoutParallelToolCalls(withoutStructuredOutput(forcedRequest))
+        : withoutStructuredOutput(forcedRequest);
     let sawOutput = false;
     for await (const ev of this.streamWithCapabilityNegotiation(
       effectiveRequest,
-      withoutStructuredOutput(forcedRequest),
+      fallbackRequest,
       shouldNegotiate,
       requiredTool,
     ) as AsyncIterable<any>) {
@@ -898,6 +966,19 @@ function withoutStructuredOutput(request: any): any {
   return {
     ...request,
     outputType: "text",
+  };
+}
+
+function hasParallelToolCalls(request: any): boolean {
+  return request?.modelSettings?.parallelToolCalls === true;
+}
+
+function withoutParallelToolCalls(request: any): any {
+  const { parallelToolCalls: _parallelToolCalls, ...modelSettings } =
+    request?.modelSettings ?? {};
+  return {
+    ...request,
+    modelSettings,
   };
 }
 
@@ -965,6 +1046,37 @@ function isStructuredToolChoiceConflict(error: unknown): boolean {
   return mentionsFormat && mentionsToolChoice && describesConflict;
 }
 
+function isParallelToolCallsConflict(error: unknown): boolean {
+  const value = error as {
+    status?: unknown;
+    message?: unknown;
+    error?: { message?: unknown; code?: unknown };
+    body?: { error?: { message?: unknown; code?: unknown } };
+    response?: { data?: { error?: { message?: unknown; code?: unknown } } };
+  };
+  const status = typeof value?.status === "number" ? value.status : undefined;
+  const text = [
+    value?.message,
+    value?.error?.message,
+    value?.error?.code,
+    value?.body?.error?.message,
+    value?.body?.error?.code,
+    value?.response?.data?.error?.message,
+    value?.response?.data?.error?.code,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+  if (status !== undefined && status !== 400 && status !== 422) return false;
+  const mentionsParallelTools =
+    /parallel[_ -]?tool[_ -]?calls|parallel tool calls/.test(text);
+  const describesConflict =
+    /not supported|unsupported|unknown|unrecognized|invalid|not allowed|does not allow|extra fields|unexpected/.test(
+      text,
+    );
+  return mentionsParallelTools && describesConflict;
+}
+
 // ---------- 网关原始报文诊断(写入 "PLC Agent" 输出面板) ----------
 // 排查"模型不返回总结"这类问题:把每次发给网关的消息结构、每次响应 SSE 的解析摘要
 // (正文/推理/工具调用字符数、finish_reason、错误体)全部留痕,复现一次即可定位。
@@ -985,6 +1097,7 @@ function summarizeOutgoing(body: unknown): string {
       }[];
       tools?: { function?: { name?: string } }[];
       tool_choice?: unknown;
+      parallel_tool_calls?: unknown;
       response_format?: { type?: string; json_schema?: { name?: string } };
     };
     const chain = (j.messages ?? [])
@@ -1008,7 +1121,11 @@ function summarizeOutgoing(body: unknown): string {
     const format = j.response_format?.type
       ? `${j.response_format.type}${j.response_format.json_schema?.name ? `:${j.response_format.json_schema.name}` : ""}`
       : "-";
-    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} format=${format} ${chain}`.slice(
+    const parallel =
+      typeof j.parallel_tool_calls === "boolean"
+        ? String(j.parallel_tool_calls)
+        : "-";
+    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} parallel=${parallel} format=${format} ${chain}`.slice(
       0,
       900,
     );
@@ -1410,17 +1527,19 @@ export async function runAgent(
         "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
       : SYSTEM_PROMPT;
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
-    const forceToolChoice =
-      forcedTool && !(model instanceof GatewayGuardedModel)
+    const modelSettings = {
+      parallelToolCalls: true,
+      ...(forcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: forcedTool }
-        : undefined;
+        : {}),
+    };
     // The legacy native handoff team remains available for direct callers.
     // Coordinated V3 runs always provide teamTask and use this controlled
     // executor, so their durable graph remains the source of truth.
     if (cfg.orchestration === "team" && !options.teamTask) {
       const team = createIndustrialAgentTeam(model, tools, {
         executorStructuredOutput: true,
-        executorModelSettings: forceToolChoice,
+        executorModelSettings: modelSettings,
       });
       // Explicit side effects bypass planning and enter the controlled executor.
       return requiredTool ? team.executor : team.planner;
@@ -1430,7 +1549,7 @@ export async function runAgent(
       model,
       instructions: executionInstructions,
       tools,
-      ...(forceToolChoice ? { modelSettings: forceToolChoice } : {}),
+      modelSettings,
       // Gateway capability negotiation happens inside GatewayGuardedModel;
       // Ordinary conversation stays text-native so the UI can receive
       // text.delta events; action turns keep the canonical schema.
@@ -1446,7 +1565,10 @@ export async function runAgent(
     modelAdapter.apiFormat === "responses" &&
     !cfg.baseUrl.trim()
   );
-  const runner = new Runner({ tracingDisabled });
+  const runner = new Runner({
+    tracingDisabled,
+    toolExecution: { maxFunctionToolConcurrency: null },
+  });
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = "";
   let structuredOutput: IndustrialAgentOutput | undefined;
