@@ -15,7 +15,9 @@
     "test:anthropic": "npm run test:generate && node scripts/anthropic_test.mjs",
     "test:formats": "npm run test:generate && node scripts/format_regression_test.mjs",
     "test:batch": "npm run test:generate && node scripts/task_plan_test.mjs && node scripts/team_task_test.mjs && node scripts/context_manager_test.mjs && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/streaming_test.mjs && node scripts/workspace_tools_test.mjs && node scripts/sdk_foundation_test.mjs && node scripts/anthropic_test.mjs",
-    "test:agent": "npm run test:generate && node scripts/agent_kernel_test.mjs && node scripts/agent_resume_test.mjs"
+    "test:agent": "npm run test:generate && node scripts/agent_kernel_test.mjs && node scripts/agent_resume_test.mjs",
+    "test:st": "npm run test:generate && node scripts/st_analyzer_test.mjs",
+    "vendor:st-analyzer": "node scripts/vendor_st_analyzer.mjs"
   },
   "keywords": [],
   "author": "",
@@ -138,6 +140,46 @@
           "type": "boolean",
           "default": false,
           "description": "干运行模式：禁止写文件、执行命令和设备写入等副作用操作"
+        },
+        "plcAgent.stAnalyzer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用 st-analyze ST 语言服务器做真实校验；关闭后回退内置简易校验（回执里 engine=fallback 可见）"
+        },
+        "plcAgent.stAnalyzer.dir": {
+          "type": "string",
+          "default": "",
+          "description": "校验器目录(含 main.cjs 与 data.json)。留空使用插件自带的 vendor/st-analyzer；仅内部调试最新构建时才需要覆盖"
+        },
+        "plcAgent.stAnalyzer.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "运行校验桥的 node 可执行文件。留空按顺序探测：环境变量 ST_ANALYZER_NODE → PATH 里的 node → 扩展宿主自带运行时"
+        },
+        "plcAgent.stAnalyzer.timeoutMs": {
+          "type": "number",
+          "default": 20000,
+          "description": "单次 ST 校验的超时时间(毫秒)；超时按失败处理,不会伪装成通过"
+        },
+        "plcAgent.stAnalyzer.loadWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "校验时把工作区其它 .st 文件作为上下文一起解析(跨文件 GVL/FB 引用必需)"
+        },
+        "plcAgent.stAnalyzer.maxContextFiles": {
+          "type": "number",
+          "default": 200,
+          "description": "上下文 .st 文件数量上限,超过则截断并在回执里提示"
+        },
+        "plcAgent.stAnalyzer.maxFileBytes": {
+          "type": "number",
+          "default": 1048576,
+          "description": "单个上下文文件的大小上限(字节),超过则跳过"
+        },
+        "plcAgent.stAnalyzer.maxDiagnostics": {
+          "type": "number",
+          "default": 200,
+          "description": "单个目标的诊断条数上限"
         }
       }
     }

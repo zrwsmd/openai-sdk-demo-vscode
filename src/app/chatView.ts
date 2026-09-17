@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
 import { planTask, setAgentLogger } from '../runtime/agent';
+import { createStAnalyzerFactory, readStAnalyzerSettings } from './analyzerHost';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
@@ -62,6 +63,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       emit: (event) => this.post(event),
       log: (line) => this.log.appendLine(line),
       planTask,
+      createStAnalyzer: createStAnalyzerFactory(this.context, (line) => this.log.appendLine(line)),
       audit,
     });
   }
@@ -306,6 +308,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       workspaceRoots,
       policyContext: live.policyContext,
       orchestration: live.orchestration,
+      stAnalyzerSettings: readStAnalyzerSettings(this.context),
     };
     await this.coordinator.start(text, config, live.apiKey);
   }

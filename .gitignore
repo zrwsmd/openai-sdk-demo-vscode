@@ -3,3 +3,4 @@ dist/
 *.vsix
 .env
 scripts/agent.testbundle.mjs
+vendor/st-analyzer/

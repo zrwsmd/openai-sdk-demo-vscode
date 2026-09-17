@@ -79,6 +79,8 @@ export interface RunCoordinatorDependencies {
   executeAgent?: typeof runAgent;
   /** Optional model planner. Tests and embedders can omit it to retain the single path. */
   planTask?: typeof planTask;
+  /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
+  createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
   routeTeamTask?: typeof routeTeamTask;
   planTeamTask?: typeof planTeamTask;
@@ -152,6 +154,7 @@ export class RunCoordinator {
   private readonly verifyTeamTask?: typeof verifyTeamTask;
   private readonly auditSink?: AuditSink;
   private readonly compactContext: ContextCompactor;
+  private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   private busy = false;
   private transitioning = false;
   private controller?: AbortController;
@@ -184,6 +187,7 @@ export class RunCoordinator {
     this.verifyTeamTask = dependencies.verifyTeamTask ?? verifyTeamTask;
     this.auditSink = dependencies.audit;
     this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
+    this.createStAnalyzer = dependencies.createStAnalyzer;
   }
 
   async initialize(): Promise<void> {
@@ -925,6 +929,8 @@ export class RunCoordinator {
           {
             ...run.config,
             apiKey,
+            stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
+            stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
             executeEffect: (toolName, input, invoke) =>
               this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
             audit: async (event) => {
@@ -1381,6 +1387,8 @@ export class RunCoordinator {
             {
               ...run.config,
               apiKey,
+              stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
+              stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
               policyContext: safeNode ? { ...run.config.policyContext, dryRun: true } : run.config.policyContext,
               executeEffect: (toolName, input, invoke) => this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
               audit: async (event) => {
