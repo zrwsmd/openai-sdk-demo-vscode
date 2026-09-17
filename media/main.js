@@ -186,6 +186,36 @@ function startToolHeadline(name, args) {
   return `正在执行 · ${name}`;
 }
 
+function formatToolInputError(name, rawError, meta, rawArgs) {
+  const text = String(rawError ?? '').trim();
+  if (!/(?:InvalidToolInputError|Invalid JSON input for tool|Invalid input for tool)/i.test(text)) {
+    return undefined;
+  }
+  const badJson = /Invalid JSON input for tool/i.test(text);
+  const argsText = typeof rawArgs === 'string' && rawArgs.trim()
+    ? rawArgs.trim()
+    : '';
+  const parsedArgs = argsText ? parseJsonValue(argsText) : undefined;
+  const argsSummary = argsText
+    ? `错误参数：${truncateText(argsText, 220)}`
+    : '未拿到工具参数原文；可在 OUTPUT 中查看 [toolargs] 日志。';
+  return {
+    headline: `执行失败：${name} 参数格式错误，工具未执行`,
+    summary: badJson
+      ? `模型生成的工具参数不是合法 JSON；工具实现还没有开始执行。${argsSummary}`
+      : `模型生成的工具参数没有通过 schema 校验；工具实现还没有开始执行。${argsSummary}`,
+    meta,
+    detail: {
+      cause: 'invalid_tool_input',
+      tool: name,
+      error: text,
+      rawArguments: argsText || null,
+      parsedArguments: parsedArgs ?? null,
+      argumentsWereJson: parsedArgs !== undefined,
+    },
+  };
+}
+
 function formatToolResult(name, summary, result, run, durationMs) {
   const parsed = result && typeof result === 'object'
     ? result
@@ -193,20 +223,33 @@ function formatToolResult(name, summary, result, run, durationMs) {
   const args = parseJsonValue(run?.args);
   const duration = durationLabel(durationMs);
   const metaParts = [name, duration].filter(Boolean);
+  const meta = metaParts.join(' · ');
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const text = typeof summary === 'string' ? summary.trim() : '';
+    const inputError = formatToolInputError(name, text, meta, run?.args);
+    if (inputError) return inputError;
     return {
       headline: text && !/^[\[{]/.test(text) ? text : '工具执行成功',
       summary: '',
-      meta: metaParts.join(' · '),
+      meta,
       detail: '',
     };
   }
   if (parsed.ok === false) {
+    const inputError = formatToolInputError(name, parsed.error, meta, run?.args);
+    if (inputError) {
+      return {
+        ...inputError,
+        detail: {
+          ...inputError.detail,
+          toolResult: parsed,
+        },
+      };
+    }
     return {
       headline: parsed.error ? `执行失败：${parsed.error}` : '执行失败',
       summary: toolArgsSummary(name, run?.args),
-      meta: metaParts.join(' · '),
+      meta,
       detail: parsed,
     };
   }
