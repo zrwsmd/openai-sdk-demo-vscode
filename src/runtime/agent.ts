@@ -275,6 +275,14 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
  * 真正的解析统一放在 execute(parseOptionalInt)。
  */
 const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
+const optionalStringParam = z.union([z.string(), z.null()]).optional();
+const optionalBooleanParam = z.union([z.boolean(), z.string(), z.null()]).optional();
+
+function parseOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? value : undefined;
+}
 
 function parseOptionalInt(value: unknown): number | undefined {
   if (typeof value === "number")
@@ -285,6 +293,19 @@ function parseOptionalInt(value: unknown): number | undefined {
     return /^\d+$/.test(trimmed) && Number(trimmed) > 0
       ? Number(trimmed)
       : undefined;
+  }
+  return undefined;
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || normalized === "none" || normalized === "null" || normalized === "undefined") {
+      return undefined;
+    }
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
   }
   return undefined;
 }
@@ -448,18 +469,21 @@ function buildTools(cfg: AgentConfig) {
       "结果里 errorCount=0 才算通过校验;warningCount 只作提示,不阻断交付。" +
       "该校验器不覆盖全部语义(例如内置 FB 参数类型),不要把它当成可上机运行的证明。",
     parameters: z.object({
-      code: z.string().optional().describe("完整 ST 源码(PROGRAM ... END_PROGRAM)"),
-      path: z.string().optional().describe("工作区内的 .st 文件路径,优先于 code"),
-      loadWorkspaceContext: z
-        .boolean()
-        .optional()
-        .describe("是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要)"),
+      code: optionalStringParam.describe("完整 ST 源码(PROGRAM ... END_PROGRAM);不使用时可省略或传 null"),
+      path: optionalStringParam.describe("工作区内的 .st 文件路径,优先于 code;不使用时可省略或传 null"),
+      loadWorkspaceContext: optionalBooleanParam.describe(
+        '是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要);优先传 true/false,兼容 "True"/"False" 字符串',
+      ),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: ({ code, path: p, loadWorkspaceContext }, _context, details) =>
       guard(async () => {
-        const input = await resolveStValidationInput(p, code, loadWorkspaceContext);
+        const input = await resolveStValidationInput(
+          parseOptionalString(p),
+          parseOptionalString(code),
+          parseOptionalBoolean(loadWorkspaceContext),
+        );
         const result = await stAnalyzer.verify(
           {
             workspaceRoot: workspace.primaryRoot,
