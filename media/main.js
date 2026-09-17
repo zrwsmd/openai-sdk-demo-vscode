@@ -862,7 +862,12 @@ window.addEventListener('message', (event) => {
     case 'resumeStarted':
       canContinue = false;
       currentRunId = msg.runId || currentRunId;
-      if (msg.userText) {
+      if (typeof msg.displayText === 'string' && msg.displayText.trim()) {
+        const text = msg.displayText.trim();
+        const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
+        const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
+        if (lastUser !== text) addMessage('user', text);
+      } else if (msg.userText) {
         const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
         const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
         if (lastUser !== msg.userText) addMessage('user', msg.userText);

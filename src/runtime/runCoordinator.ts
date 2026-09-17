@@ -573,7 +573,7 @@ export class RunCoordinator {
     await this.cancelPending(run, notify);
   }
 
-  async continue(apiKey: string): Promise<void> {
+  async continue(apiKey: string, displayText?: string): Promise<void> {
     if (this.busy || this.transitioning || this.clearing) return;
     const generation = this.beginTransition();
     try {
@@ -633,6 +633,7 @@ export class RunCoordinator {
         continued: true,
         restartedFromBoundary: !canResumeSdkState,
         userText: run.userText,
+        displayText: displayText?.trim() || undefined,
       });
       if (run.plan) {
         this.ensureProtocolFactory(run);

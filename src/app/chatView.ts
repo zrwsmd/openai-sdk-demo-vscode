@@ -293,7 +293,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Keep the natural-language command narrow: "继续写一个..." remains a
     // new task, while an exact continuation phrase resumes the saved SDK state.
     if (isContinueRequest(text)) {
-      await this.continueRun();
+      const displayText = text.trim();
+      this.post({ type: 'user', text: displayText });
+      await this.continueRun(displayText);
       return;
     }
     const live = await this.getConfig();
@@ -327,9 +329,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.coordinator.retry(live.apiKey);
   }
 
-  private async continueRun(): Promise<void> {
+  private async continueRun(displayText?: string): Promise<void> {
     const live = await this.getConfig();
-    await this.coordinator.continue(live.apiKey);
+    await this.coordinator.continue(live.apiKey, displayText);
   }
 
   private buildHtml(webview: vscode.Webview): string {

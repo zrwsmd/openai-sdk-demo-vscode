@@ -927,10 +927,18 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   if (paused?.status !== 'paused' || paused.canContinue !== true || paused.state !== '{"sdk":"checkpoint"}') {
     throw new Error('manual stop did not persist a continuable checkpoint');
   }
-  await test.coordinator.continue('key');
+  await test.coordinator.continue('key', '继续');
   const resumed = await test.store.getLast();
   if (initialStates[0] !== undefined || initialStates[1] !== '{"sdk":"checkpoint"}' || resumed?.status !== 'completed') {
     throw new Error('continue did not resume the saved checkpoint');
+  }
+  const resumeEvent = [...test.events].reverse().find((event) => event.type === 'resumeStarted');
+  if (resumeEvent?.displayText !== '继续') {
+    throw new Error('continue did not expose the typed continuation text for UI display');
+  }
+  const sessionItems = await test.session.getItems();
+  if (sessionItems.some((item) => item?.type === 'message' && item?.role === 'user' && item?.content === '继续')) {
+    throw new Error('typed continuation text leaked into model session history');
   }
 }
 
