@@ -472,10 +472,7 @@ function addApprovalCard(runId, approval) {
   noBtn.className = 'btn';
   noBtn.textContent = '拒绝';
   const finish = (approve) => {
-    okBtn.disabled = noBtn.disabled = true;
-    card.classList.add(approve ? 'approved' : 'rejected');
-    status.textContent = approve ? '已允许 · 执行中' : '已拒绝';
-    status.classList.add(approve ? 'approved' : 'rejected');
+    markApprovalCard(id, approve, approve ? '已允许 · 执行中' : '已拒绝');
     vscode.postMessage({ type: 'approvalResponse', runId, approvalId: id, approve });
   };
   okBtn.addEventListener('click', () => finish(true));
@@ -486,6 +483,20 @@ function addApprovalCard(runId, approval) {
 
   messagesEl.appendChild(card);
   scrollBottom();
+}
+
+function markApprovalCard(id, approved, statusText) {
+  if (!id) return;
+  const card = messagesEl.querySelector(`[data-approval-id="${CSS.escape(id)}"]`);
+  if (!card) return;
+  const className = approved ? 'approved' : 'rejected';
+  card.classList.add(className);
+  const status = card.querySelector('.approval-status');
+  if (status) {
+    status.textContent = statusText || (approved ? '已允许' : '已拒绝');
+    status.classList.add(className);
+  }
+  for (const button of card.querySelectorAll('button')) button.disabled = true;
 }
 
 function showApprovals(runId, approvals) {
@@ -603,7 +614,21 @@ function handleProtocolEvent(event) {
       // The host cancelled control message owns the retry state and controls.
       break;
     case 'approval.requested':
+      if (payload.approvalId && payload.toolName) {
+        addApprovalCard(event.runId || currentRunId, {
+          id: payload.approvalId,
+          name: payload.toolName,
+          args: typeof payload.args === 'string' ? payload.args : '',
+        });
+      }
+      break;
     case 'approval.resolved':
+      markApprovalCard(
+        payload.approvalId,
+        payload.approved === true,
+        payload.approved === true ? '已允许' : '已拒绝',
+      );
+      break;
     case 'usage.updated':
     case 'reasoning.updated':
       // Reasoning is not a user-facing execution fact. Show tool calls,
@@ -663,6 +688,30 @@ function flushPendingAgentText() {
     renderAgentText(agentText + pendingAgentText);
     pendingAgentText = '';
   }
+}
+
+function renderHistoryMessage(m) {
+  if (m.role === 'user') {
+    addMessage('user', m.text);
+    return;
+  }
+  const b = addMessage('agent', '');
+  renderRich(b, m.text);
+}
+
+function replayHistoryEvents(events) {
+  if (!Array.isArray(events) || !events.length) return;
+  toolRuns.clear();
+  anonymousToolRuns.clear();
+  pendingToolCount = 0;
+  pendingAgentText = '';
+  pendingFinalText = null;
+  for (const event of events) handleProtocolEvent(event);
+  pendingToolCount = 0;
+  pendingAgentText = '';
+  pendingFinalText = null;
+  toolRuns.clear();
+  anonymousToolRuns.clear();
 }
 
 window.addEventListener('message', (event) => {
@@ -768,14 +817,23 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
-      for (const m of msg.messages || []) {
-        if (m.role === 'user') addMessage('user', m.text);
-        else {
-          const b = addMessage('agent', '');
-          renderRich(b, m.text);
-        }
+      const messages = msg.messages || [];
+      const events = Array.isArray(msg.events) ? msg.events : [];
+      const eventInsertIndex = events.length
+        ? messages.map((m) => m.role).lastIndexOf('agent')
+        : -1;
+      for (let i = 0; i < messages.length; i += 1) {
+        if (i === eventInsertIndex) replayHistoryEvents(events);
+        renderHistoryMessage(messages[i]);
       }
-      if (!(msg.messages || []).length) showWelcomeHint();
+      if (eventInsertIndex < 0) replayHistoryEvents(events);
+      agentBubble = null;
+      agentText = '';
+      pendingAgentText = '';
+      pendingFinalText = null;
+      pendingToolCount = 0;
+      hadToolThisTurn = false;
+      if (!messages.length && !events.length) showWelcomeHint();
       break;
     }
     case 'awaitingApproval':

@@ -1004,6 +1004,60 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   if (!freshEvents.some((event) => event.type === 'runRecovered')) throw new Error('recovery event missing');
 }
 
+// Startup history replays persisted protocol events so the UI can restore
+// tool and approval cards, not just plain text bubbles.
+{
+  const test = await fixture(async (_cfg, session, userText, options) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    options.protocol.onEvent(options.protocol.eventFactory.next({
+      type: 'tool.started',
+      payload: {
+        toolName: 'read_file',
+        callId: 'call-history',
+        arguments: JSON.stringify({ path: 'history.txt' }),
+      },
+    }));
+    options.protocol.onEvent(options.protocol.eventFactory.next({
+      type: 'tool.completed',
+      payload: {
+        toolName: 'read_file',
+        callId: 'call-history',
+        ok: true,
+        summary: '已读取文件',
+        result: {
+          protocolVersion: 1,
+          ok: true,
+          data: { totalLines: 1, content: 'hello' },
+          diagnostics: [],
+          effect: 'none',
+          risk: 'read',
+        },
+      },
+    }));
+    await session.addItems([{ type: 'message', role: 'assistant', content: '已读取 history.txt' }]);
+    return { status: 'completed', output: '已读取 history.txt', usage };
+  });
+  await test.coordinator.start('读取 history.txt', config, 'key');
+  const saved = await test.store.getLast();
+  if (!saved?.events?.some((event) => event.type === 'tool.completed')) {
+    throw new Error('protocol tool event was not persisted with the run');
+  }
+  const freshEvents = [];
+  const fresh = new RunCoordinator({
+    session: new JsonFileSession(path.join(test.dir, 'session.json')),
+    store: new JsonRunStore(path.join(test.dir, 'runs.json')),
+    emit: (event) => freshEvents.push(event),
+  });
+  await fresh.initialize();
+  const history = freshEvents.find((event) => event.type === 'history');
+  if (!history?.events?.some((event) => event.type === 'tool.completed')) {
+    throw new Error('history did not include persisted protocol events');
+  }
+  if (!history.messages?.some((message) => message.text === '已读取 history.txt')) {
+    throw new Error('history lost ordinary chat messages while restoring events');
+  }
+}
+
 // Refusing an approval is a terminal user decision, not a system failure.
 {
   const test = await fixture(async (_cfg, session, userText) => {

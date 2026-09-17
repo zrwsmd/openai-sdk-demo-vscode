@@ -71,6 +71,15 @@ export type RuntimeEvent =
   | { type: 'agentEvent'; event: AgentProtocolEvent }
   | ({ type: string } & Record<string, unknown>);
 
+const MAX_REPLAYABLE_PROTOCOL_EVENTS = 200;
+const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
+  'tool.started',
+  'tool.completed',
+  'approval.requested',
+  'approval.resolved',
+  'run.progress',
+]);
+
 export interface RunCoordinatorDependencies {
   session: RecoverableSession;
   store: RunStore;
@@ -134,6 +143,18 @@ class DagWorkerSession implements Session {
   }
 }
 
+function replayableHistoryEvents(
+  run: DurableRunRecord | undefined,
+  messageCount: number,
+): AgentProtocolEvent[] {
+  if (!run?.events?.length) return [];
+  if (messageCount === 0 && run.status !== 'awaiting_approval') return [];
+  if (!['completed', 'awaiting_approval', 'paused'].includes(run.status)) return [];
+  return run.events
+    .filter((event) => REPLAYABLE_PROTOCOL_EVENT_TYPES.has(event.type))
+    .sort((a, b) => a.sequence - b.sequence);
+}
+
 /**
  * Application service for a single durable agent lane.
  *
@@ -172,6 +193,7 @@ export class RunCoordinator {
   private initializeOperation?: Promise<void>;
   private protocolFactory?: AgentEventFactory;
   private protocolRunId?: string;
+  private protocolRun?: DurableRunRecord;
   private transitionController?: AbortController;
 
   constructor(dependencies: RunCoordinatorDependencies) {
@@ -1078,6 +1100,7 @@ export class RunCoordinator {
             },
           }));
         }
+        await this.store.update(run);
       } else if (result.status === 'cancelled' && manuallyPaused) {
         await this.audit('run_paused', run, {
           strategy: resumable ? 'sdk_state' : 'safe_restart',
@@ -1623,6 +1646,7 @@ export class RunCoordinator {
               type: 'approval.requested',
               payload: { approvalId, toolName: 'team_verification', args: run.approvals[0].args },
             }));
+            await this.store.update(run);
             return false;
           }
         }
@@ -1666,6 +1690,7 @@ export class RunCoordinator {
                   payload: { approvalId: approval.id, toolName: approval.name, args: approval.args },
                 }));
               }
+              await this.store.update(run);
               return false;
             }
             if (retryResult.status === 'cancelled') {
@@ -1750,23 +1775,37 @@ export class RunCoordinator {
       const payload = event.payload as { text?: unknown };
       if (typeof payload.text === 'string') this.liveOutput += payload.text;
     }
+    this.recordReplayableProtocolEvent(event);
     this.emit({ type: 'agentEvent', event });
   }
 
   private ensureProtocolFactory(run: DurableRunRecord): void {
-    if (this.protocolFactory && this.protocolRunId === run.id) return;
+    if (this.protocolFactory && this.protocolRunId === run.id) {
+      this.protocolRun = run;
+      return;
+    }
     this.protocolFactory = new AgentEventFactory(run.id, run.operationId);
     this.protocolRunId = run.id;
+    this.protocolRun = run;
     this.emitProtocol(this.protocolFactory.next({
       type: 'run.started',
       payload: { userText: run.userText },
     }));
   }
 
+  private recordReplayableProtocolEvent(event: AgentProtocolEvent): void {
+    const run = this.protocolRun;
+    if (!run || event.runId !== run.id || !REPLAYABLE_PROTOCOL_EVENT_TYPES.has(event.type)) return;
+    const events = [...(run.events ?? []), event];
+    run.events = events.slice(-MAX_REPLAYABLE_PROTOCOL_EVENTS);
+  }
+
   private async replayHistory(generation = this.clearGeneration): Promise<void> {
     const messages = extractChatMessages(await this.session.getItems());
+    const run = await this.store.getActive() ?? await this.store.getLast();
+    const events = replayableHistoryEvents(run, messages.length);
     if (this.isClearing(generation)) return;
-    this.emit({ type: 'history', messages });
+    this.emit({ type: 'history', messages, events });
   }
 
   private async audit(type: AuditEventType, run: DurableRunRecord, metadata?: Record<string, unknown>): Promise<void> {

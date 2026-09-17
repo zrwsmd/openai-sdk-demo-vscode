@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ApprovalRequest, TurnUsage } from './agent';
 import { EffectRecoveryRequiredError } from './errors';
 import { parseAgentResult, type AgentResult } from '../protocol/results';
+import { parseAgentEvent, type AgentProtocolEvent } from '../protocol/events';
 import type { ToolPolicyOverrides } from '../tools/toolContract';
 import {
   isAgentApiFormat,
@@ -66,6 +67,8 @@ export interface DurableRunRecord {
   result?: AgentResult<unknown>;
   /** Derived message projection used for session/UI recovery. */
   output: string;
+  /** Replayable UI protocol events for restoring tool/approval cards. */
+  events?: AgentProtocolEvent[];
   usage: TurnUsage;
   createdAt: string;
   updatedAt: string;
@@ -197,10 +200,12 @@ export class JsonRunStore implements RunStore {
         // v1 stores created before checkpoint continuation did not have this
         // field; normalize them in memory so every caller sees a boolean.
         parsed.active.canContinue = parsed.active.canContinue === true;
+        parsed.active.events ??= [];
       }
       if (parsed.last !== undefined) {
         this.assertRunRecord(parsed.last, 'last');
         parsed.last.canContinue = parsed.last.canContinue === true;
+        parsed.last.events ??= [];
       }
       const effects = parsed.effects ?? {};
       const effectAttempts = parsed.effectAttempts ?? {};
@@ -276,6 +281,7 @@ export class JsonRunStore implements RunStore {
           typeof approval.args !== 'string',
       ) ||
       typeof run.output !== 'string' ||
+      (run.events !== undefined && !Array.isArray(run.events)) ||
       !run.usage ||
       !Number.isFinite(run.usage.inputTokens) ||
       !Number.isFinite(run.usage.outputTokens) ||
@@ -284,6 +290,13 @@ export class JsonRunStore implements RunStore {
       typeof run.updatedAt !== 'string'
     ) {
       throw new Error(`invalid ${field} run record`);
+    }
+    if (run.events !== undefined) {
+      try {
+        run.events = run.events.map((event) => parseAgentEvent(event));
+      } catch {
+        throw new Error(`invalid ${field} protocol events`);
+      }
     }
     if (run.result !== undefined) {
       try {
@@ -381,6 +394,7 @@ export class JsonRunStore implements RunStore {
       plan,
       teamTask,
       output: '',
+      events: [],
       usage: { ...EMPTY_USAGE },
       createdAt: now,
       updatedAt: now,
