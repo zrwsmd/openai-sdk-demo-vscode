@@ -172,7 +172,27 @@ export function extractChatMessages(items: AgentInputItem[]): { role: 'user' | '
         .map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''))
         .join('');
     }
+    if (it.role === 'assistant') text = projectAssistantHistoryText(text);
     if (text.trim()) out.push({ role: it.role === 'user' ? 'user' : 'agent', text });
   }
   return out;
+}
+
+function projectAssistantHistoryText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return text;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as { message?: unknown }).message === 'string'
+    ) {
+      return (parsed as { message: string }).message;
+    }
+  } catch {
+    // Not a structured agent output; keep the original assistant text.
+  }
+  return text;
 }

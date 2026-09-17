@@ -63,6 +63,29 @@ try {
   }
 
   {
+    const structured = JSON.stringify({
+      artifacts: [],
+      data: {},
+      diagnostics: [],
+      message: '已读取 yy.txt，共 1 行：\nhello',
+    });
+    const visible = extractChatMessages([
+      { type: 'message', role: 'user', content: '读取 yy.txt' },
+      { type: 'message', role: 'assistant', content: structured },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '## 普通 Markdown\n\n正文' }],
+      },
+    ]);
+    assert.deepEqual(visible, [
+      { role: 'user', text: '读取 yy.txt' },
+      { role: 'agent', text: '已读取 yy.txt，共 1 行：\nhello' },
+      { role: 'agent', text: '## 普通 Markdown\n\n正文' },
+    ]);
+  }
+
+  {
     const session = new JsonFileSession(path.join(dir, 'small-session.json'));
     await session.addItems([
       { type: 'message', role: 'user', content: 'short' },
