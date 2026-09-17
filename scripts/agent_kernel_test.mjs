@@ -236,6 +236,30 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8e] 通用完成验收:工具失败后模型假装完成 → runtime 反馈失败原因并驱动下一轮修正
+{
+  await fs.writeFile(path.join(dir, 'fixed.txt'), '修正后的内容', 'utf8');
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn('通用闭环读取 typo.txt', noApproval);
+  const started = r.events.filter((e) => e.type === 'tool.started' && e.payload.toolName === 'read_file');
+  const completed = r.events.filter((e) => e.type === 'tool.completed' && e.payload.toolName === 'read_file');
+  const gateRetries = r.events.filter((e) => e.type === 'run.progress' && e.payload.stage === 'completion_gate.retry');
+  const requestLines = diagLines.slice(capabilityLogStart).filter((line) => line.includes('[completion_gate]'));
+  console.log('[8e] 通用验收闭环:started =', started.length, '| completed =', completed.length, '| gateRetries =', gateRetries.length, '| 输出 =', r.output);
+  if (started.length !== 2 || completed.length !== 2) {
+    throw new Error('通用完成验收未驱动失败工具后的第二次修正调用');
+  }
+  if (completed[0]?.payload.result?.ok !== false || completed[1]?.payload.result?.ok !== true) {
+    throw new Error('通用完成验收场景没有先失败后成功的工具回执');
+  }
+  if (gateRetries.length !== 1 || requestLines.length !== 1) {
+    throw new Error('通用完成验收未记录一次重试反馈');
+  }
+  if (!r.output.includes('fixed.txt') || !r.output.includes('成功')) {
+    throw new Error('通用完成验收修正后的最终答复缺少成功依据');
+  }
+}
+
 // [8c] 同一轮多个独立工具调用 → 请求开启 parallel_tool_calls,SDK 并发执行并回喂全部结果
 {
   await fs.writeFile(path.join(dir, 'pa.txt'), '并行A', 'utf8');

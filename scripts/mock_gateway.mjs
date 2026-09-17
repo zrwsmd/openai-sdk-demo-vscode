@@ -303,6 +303,8 @@ const server = http.createServer((req, res) => {
     // 只用最后一条 user 消息判断脚本分支(系统提示词里也含"导出"等词,不能用全量拼接)
     const lastUser = [...messages].reverse().find((m) => m.role === 'user' && typeof m.content === 'string');
     const userText = (lastUser && lastUser.content) || '';
+    const serializedMessages = JSON.stringify(messages);
+    const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     console.log(`[mock] model=${model} tools=${(req_body.tools || []).length} stream=${req_body.stream} msgs=${messages.length} last_role=${last.role}`);
 
     if (rejectCombined && req_body.response_format && req_body.tool_choice) {
@@ -378,6 +380,10 @@ const server = http.createServer((req, res) => {
         { name: 'read_file', args: JSON.stringify({ path: 'pa.txt' }) },
         { name: 'read_file', args: JSON.stringify({ path: 'pb.txt' }) },
       ]);
+    } else if (userText.includes('通用闭环') && completionGateRepair && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'fixed.txt' }));
+    } else if (userText.includes('通用闭环') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'typo.txt' }));
     } else if (userText.includes('读取缺失') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'no_such.txt' }));
     } else if (userText.includes('读取') && last.role !== 'tool') {
@@ -415,6 +421,12 @@ const server = http.createServer((req, res) => {
         artifacts: [{ kind: 'file', name: 'lk.txt', uri: null, mimeType: null, content: null }],
         data: null,
       }));
+    } else if (last.role === 'tool' && userText.includes('通用闭环') && completionGateRepair) {
+      const text = '之前读取 typo.txt 失败，已改为读取 fixed.txt 并成功取得内容。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('通用闭环')) {
+      await streamStructuredText(res, model, '已读取 typo.txt 文件内容。');
     } else if (last.role === 'tool' && userText.includes('读取缺失')) {
       await streamText(res, model, JSON.stringify({
         message: '',

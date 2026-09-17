@@ -106,6 +106,10 @@ import {
   type TeamReviewReport,
   type TeamVerificationReport,
 } from "../orchestration/teamTask";
+import {
+  evaluateCompletionGate,
+  type CompletionGateResult,
+} from "./completionGate";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -1379,6 +1383,7 @@ export type TurnUsage = UsageSummary;
 
 /** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
 export const MAX_TURNS = 10;
+const MAX_COMPLETION_GATE_RETRIES = 3;
 
 export function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
   return createModelAdapter(cfg, {
@@ -1657,6 +1662,7 @@ export async function runAgent(
         "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
         "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
       : SYSTEM_PROMPT;
+  let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
     const modelSettings = {
       parallelToolCalls: true,
@@ -1664,6 +1670,11 @@ export async function runAgent(
         ? { toolChoice: forcedTool }
         : {}),
     };
+    const instructions = runtimeCompletionRepairInstruction
+      ? executionInstructions +
+        "\n\n运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
+        runtimeCompletionRepairInstruction
+      : executionInstructions;
     // The legacy native handoff team remains available for direct callers.
     // Coordinated V3 runs always provide teamTask and use this controlled
     // executor, so their durable graph remains the source of truth.
@@ -1678,7 +1689,7 @@ export async function runAgent(
     return new Agent({
       name: "PLC 编程助手",
       model,
-      instructions: executionInstructions,
+      instructions,
       tools,
       modelSettings,
       // Gateway capability negotiation happens inside GatewayGuardedModel;
@@ -1706,11 +1717,12 @@ export async function runAgent(
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
-  const toolCalls = new Map<string, { name: string; args: string }>();
+  const toolCalls = new Map<string, { name: string; args: string; order: number }>();
   const toolResults = new Map<
     string,
-    { name: string; args: string; result: ToolResult }
+    { name: string; args: string; result: ToolResult; order: number }
   >();
+  let toolCallOrder = 0;
 
   const recordToolCall = (
     name: string,
@@ -1718,7 +1730,7 @@ export async function runAgent(
     args: string,
   ): void => {
     const key = callId || `${name}:${toolCalls.size}`;
-    toolCalls.set(key, { name, args });
+    toolCalls.set(key, { name, args, order: ++toolCallOrder });
   };
 
   const recordToolResult = (
@@ -1909,6 +1921,50 @@ export async function runAgent(
         `线性计划尚未完成${pending ? `: ${pending.id} ${pending.title}` : ""}`,
       );
     }
+  };
+
+  let completionGateRetries = 0;
+  const runCompletionGate = (finalMessage: string): CompletionGateResult =>
+    evaluateCompletionGate({
+      userText,
+      finalMessage,
+      requiredTool,
+      toolResults: [...toolResults.values()],
+    });
+
+  const continueAfterCompletionGateFailure = (
+    currentState: RunState<any, any>,
+    gate: Exclude<CompletionGateResult, { passed: true }>,
+  ): void => {
+    if (completionGateRetries >= MAX_COMPLETION_GATE_RETRIES) {
+      throw new AgentActionVerificationError(
+        `运行时完成验收仍未通过: ${gate.reason}`,
+      );
+    }
+    completionGateRetries += 1;
+    runtimeCompletionRepairInstruction = gate.repairInstruction;
+    agentLog(
+      `[completion_gate] retry ${completionGateRetries}/${MAX_COMPLETION_GATE_RETRIES}: ${gate.reason}`,
+    );
+    if (options.protocol.eventFactory) {
+      options.protocol.onEvent(
+        options.protocol.eventFactory.next({
+          type: "run.progress",
+          payload: {
+            stage: "completion_gate.retry",
+            message: gate.reason,
+            attempt: completionGateRetries,
+            maxAttempts: MAX_COMPLETION_GATE_RETRIES,
+          },
+        }),
+      );
+    }
+    agent = buildAgent();
+    currentState.setCurrentAgent(agent);
+    currentState._currentStep = { type: "next_step_run_again" };
+    currentState._noActiveAgentRun = true;
+    structuredOutput = undefined;
+    output = "";
   };
 
   // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
@@ -2187,6 +2243,11 @@ export async function runAgent(
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
         assertPlanCompleted();
+        const gate = runCompletionGate(output);
+        if (!gate.passed) {
+          continueAfterCompletionGateFailure(state, gate);
+          continue;
+        }
         const canonicalOutput: IndustrialAgentOutput = {
           message: output,
           diagnostics: [],
@@ -2227,10 +2288,15 @@ export async function runAgent(
         }
       }
       assertPlanCompleted();
-      const verifiedArtifacts = await verifyRequiredActions();
       const message = structuredOutput.message.trim()
         ? structuredOutput.message
         : fallbackRequiredToolMessage() ?? structuredOutput.message;
+      const gate = runCompletionGate(message);
+      if (!gate.passed) {
+        continueAfterCompletionGateFailure(state, gate);
+        continue;
+      }
+      const verifiedArtifacts = await verifyRequiredActions();
       const canonicalOutput: IndustrialAgentOutput = {
         ...structuredOutput,
         message,
