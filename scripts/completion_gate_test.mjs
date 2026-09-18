@@ -247,12 +247,70 @@ const codeContract = createDeliveryContract({
 }
 
 {
+  const docContract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '用户要求说明文档',
+    deliverables: [{
+      kind: 'text',
+      title: '程序运行说明文档',
+      description: '程序运行说明文档，描述各功能块用途、变量意义和使用方式',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspacePersistence: 'not_required',
+    }],
+  });
+  const gate = evaluateCompletionGate({
+    userText: '生成说明文档',
+    finalMessage: '已生成说明文档。',
+    toolResults: [],
+    deliveryContract: docContract,
+    artifacts: [{
+      kind: 'file',
+      name: 'PumpControl_说明文档.md',
+      mimeType: 'text/markdown',
+      content: '# 3泵水箱液位控制程序说明文档\n\n## 变量说明\nAutoMode 表示自动模式。',
+    }],
+  });
+  console.log('[completion_gate:9] Markdown 文件 artifact 可作为说明文档 =', gate.passed);
+  assert(gate.passed, 'Markdown file artifact 应满足 text/report 类 final_artifact 交付物');
+}
+
+{
+  const codeArtifactContract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '用户要求内联 ST 程序',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspacePersistence: 'not_required',
+    }],
+  });
+  const gate = evaluateCompletionGate({
+    userText: '生成 ST 程序但不要保存',
+    finalMessage: '已生成 ST 程序。',
+    toolResults: [],
+    deliveryContract: codeArtifactContract,
+    artifacts: [{
+      kind: 'file',
+      name: 'PumpControl.st',
+      mimeType: 'text/plain',
+      content: 'PROGRAM PumpControl\nEND_PROGRAM',
+    }],
+  });
+  console.log('[completion_gate:10] ST 文件 artifact 可作为代码 =', gate.passed);
+  assert(gate.passed, 'ST file artifact 应满足 code 类 final_artifact 交付物');
+}
+
+{
   const gate = evaluateCompletionGate({
     userText: '解释一下 ST 语言',
     finalMessage: 'ST 是 IEC 61131-3 中的结构化文本语言。',
     toolResults: [],
   });
-  console.log('[completion_gate:9] 无契约普通回答不阻断 =', gate.passed);
+  console.log('[completion_gate:11] 无契约普通回答不阻断 =', gate.passed);
   assert(gate.passed, '没有交付契约时，普通回答不应被新逻辑阻断');
 }
 

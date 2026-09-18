@@ -1702,6 +1702,8 @@ export async function classifyDeliveryContract(
       "可交付结果包括代码、文件、文档、报告、数据、项目、配置、方案文本等；普通问答、解释、读取、查询或只要状态信息不算强制交付。" +
       "如果用户说继续、接着、为什么停了等,必须结合历史判断是否仍在追一个未交付的结果。" +
       "requiresDeliverable=true 时列出 1 到 8 个必需交付物；每个交付物必须能用 artifacts 或成功工具回执验证。" +
+      "不要默认把程序说明、运行说明、变量说明或使用说明列为独立必需交付物；只有用户明确要求文档、说明书、报告或使用指南时才列出这类交付物。" +
+      "当用户强调重点看代码、主要看生成代码或变量模拟即可时，通常只需要代码交付物，不要额外制造说明文档交付物。" +
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
@@ -2138,7 +2140,7 @@ export async function runAgent(
     ? tool({
         name: "deliver_artifact",
         description:
-          "提交本轮用户要求的内联交付物。适用于代码、文档、报告、数据或配置等内容；必须填写完整内容，不能只写摘要或计划。该工具不修改文件、不执行命令，只把内容登记为最终交付证据。",
+          "提交本轮用户要求的内联交付物。适用于代码、文档、报告、数据或配置等内容；必须填写完整内容，不能只写摘要或计划。文档/说明/Markdown 优先使用 kind=report；代码优先使用 kind=code；只有泛文件交付才使用 kind=file。该工具不修改文件、不执行命令，只把内容登记为最终交付证据。",
         parameters: z.object({
           kind: z.enum(["file", "code", "report", "data", "unknown"]),
           name: z.string().min(1).describe("交付物名称"),

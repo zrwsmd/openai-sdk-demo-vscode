@@ -252,10 +252,19 @@ function hasArtifactEvidence(
     const hasPayload = !!artifact.content?.trim();
     if (!hasPayload) return false;
     if (deliverable.kind === 'unknown') return true;
-    if (deliverable.kind === 'text') return artifact.kind === 'report' || artifact.kind === 'unknown' || artifact.kind === 'data';
-    if (deliverable.kind === 'project') return artifact.kind === 'file' || artifact.kind === 'report' || artifact.kind === 'unknown';
-    return artifact.kind === deliverable.kind || artifact.kind === 'unknown';
+    if (artifact.kind === deliverable.kind || artifact.kind === 'unknown') return true;
+    if (deliverable.kind === 'code') return artifact.kind === 'file' && hasCodeLikeName(artifact.name);
+    if (deliverable.kind === 'text') return artifact.kind === 'report' || artifact.kind === 'file' || artifact.kind === 'data';
+    if (deliverable.kind === 'report') return artifact.kind === 'file' || artifact.kind === 'data';
+    if (deliverable.kind === 'data') return artifact.kind === 'file';
+    if (deliverable.kind === 'file') return artifact.kind === 'code' || artifact.kind === 'report' || artifact.kind === 'data';
+    if (deliverable.kind === 'project') return artifact.kind === 'file' || artifact.kind === 'report';
+    return false;
   });
+}
+
+function hasCodeLikeName(name: string): boolean {
+  return /\.(?:st|scl|iecst|c|cpp|h|hpp|cs|java|js|jsx|ts|tsx|py|go|rs|json|yaml|yml|xml|sql)$/i.test(name);
 }
 
 function hasToolEvidence(
