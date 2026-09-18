@@ -2,6 +2,8 @@
 const vscode = acquireVsCodeApi();
 
 const messagesEl = document.getElementById('messages');
+const sessionListEl = document.getElementById('session-list');
+const sessionNewBtn = document.getElementById('session-new');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
@@ -28,6 +30,8 @@ let settingsSavePending = false;
 let pendingLocalUserText = null;
 let awaitingRunAck = false;
 let stopRequestedBeforeRunAck = false;
+let activeSessionId = null;
+let knownSessions = [];
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 
@@ -36,10 +40,56 @@ function setRuntimeMode(mode) {
   const running = mode === 'running' || mode === 'stopping';
   const awaiting = mode === 'awaiting';
   sendBtn.disabled = running || awaiting;
+  sessionNewBtn.disabled = running || awaiting;
   stopBtn.classList.toggle('hidden', !(running || awaiting));
   stopBtn.disabled = mode === 'stopping';
   retryBtn.disabled = !canRetry || running || awaiting;
   continueBtn.disabled = !canContinue || running || awaiting;
+  renderSessions();
+}
+
+function renderSessions() {
+  if (!sessionListEl) return;
+  sessionListEl.textContent = '';
+  const sessions = Array.isArray(knownSessions) ? knownSessions : [];
+  if (!sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent = '暂无历史会话';
+    sessionListEl.appendChild(empty);
+    return;
+  }
+  for (const session of sessions) {
+    if (!session || typeof session.id !== 'string') continue;
+    const item = document.createElement('button');
+    item.className = `session-item${session.id === activeSessionId ? ' active' : ''}`;
+    item.type = 'button';
+    item.disabled = runtimeMode !== 'idle' || session.id === activeSessionId;
+    item.dataset.sessionId = session.id;
+    const title = document.createElement('span');
+    title.className = 'session-title';
+    title.textContent = session.title || '新会话';
+    const time = document.createElement('span');
+    time.className = 'session-time';
+    time.textContent = formatSessionTime(session.updatedAt);
+    item.append(title, time);
+    item.addEventListener('click', () => {
+      if (runtimeMode !== 'idle' || session.id === activeSessionId) return;
+      vscode.postMessage({ type: 'switchSession', sessionId: session.id });
+    });
+    sessionListEl.appendChild(item);
+  }
+}
+
+function formatSessionTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  if (sameDay) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return date.toLocaleDateString([], { month: '2-digit', day: '2-digit' });
 }
 
 // ---------- 消息渲染 ----------
@@ -514,7 +564,12 @@ function updateModelChip(model) {
 // ---------- 新会话 ----------
 
 const newchatEl = document.getElementById('newchat');
-newchatEl.addEventListener('click', () => vscode.postMessage({ type: 'clear' }));
+function createNewSession() {
+  if (runtimeMode !== 'idle') return;
+  vscode.postMessage({ type: 'newSession' });
+}
+newchatEl.addEventListener('click', createNewSession);
+sessionNewBtn.addEventListener('click', createNewSession);
 
 function showWelcomeHint() {
   if (messagesEl.querySelector('.hint')) return;
@@ -948,6 +1003,11 @@ window.addEventListener('message', (event) => {
       canContinue = false;
       setRuntimeMode('idle');
       showWelcomeHint();
+      break;
+    case 'sessions':
+      activeSessionId = typeof msg.activeSessionId === 'string' ? msg.activeSessionId : activeSessionId;
+      knownSessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+      renderSessions();
       break;
     case 'history': {
       // 面板重开:host 回放持久化历史

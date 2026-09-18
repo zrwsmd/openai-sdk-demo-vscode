@@ -6,6 +6,7 @@ import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
 import { JsonAuditSink } from '../observability/audit';
+import { ChatSessionCatalog, titleFromUserText } from './chatSessions';
 import {
   isAgentApiFormat,
   isAgentProvider,
@@ -28,14 +29,16 @@ import {
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
  * 配置持久化:每个 provider/API format 独立保存 baseUrl/model，apiKey 存 SecretStorage(OS 级加密)。
- * 会话持久化:对话历史存 workspace storage/session.json(SDK Session 接口),无工作区回退 globalStorage。
+ * 会话持久化:每个工作区维护多会话索引,每个会话独立保存 SDK Session 与运行状态。
  * 消息协议:
- *   webview → host: {type:'send', text} / {type:'clear'} / {type:'stop'} / {type:'retry'}
+ *   webview → host: {type:'send', text} / {type:'clear'} / {type:'newSession'} / {type:'switchSession', sessionId}
+ *                   {type:'stop'} / {type:'retry'}
  *                   {type:'continue'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'getSettings', apiFormat?, requestId?}
  *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
+ *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, apiFormat, hasKey, requestId?}
@@ -43,30 +46,21 @@ import {
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private readonly session: JsonFileSession;
-  private readonly coordinator: RunCoordinator;
+  private coordinator?: RunCoordinator;
+  private activeSessionId = '';
+  private readonly sessionCatalog: ChatSessionCatalog;
+  private readonly storageRoot: string;
   private readonly log: vscode.OutputChannel;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
     // falls back to extension-global storage so it remains usable standalone.
     const storage = this.context.storageUri ?? this.context.globalStorageUri;
-    this.session = new JsonFileSession(path.join(storage.fsPath, 'session.json'));
-    const runStore = new JsonRunStore(path.join(storage.fsPath, 'runs.json'));
-    const audit = new JsonAuditSink(path.join(storage.fsPath, 'audit.json'));
+    this.storageRoot = storage.fsPath;
+    this.sessionCatalog = new ChatSessionCatalog(this.storageRoot);
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
-    this.coordinator = new RunCoordinator({
-      session: this.session,
-      store: runStore,
-      emit: (event) => this.post(event),
-      log: (line) => this.log.appendLine(line),
-      planTask,
-      classifyDeliveryContract,
-      createStAnalyzer: createStAnalyzerFactory(this.context, (line) => this.log.appendLine(line)),
-      audit,
-    });
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -82,6 +76,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.send(msg.text);
       } else if (msg.type === 'clear') {
         void this.clear();
+      } else if (msg.type === 'newSession') {
+        void this.newSession();
+      } else if (msg.type === 'switchSession' && typeof msg.sessionId === 'string') {
+        void this.switchSession(msg.sessionId);
       } else if (msg.type === 'approvalResponse') {
         void this.resolveApproval(msg);
       } else if (msg.type === 'stop') {
@@ -101,7 +99,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    void this.coordinator.initialize()
+    void this.initializeActiveSession()
       .catch((error) => {
         const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
         this.log.appendLine(`[recovery] ${message}`);
@@ -110,11 +108,81 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   async clear(): Promise<void> {
-    await this.coordinator.clear();
+    await this.ensureRuntime();
+    await this.coordinator!.clear();
+    await this.sessionCatalog.touch(this.activeSessionId);
+    await this.postSessions();
   }
 
   private post(msg: RuntimeEvent | Record<string, unknown>): void {
     void this.view?.webview.postMessage(msg);
+  }
+
+  private async initializeActiveSession(): Promise<void> {
+    const index = await this.sessionCatalog.initialize();
+    this.activateRuntime(index.activeSessionId);
+    await this.postSessions();
+    await this.coordinator!.initialize();
+  }
+
+  private async ensureRuntime(): Promise<void> {
+    if (this.coordinator && this.activeSessionId) return;
+    await this.initializeActiveSession();
+  }
+
+  private activateRuntime(sessionId: string): void {
+    const paths = this.sessionCatalog.pathsFor(sessionId);
+    const session = new JsonFileSession(paths.sessionFile);
+    const runStore = new JsonRunStore(paths.runStoreFile);
+    const audit = new JsonAuditSink(paths.auditFile);
+    this.activeSessionId = sessionId;
+    this.coordinator = new RunCoordinator({
+      session,
+      store: runStore,
+      emit: (event) => {
+        if (this.activeSessionId === sessionId) this.post(event);
+      },
+      log: (line) => this.log.appendLine(line),
+      planTask,
+      classifyDeliveryContract,
+      createStAnalyzer: createStAnalyzerFactory(this.context, (line) => this.log.appendLine(line)),
+      audit,
+    });
+  }
+
+  private async postSessions(): Promise<void> {
+    const index = await this.sessionCatalog.list();
+    this.post({
+      type: 'sessions',
+      activeSessionId: index.activeSessionId,
+      sessions: index.sessions,
+    });
+  }
+
+  private async canLeaveActiveSession(): Promise<boolean> {
+    await this.ensureRuntime();
+    if (await this.coordinator!.hasActiveWork()) {
+      this.post({ type: 'error', message: '当前会话还有任务在运行或等待审批，先停止/处理完再切换会话。' });
+      return false;
+    }
+    return true;
+  }
+
+  private async newSession(): Promise<void> {
+    if (!(await this.canLeaveActiveSession())) return;
+    const session = await this.sessionCatalog.create();
+    this.activateRuntime(session.id);
+    await this.postSessions();
+    await this.coordinator!.initialize();
+  }
+
+  private async switchSession(sessionId: string): Promise<void> {
+    if (sessionId === this.activeSessionId) return;
+    if (!(await this.canLeaveActiveSession())) return;
+    await this.sessionCatalog.setActive(sessionId);
+    this.activateRuntime(sessionId);
+    await this.postSessions();
+    await this.coordinator!.initialize();
   }
 
   /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */
@@ -291,6 +359,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async send(text: string): Promise<void> {
+    await this.ensureRuntime();
     // Keep the natural-language command narrow: "继续写一个..." remains a
     // new task, while an exact continuation phrase resumes the saved SDK state.
     if (isContinueRequest(text)) {
@@ -301,38 +370,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     const live = await this.getConfig();
     const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
     const config: DurableRunConfig = {
       baseUrl: live.baseUrl,
       model: live.model,
       provider: live.provider,
       apiFormat: live.apiFormat,
-      exportDir: path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, 'exports'),
+      exportDir: paths.exportDir,
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
       policyContext: live.policyContext,
       orchestration: live.orchestration,
       stAnalyzerSettings: readStAnalyzerSettings(this.context),
     };
-    await this.coordinator.start(text, config, live.apiKey);
+    await this.sessionCatalog.touch(this.activeSessionId, titleFromUserText(text));
+    await this.postSessions();
+    await this.coordinator!.start(text, config, live.apiKey);
   }
 
   private async resolveApproval(msg: { runId?: string; approvalId?: string; approve?: boolean }): Promise<void> {
+    await this.ensureRuntime();
     const live = await this.getConfig();
-    await this.coordinator.approve(msg.runId ?? '', msg.approvalId ?? '', msg.approve === true, live.apiKey);
+    await this.coordinator!.approve(msg.runId ?? '', msg.approvalId ?? '', msg.approve === true, live.apiKey);
+    await this.sessionCatalog.touch(this.activeSessionId);
+    await this.postSessions();
   }
 
   private async stop(): Promise<void> {
-    await this.coordinator.stop();
+    await this.ensureRuntime();
+    await this.coordinator!.stop();
   }
 
   private async retry(): Promise<void> {
+    await this.ensureRuntime();
     const live = await this.getConfig();
-    await this.coordinator.retry(live.apiKey);
+    await this.coordinator!.retry(live.apiKey);
+    await this.sessionCatalog.touch(this.activeSessionId);
+    await this.postSessions();
   }
 
   private async continueRun(displayText?: string): Promise<void> {
+    await this.ensureRuntime();
     const live = await this.getConfig();
-    await this.coordinator.continue(live.apiKey, displayText);
+    await this.coordinator!.continue(live.apiKey, displayText);
+    await this.sessionCatalog.touch(this.activeSessionId);
+    await this.postSessions();
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -350,6 +432,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <title>PLC 编程助手</title>
 </head>
 <body>
+  <div id="sessions" class="sessions">
+    <div class="sessions-head">
+      <span>历史会话</span>
+      <button id="session-new" class="session-new" title="新建会话">＋</button>
+    </div>
+    <div id="session-list" class="session-list"></div>
+  </div>
   <div id="messages" aria-live="polite"></div>
 
   <!-- 设置面板(齿轮打开) -->
@@ -383,7 +472,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <div class="left">
           <span class="chip" id="mode-chip">Agent ▾</span>
           <span class="chip model" id="model-chip" title="点击配置模型">未配置</span>
-          <span class="chip action" id="newchat" title="清空当前会话,开始新对话">＋ 新会话</span>
+          <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
         <div class="right">
           <button id="gear" class="gear-btn" title="模型设置">⚙</button>

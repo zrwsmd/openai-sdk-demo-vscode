@@ -256,6 +256,14 @@ export class RunCoordinator {
     return this.initializeOperation;
   }
 
+  async hasActiveWork(): Promise<boolean> {
+    return this.busy ||
+      this.transitioning ||
+      this.clearing ||
+      !!this.initializeOperation ||
+      !!(await this.store.getActive());
+  }
+
   private async initializeInternal(): Promise<void> {
     const generation = this.clearGeneration;
     const active = await this.store.getActive();

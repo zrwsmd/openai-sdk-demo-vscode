@@ -23,6 +23,74 @@ html, body {
 
 body { display: flex; flex-direction: column; }
 
+.sessions {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 88%, var(--box));
+  padding: 7px 10px 8px;
+}
+
+.sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.session-new {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+}
+.session-new:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
+.session-new:disabled { opacity: 0.35; cursor: default; }
+
+.session-list {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.session-item {
+  flex: 0 0 150px;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.session-item.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  cursor: default;
+}
+.session-item:disabled:not(.active) { opacity: 0.45; cursor: default; }
+.session-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.session-time {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 1px;
+}
+.session-empty { color: var(--muted); font-size: 11px; padding: 3px 0; }
+
 #messages {
   flex: 1;
   overflow-y: auto;
