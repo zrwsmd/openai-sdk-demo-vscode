@@ -60,7 +60,7 @@
 补充约定：
 
 - **0 表示协议成功，不表示业务结论好**。业务上"发现问题"也是 0，结论放在响应体里。
-- 宿主解析 stdout 时取**最后一个以 `{` 开头的平衡 JSON 行**，不要假设 stdout 只有一个换行。
+- 宿主解析 stdout 时取**最后一个以 `{` 开头、以 `}` 结尾的行**。注意：实现只做首尾判断，不做括号平衡校验，所以协议要保证响应体不含裸换行（本例对 message 做了空白折叠来满足这一点）。不要假设 stdout 只有一个换行。
 - 响应必须带 `protocolVersion`；宿主必须校验，版本不符按协议错误处理，**不要**当作空结果。
 
 ### 4.2 请求/响应参考形状
@@ -121,7 +121,15 @@ for (const level of ['log', 'info', 'warn', 'debug']) {
 只透传运行所需的变量，刻意不继承凭据：
 
 ```js
-const ALLOW = ['PATH','Path','PATHEXT','SystemRoot','SYSTEMROOT','windir','WINDIR','COMSPEC','TEMP','TMP','TMPDIR','USERPROFILE','LOCALAPPDATA','APPDATA'];
+// 与实现保持一致的完整白名单(processRunner.ts 的 ENV_ALLOW_LIST,共 18 项)。
+// 若你的目标产物还需要其它变量(例如 locale 相关),在这里显式补充,不要放开全量继承。
+const ALLOW = [
+  'PATH','Path','PATHEXT',
+  'SystemRoot','SYSTEMROOT','windir','WINDIR','COMSPEC',
+  'TEMP','TMP','TMPDIR',
+  'USERPROFILE','LOCALAPPDATA','APPDATA',
+  'NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','OS','LANG',
+];
 function minimalEnv(extra) { /* 只从 process.env 里挑 ALLOW，再合并 extra */ }
 ```
 
@@ -212,7 +220,7 @@ const diagnostics = await st.validation.DocumentValidator.validateDocument(doc);
 
 ### 6.3 C 类：需要长驻会话 / 高频调用
 
-冷启动成本实测（本例）：进程加载约 60ms + 首次执行约 150ms ≈ **200ms/次**；常驻复用后 **约 2ms/次**，差 100 倍。因此：
+冷启动成本实测（本例，注意口径）：桥自报的 `elapsedMs` 约 **200ms/次**（加载约 60ms + 首次执行约 150ms）；按含 Node 进程启动的墙钟算是 **约 340 到 385ms/次**，比桥内部口径高约 1.7 倍——对外承诺耗时请用墙钟口径。同进程连续复用实测约 **2ms/次**（同一进程内连跑 5 次共 10ms），但本项目**尚未实现常驻形态**，这个数字只代表"进程内重复调用"的理论下限，不代表已有能力。因此：
 
 - 低频（每次用户提问一两次）：一次性子进程，简单可靠；
 - 高频或交互式：常驻进程 + 请求队列（内部索引是共享可变状态，**必须串行**）+ 空闲超时退出 + 崩溃自动重启；
@@ -224,7 +232,7 @@ const diagnostics = await st.validation.DocumentValidator.validateDocument(doc);
 
 | 位置 | 改动 | 规模 |
 |---|---|---|
-| 端口/执行器/实现/降级 | 新增 5 个文件（第 3 节） | 约 400 行，纯 Node，可单测 |
+| 端口/执行器/实现/降级/上下文收集 | 新增 6 个文件（src/analysis，对应第 3 节前四个角色 + 工作区上下文收集） | 约 500 行，纯 Node，可单测 |
 | 宿主装配 | 新增 1 个文件：产物路径 + 运行时候选 + 读配置 + 产实例 | 约 110 行，唯一 import 宿主框架 |
 | 工具实现 | 把原工具的执行体换成调用端口（参数语义保持向后兼容） | 约 60 行 |
 | 配置声明 | 新增 8 个配置项 + 2 个 npm script | 约 60 行声明 |
@@ -247,7 +255,7 @@ const diagnostics = await st.validation.DocumentValidator.validateDocument(doc);
 | 加载失败 / 缺资源文件 / 退出码 2 | 用兜底实现 + stderr 摘要进日志 | 原因 `unavailable` |
 | 超时 | **按失败处理，不降级为通过** | 原因 `timeout`，`ok=false` |
 | 无 JSON / 版本不符 | 用兜底实现 | 原因 `protocol_error` |
-| 用户取消 | 杀进程树，向上传播取消语义 | `cancelled` |
+| 用户取消 | 杀进程树；以异常向上传播，由运行层判定为 cancelled | 无本层标记（运行层状态，桥和端口层都不产生这个值） |
 | 单目标超限（大小/数量） | 跳过并提示 | 独立告警码 |
 
 原则三条：降级必须可见；"无法确认"不等于"通过"；兜底链末端始终有一个不依赖外部依赖的实现（本例就是原来那套简易校验），保证离线可用。
@@ -288,8 +296,8 @@ const diagnostics = await st.validation.DocumentValidator.validateDocument(doc);
 
 1. **依赖方向检查**：核心层目录里 `grep` 不到宿主框架的 import（本例：`runtime/analysis/tools/protocol/policy/workspace` 里没有 `vscode`）。
 2. **单测不启动宿主**：注入假执行器，覆盖加载失败、超时、噪声、坏 JSON、协议版本不符、候选链回退、取消传播、降级可见。
-3. **脱离宿主可独立运行**：提供一个纯 Node 的 CLI 入口，用同一套端口实现跑通——这是"能搬到 CLI/边缘服务"的实证，不是口号。
-4. **换实现零改内核**：把子进程实现换成常驻/远程实现时，内核与运行协调器一行不改。
+3. **脱离宿主可独立运行**：提供一个纯 Node 的 CLI 入口，用同一套端口实现跑通——这是"能搬到 CLI/边缘服务"的实证，不是口号。（本例已落地：`scripts/st_analyzer_cli.mjs`，它本身就是一个最小宿主范例；前置 `npm run test:generate` 生成端口层产物、`npm run vendor:st-analyzer` 准备被校验产物。）
+4. **换实现零改内核**（范围要说清：只对"同一端口的实现替换"成立；**首次接入一个新工具必然要动内核侧**，见第 7 节）：把子进程实现换成常驻/远程实现时，内核与运行协调器一行不改。
 
 推荐的测试矩阵（本例的 `scripts/st_analyzer_test.mjs` 就是按这个写的）：
 
@@ -318,6 +326,7 @@ const diagnostics = await st.validation.DocumentValidator.validateDocument(doc);
 8. **降级路径必须能被测试断言**，否则"没跑起来"会被误当成"没问题"。
 9. **能力边界要写进工具说明**。本例校验器有三个盲区（内置 FB 参数类型、用户自定义 FB 参数类型、残缺语句），所以描述里明确"不要当成可上机运行的证明"，避免模型过度宣称。
 10. **vendoring 脚本里也不要写死开发机路径**，只用参数/环境变量，保证交付物里 `grep` 不到。
+11. **BOM 会导致静默漏报**（实测发现）：Windows 工具链生成的文本文件常带 UTF-8 BOM，本例的校验器遇到 BOM 开头的输入会返回"0 诊断"而不是报错——这是最危险的一类失败。宿主在把文本交给桥之前必须剥掉 BOM（CLI 实现里就是这么做的）。
 
 ## 13. vendoring：产物怎么进交付物
 
@@ -373,7 +382,7 @@ vendoring 脚本必须遵守：
 2. **结构统一**：端口 + 执行器 + 实现 + 降级 + 宿主装配，五件套；名字可以不同，分层必须一致。
 3. **回执统一**：工具返回里必须有实现标识、耗时、失败原因、以及"是否降级"这一项，让模型和审计都能看懂这次是谁在干活。
 
-按这三条做，以后接入新工具只需换端口实现，内核与运行层一行不用改。这不是设想——本例就是这么接进来的。
+按这三条做，**同一端口的实现替换**（子进程 → 常驻 → 远程）不需要改内核与运行层。但必须诚实：**首次接入一个新工具时，内核侧必然有改动**——工具注册、配置槽位、协调器注入、持久化字段，本例正是如此（见第 7 节的清单）。统一协议与统一分层买到的是：从第二个工具起，接入成本收敛到"端口 + 工具"两层，并且所有工具的回执、降级、观测口径一致。
 
 ## 16. 落地检查清单
 
@@ -415,4 +424,5 @@ vendoring 脚本必须遵守：
 | `scripts/st_analyzer_bridge.cjs` | 桥脚本（噪声隔离、零依赖 URI、显式退出） |
 | `scripts/vendor_st_analyzer.mjs` | vendoring（复制产物 + sha256 + commit + 幂等提示） |
 | `vendor/st-analyzer/` | 交付物（main.cjs + data.json + bridge.cjs + vendor.json，不入库） |
+| `scripts/st_analyzer_cli.mjs` | 独立 CLI（最小宿主范例：脱离 VSCode，用同一套端口层跑真实校验；`--version` 输出 vendor 追溯信息） |
 | `scripts/st_analyzer_test.mjs` | 端口层回归测试（假执行器 + 真实进程 + 真实端到端） |
