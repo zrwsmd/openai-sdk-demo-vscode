@@ -140,6 +140,48 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3d] 模型先给了最终答复却没有按契约执行动作时,完成验收必须主动
+// 强制验证工具,验证通过后再强制落盘,不能只把修复要求再交给模型自觉处理。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码并默认保存到工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const before = diagLines.length;
+  const r = await runTestTurn(
+    '强制交付闭环',
+    async (name) => {
+      asked.push(name);
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'completion-repair-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const repairLogs = diagLines.slice(before).filter((line) => line.includes('[completion_gate]'));
+  console.log('[3d] 完成验收兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('完成验收没有按交付契约强制验证再落盘');
+  }
+  if (asked.join(',') !== 'write_file') {
+    throw new Error('完成验收兜底触发了错误的审批工具');
+  }
+  if (!repairLogs.some((line) => line.includes('force_tool=validate_st_code'))) {
+    throw new Error('完成验收没有记录强制验证工具');
+  }
+}
+
 // [1] 第一句问候 → mock 回显 msgs=2(系统提示+本句);usage 单次
 {
   const r = await runTestTurn('你好', noApproval);

@@ -1112,7 +1112,7 @@ export type GatewayParallelToolCallsSupport =
 
 export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
   private emptyStreak = 0;
-  private requiredToolOnce?: RequiredAgentTool;
+  private requiredToolOnce?: string;
   private structuredToolChoiceSupport: GatewayStructuredToolChoiceSupport =
     "unknown";
   private parallelToolCallsSupport: GatewayParallelToolCallsSupport = "unknown";
@@ -1123,7 +1123,7 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     this.requiredToolOnce = undefined;
   }
 
-  requireToolOnce(toolName: RequiredAgentTool): void {
+  requireToolOnce(toolName: string): void {
     this.requiredToolOnce = toolName;
   }
 
@@ -1139,7 +1139,7 @@ export class GatewayGuardedModel extends OpenAIChatCompletionsModel {
     effectiveRequest: any,
     fallbackRequest: any,
     shouldNegotiate: boolean,
-    requiredTool?: RequiredAgentTool,
+    requiredTool?: string,
   ): AsyncGenerator<any> {
     if (!shouldNegotiate) {
       let sawEvent = false;
@@ -1340,7 +1340,7 @@ function withoutParallelToolCalls(request: any): any {
 
 function hasRequiredToolCallEvent(
   event: any,
-  requiredTool: RequiredAgentTool,
+  requiredTool: string,
 ): boolean {
   const raw = event?.event ?? event?.data;
   const choices = Array.isArray(raw?.choices) ? raw.choices : [];
@@ -1756,6 +1756,10 @@ async function runTeamRole<T>(
     model: adapter.model,
     instructions,
     outputType,
+    // Team role schemas can contain a bounded execution graph. The gateway's
+    // small default output cap can cut that JSON in the middle and surface as
+    // a misleading "output did not match schema" error.
+    modelSettings: { maxTokens: 8_000 },
   });
   const result = await new Runner({ tracingDisabled: teamTracingDisabled(cfg, adapter) }).run(role, input, {
     stream: false,
@@ -1802,6 +1806,7 @@ export async function planTeamTask(
     "Team Planner",
     "Return executionGraph with 1-12 DAG nodes. Every node must include dependsOn, completionCriteria, suggestedTools, effect, resources, parallelSafe and priority (0-100). Only read-only or no-effect nodes may set parallelSafe=true; file writes, commands and device writes must remain serial. Set bounded maxParallelism, budget, task timeoutMs, nodeTimeoutMs and maxRetries when the task warrants them. " +
     "你是协作任务的规划角色，不执行工具。把给定目标整理成执行角色可直接遵循的紧凑计划，" +
+      "通常使用 1 到 4 个节点，只有存在真实依赖时才增加节点；每个字段保持简洁，不重复解释同一要求。" +
       "列出审查重点和可观察的验证标准。若路由初稿里包含审查反馈，必须针对反馈修订计划。" +
       "不要增加用户未要求的副作用，必须严格返回 schema。",
     teamPlannerReportSchema,
@@ -1876,7 +1881,10 @@ export async function runAgent(
     options.deliveryContract.deliverables.some(
       (deliverable) =>
         deliverable.required &&
-        deliverable.acceptableEvidence.includes("final_artifact"),
+        deliverable.acceptableEvidence.length > 0 &&
+        deliverable.acceptableEvidence.every(
+          (evidence) => evidence === "final_artifact",
+        ),
     );
   // The provider sees minItems=1 for inline-delivery turns. Keep this as a
   // serialized JSON Schema rather than a Zod output type so a non-compliant
@@ -1976,6 +1984,11 @@ export async function runAgent(
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
   ];
+  const availableToolNames = new Set(
+    tools
+      .map((item) => (item as unknown as { name?: unknown }).name)
+      .filter((name): name is string => typeof name === "string" && name.length > 0),
+  );
   const executionInstructions = activePlan
     ? GENERIC_PLAN_SYSTEM_PROMPT +
       "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种 PLC/ST 场景；以计划目标和用户原始要求为准。" +
@@ -2003,7 +2016,7 @@ export async function runAgent(
         : "")
     : "";
   let runtimeCompletionRepairInstruction = "";
-  const buildAgent = (forcedTool?: RequiredAgentTool) => {
+  const buildAgent = (forcedTool?: string) => {
     const modelSettings = {
       parallelToolCalls: true,
       ...(forcedTool && !(model instanceof GatewayGuardedModel)
@@ -2395,6 +2408,74 @@ export async function runAgent(
       deliveryContract: options.deliveryContract,
     });
 
+  const chooseCompletionRepairTool = (
+    gate: Exclude<CompletionGateResult, { passed: true }>,
+  ): string | undefined => {
+    // Verification is the first dependency in a delivery workflow. Once a
+    // contract says a validator is required, force that named tool instead of
+    // hoping the model will remember it from a repair paragraph.
+    const verificationIssue = gate.issues.find(
+      (issue) => issue.toolName === "delivery_verification",
+    );
+    if (verificationIssue) {
+      try {
+        const parsed = JSON.parse(verificationIssue.args) as {
+          tool?: unknown;
+        };
+        if (
+          typeof parsed.tool === "string" &&
+          availableToolNames.has(parsed.tool)
+        ) {
+          return parsed.tool;
+        }
+      } catch {
+        // Continue with the delivery evidence fallback below.
+      }
+    }
+
+    const deliveryIssue = gate.issues.find(
+      (issue) => issue.toolName === "delivery_contract",
+    );
+    if (deliveryIssue) {
+      try {
+        const deliverable = JSON.parse(deliveryIssue.args) as {
+          acceptableEvidence?: unknown;
+          workspacePersistence?: unknown;
+        };
+        const acceptableEvidence = Array.isArray(deliverable.acceptableEvidence)
+          ? deliverable.acceptableEvidence.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
+        if (
+          (deliverable.workspacePersistence === "required" ||
+            acceptableEvidence.includes("successful_write")) &&
+          availableToolNames.has("write_file")
+        ) {
+          return "write_file";
+        }
+        if (
+          acceptableEvidence.includes("successful_export") &&
+          availableToolNames.has("export_st_program")
+        ) {
+          return "export_st_program";
+        }
+        if (
+          acceptableEvidence.includes("final_artifact") &&
+          availableToolNames.has("deliver_artifact")
+        ) {
+          return "deliver_artifact";
+        }
+      } catch {
+        // The completion gate already reports the malformed contract evidence.
+      }
+    }
+
+    return requiredTool && availableToolNames.has(requiredTool)
+      ? requiredTool
+      : undefined;
+  };
+
   const continueAfterCompletionGateFailure = (
     currentState: RunState<any, any>,
     gate: Exclude<CompletionGateResult, { passed: true }>,
@@ -2406,8 +2487,10 @@ export async function runAgent(
     }
     completionGateRetries += 1;
     runtimeCompletionRepairInstruction = gate.repairInstruction;
+    const forcedRepairTool = chooseCompletionRepairTool(gate);
     agentLog(
-      `[completion_gate] retry ${completionGateRetries}/${MAX_COMPLETION_GATE_RETRIES}: ${gate.reason}`,
+      `[completion_gate] retry ${completionGateRetries}/${MAX_COMPLETION_GATE_RETRIES}: ${gate.reason}` +
+        (forcedRepairTool ? ` | force_tool=${forcedRepairTool}` : ""),
     );
     if (options.protocol.eventFactory) {
       options.protocol.onEvent(
@@ -2424,10 +2507,16 @@ export async function runAgent(
         }),
       );
     }
-    agent = buildAgent();
-    currentState.setCurrentAgent(agent);
-    currentState._currentStep = { type: "next_step_run_again" };
-    currentState._noActiveAgentRun = true;
+    if (forcedRepairTool && model instanceof GatewayGuardedModel) {
+      model.requireToolOnce(forcedRepairTool);
+    }
+    agent = buildAgent(forcedRepairTool);
+    // Once the SDK has settled a final assistant output, changing that same
+    // RunState into a new tool turn can make its completed-tool ledger diverge
+    // from generated item history. Restart this repair turn from the durable
+    // session instead; the repair instruction and prior tool results remain
+    // available without mutating a completed SDK state.
+    state = undefined;
     structuredOutput = undefined;
     output = "";
   };

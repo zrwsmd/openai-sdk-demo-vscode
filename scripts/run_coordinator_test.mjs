@@ -264,6 +264,41 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// Automatic Team preflight is read-only. If the planner returns an invalid
+// structured response, the coordinator must discard that unexecuted Team and
+// continue through the ordinary single-agent path.
+{
+  let executorCalls = 0;
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    executorCalls += 1;
+    if (options.teamTask) throw new Error('schema fallback kept the Team task');
+    return { status: 'completed', output: 'single fallback completed', usage, result: completedAgentResult('single fallback completed') };
+  }, undefined, {
+    routeTeamTask: async () => createTeamTask({
+      route: 'team',
+      goal: 'schema fallback',
+      reason: 'complex',
+      planSummary: 'plan',
+      reviewFocus: [],
+      verificationCriteria: ['done'],
+    }, 'schema fallback'),
+    planTeamTask: async () => {
+      throw Object.assign(new Error('Invalid output type: final assistant output did not match the expected schema.'), {
+        name: 'ModelBehaviorError',
+      });
+    },
+  });
+  await test.coordinator.start('schema fallback', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  const fallback = test.events
+    .filter((event) => event.type === 'agentEvent')
+    .map((event) => event.event)
+    .some((event) => event.type === 'run.progress' && event.payload.stage === 'team.fallback');
+  if (executorCalls !== 1 || completed?.status !== 'completed' || !fallback) {
+    throw new Error('Team schema failure did not safely fall back to single execution');
+  }
+}
+
 // The Team planner can provide a real DAG: independent read nodes overlap,
 // while a dependent write node runs alone and still reaches verification.
 {

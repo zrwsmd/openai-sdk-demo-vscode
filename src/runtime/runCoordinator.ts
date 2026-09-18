@@ -85,6 +85,19 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'run.progress',
 ]);
 
+function isTeamPreparationSchemaError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { name?: unknown; message?: unknown };
+  const name = typeof value.name === 'string' ? value.name : '';
+  const message = typeof value.message === 'string' ? value.message : '';
+  // Team planner/reviewer calls are read-only preflight. A malformed
+  // structured response is recoverable here, while auth/network/tool errors
+  // must still surface normally instead of being hidden by a fallback.
+  return name === 'ModelBehaviorError' ||
+    name === 'AgentOutputValidationError' ||
+    /(?:Invalid output type|expected schema|output does not match)/i.test(message);
+}
+
 export interface RunCoordinatorDependencies {
   session: RecoverableSession;
   store: RunStore;
@@ -344,7 +357,11 @@ export class RunCoordinator {
       );
       if (this.isClearing(generation)) return;
       this.emit({ type: 'user', text: userText, runId: run.id });
-      this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
+      // 这里记录的是诊断原文，不要只保留前 120 个字符，否则多段需求
+      // 会看起来像被截断，排查模型是否收到完整输入时会产生误判。
+      this.writeLog(
+        `[run:${run.id}] 用户(${userText.length}字符): ${userText.replace(/\r?\n/g, '⏎')}`,
+      );
       const compactionController = new AbortController();
       this.transitionController = compactionController;
       const compaction = await this.compactContext(
@@ -1025,7 +1042,41 @@ export class RunCoordinator {
 
     const baseOutput = run.output;
     try {
-      await this.prepareTeam(run, apiKey, controller.signal, runGeneration);
+      try {
+        await this.prepareTeam(run, apiKey, controller.signal, runGeneration);
+      } catch (error) {
+        const executor = run.teamTask?.nodes.find((node) => node.id === 'executor');
+        const canFallbackToSingle =
+          run.config.orchestration !== 'team' &&
+          executor?.status === 'pending' &&
+          isTeamPreparationSchemaError(error) &&
+          !controller.signal.aborted &&
+          !this.isRunInvalidated(runGeneration);
+        if (!canFallbackToSingle) throw error;
+
+        const failedTeamId = run.teamTask?.id;
+        run.teamTask = undefined;
+        run.resumeStage = undefined;
+        run.state = undefined;
+        run.approvals = [];
+        run.error = undefined;
+        run.status = 'running';
+        run.canContinue = false;
+        await this.store.update(run);
+        this.writeLog(
+          `[team] 规划/审查结构化输出不符合 schema${failedTeamId ? ` (${failedTeamId})` : ''}，` +
+            `尚未执行副作用，退回 single 路径: ${this.formatError(error)}`,
+        );
+        this.ensureProtocolFactory(run);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.progress',
+          payload: {
+            stage: 'team.fallback',
+            message: 'Team 规划结果不符合结构化协议，已安全退回单 Agent 执行',
+            reason: this.formatError(error),
+          },
+        }));
+      }
       if (this.isRunInvalidated(runGeneration)) return;
       // The executor may have completed before a transient verifier failure.
       // In that case its durable output is authoritative: resume verification

@@ -308,6 +308,9 @@ const server = http.createServer((req, res) => {
       .reverse()
       .find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
       ?.tool_calls?.[0]?.function?.name;
+    const forcedToolChoice = typeof req_body.tool_choice === 'string'
+      ? req_body.tool_choice
+      : req_body.tool_choice?.function?.name;
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     console.log(`[mock] model=${model} tools=${(req_body.tools || []).length} stream=${req_body.stream} msgs=${messages.length} last_role=${last.role}`);
 
@@ -371,6 +374,35 @@ const server = http.createServer((req, res) => {
         path: 'PumpControl.st',
         content: ST_CODE,
       }));
+    } else if (
+      userText.includes('强制交付闭环') &&
+      last.role !== 'tool' &&
+      !forcedToolChoice
+    ) {
+      await streamStructuredText(res, model, '我已准备好交付程序。');
+    } else if (
+      userText.includes('强制交付闭环') &&
+      forcedToolChoice === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('强制交付闭环') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (
+      userText.includes('强制交付闭环') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'write_file'
+    ) {
+      await streamStructuredText(res, model, '已完成校验并保存程序。');
     } else if (
       ignoreCombinedToolChoice &&
       req_body.response_format &&
