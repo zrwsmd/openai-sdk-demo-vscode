@@ -4,6 +4,7 @@ import {
   getResumableAgentState,
   isRetryableAgentError,
   planTask,
+  classifyDeliveryContract,
   routeTeamTask,
   planTeamTask,
   reviewTeamTask,
@@ -17,7 +18,7 @@ import {
 } from './agent';
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
-import type { DurableRunConfig, DurableRunRecord, RunStore } from './runStore';
+import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import {
   toolOptionsFromSettings,
@@ -90,6 +91,8 @@ export interface RunCoordinatorDependencies {
   executeAgent?: typeof runAgent;
   /** Optional model planner. Tests and embedders can omit it to retain the single path. */
   planTask?: typeof planTask;
+  /** Optional deliverable classifier. Hosts opt in to runtime delivery contracts. */
+  classifyDeliveryContract?: typeof classifyDeliveryContract;
   /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
   createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
@@ -184,6 +187,7 @@ export class RunCoordinator {
   private readonly writeLog: (line: string) => void;
   private readonly executeAgent: typeof runAgent;
   private readonly planTask?: typeof planTask;
+  private readonly classifyDeliveryContract?: typeof classifyDeliveryContract;
   private readonly routeTeamTask?: typeof routeTeamTask;
   private readonly planTeamTask?: typeof planTeamTask;
   private readonly reviewTeamTask?: typeof reviewTeamTask;
@@ -218,6 +222,7 @@ export class RunCoordinator {
     this.writeLog = dependencies.log ?? (() => {});
     this.executeAgent = dependencies.executeAgent ?? runAgent;
     this.planTask = dependencies.planTask;
+    this.classifyDeliveryContract = dependencies.classifyDeliveryContract;
     this.routeTeamTask = dependencies.routeTeamTask ?? routeTeamTask;
     this.planTeamTask = dependencies.planTeamTask ?? planTeamTask;
     this.reviewTeamTask = dependencies.reviewTeamTask ?? reviewTeamTask;
@@ -241,12 +246,12 @@ export class RunCoordinator {
     const active = await this.store.getActive();
     if (this.isClearing(generation)) return;
     if (active?.status === 'running') {
-      if (active.resumeStage === 'routing' || active.resumeStage === 'planning') {
+      if (active.resumeStage) {
         active.status = 'paused';
         active.canContinue = true;
         active.result = createAgentResult({ status: 'cancelled', reason: 'user_paused', usage: active.usage });
         await this.store.update(active);
-        this.emit({ type: 'runRecovered', message: '规划阶段中断，已保存继续断点。', canContinue: true });
+        this.emit({ type: 'runRecovered', message: '预处理阶段中断，已保存继续断点。', canContinue: true });
         return;
       }
       if (this.busy || this.transitioning) {
@@ -336,6 +341,8 @@ export class RunCoordinator {
         sessionItems.length,
       );
       if (this.isClearing(generation)) return;
+      this.emit({ type: 'user', text: userText, runId: run.id });
+      this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       const compactionController = new AbortController();
       this.transitionController = compactionController;
       const compaction = await this.compactContext(
@@ -361,10 +368,44 @@ export class RunCoordinator {
         this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
       }
       if (this.isClearing(generation)) return;
+      if (this.classifyDeliveryContract) {
+        run.resumeStage = 'delivery';
+        await this.store.update(run);
+        const deliveryController = new AbortController();
+        this.transitionController = deliveryController;
+        try {
+          run.deliveryContract = await this.classifyDeliveryContract(
+            { ...config, apiKey },
+            userText,
+            deliveryController.signal,
+            sessionItems,
+          );
+          if (!this.isClearing(generation) && !this.stopRequested) {
+            run.resumeStage = undefined;
+            await this.store.update(run);
+          }
+        } catch (error) {
+          if (this.isClearing(generation)) return;
+          if (this.stopRequested || isRetryableAgentError(error)) {
+            await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
+            return;
+          }
+          this.writeLog(`[delivery] 交付契约判定失败，继续执行但不启用交付契约: ${this.formatError(error)}`);
+          run.deliveryContract = undefined;
+          run.resumeStage = undefined;
+          await this.store.update(run);
+        } finally {
+          if (this.transitionController === deliveryController) this.transitionController = undefined;
+        }
+      }
+      if (this.stopRequested) {
+        this.stopRequested = false;
+        await this.pausePending(run, false);
+        return;
+      }
+      if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;
-      this.emit({ type: 'user', text: userText, runId: run.id });
-      this.writeLog(`[run:${run.id}] 用户: ${userText.slice(0, 120)}`);
       if (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask)) {
         run.resumeStage = 'routing';
         await this.store.update(run);
@@ -634,6 +675,7 @@ export class RunCoordinator {
           previous.operationId,
           restartTaskPlan(previous.plan),
           continueTeamTask(previous.teamTask),
+          previous.deliveryContract,
         );
       run.resumeStage = previous.resumeStage;
       await this.store.update(run);
@@ -678,7 +720,7 @@ export class RunCoordinator {
 
   private async pauseBeforeSdkTurn(
     run: DurableRunRecord,
-    stage: 'routing' | 'planning',
+    stage: DurableRunResumeStage,
     error: unknown,
     generation: number,
   ): Promise<void> {
@@ -708,9 +750,35 @@ export class RunCoordinator {
     apiKey: string,
     generation: number,
   ): Promise<boolean> {
-    const stage = run.resumeStage;
+    let stage = run.resumeStage;
     if (!stage || this.isRunInvalidated(generation)) return false;
     const sessionItems = await this.session.getItems();
+    if (stage === 'delivery' && !this.classifyDeliveryContract) {
+      run.resumeStage = undefined;
+      await this.store.update(run);
+      stage = run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+    }
+    if (stage === 'delivery' && this.classifyDeliveryContract) {
+      const deliveryController = new AbortController();
+      this.transitionController = deliveryController;
+      try {
+        run.deliveryContract = await this.classifyDeliveryContract(
+          { ...run.config, apiKey },
+          run.userText,
+          deliveryController.signal,
+          sessionItems,
+        );
+      } catch (error) {
+        await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
+        return false;
+      } finally {
+        if (this.transitionController === deliveryController) this.transitionController = undefined;
+      }
+      if (this.stopRequested || this.isRunInvalidated(generation)) return false;
+      run.resumeStage = undefined;
+      await this.store.update(run);
+      stage = run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+    }
     if (stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
       const routingController = new AbortController();
       this.transitionController = routingController;
@@ -855,6 +923,7 @@ export class RunCoordinator {
         previous.operationId,
         restartTaskPlan(previous.plan),
         restartTeamTask(previous.teamTask),
+        previous.deliveryContract,
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
@@ -1011,6 +1080,7 @@ export class RunCoordinator {
             ...agentOptions,
             taskPlan: run.plan,
             teamTask: run.teamTask,
+            deliveryContract: run.deliveryContract,
             signal: controller.signal,
             protocol: {
               runId: run.id,

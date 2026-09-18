@@ -111,6 +111,12 @@ import {
   evaluateCompletionGate,
   type CompletionGateResult,
 } from "./completionGate";
+import {
+  createDeliveryContract,
+  deliveryContractDecisionSchema,
+  renderDeliveryContract,
+  type DeliveryContract,
+} from "./deliveryContract";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -198,6 +204,8 @@ export interface AgentRunOptions {
   taskPlan?: TaskPlan;
   /** V3 serial Team contract. The executor still uses this same run/session. */
   teamTask?: TeamTask;
+  /** Runtime delivery contract selected before execution. */
+  deliveryContract?: DeliveryContract;
   /** Persists validated step transitions outside the SDK session. */
   onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
@@ -1483,6 +1491,39 @@ export async function planTask(
   return createTaskPlan(result.finalOutput, userText);
 }
 
+export async function classifyDeliveryContract(
+  cfg: AgentConfig,
+  userText: string,
+  signal?: AbortSignal,
+  history: AgentInputItem[] = [],
+): Promise<DeliveryContract | undefined> {
+  const adapter = buildModelAdapter(cfg);
+  const classifier = new Agent({
+    name: "交付契约判定器",
+    model: adapter.model,
+    instructions:
+      "你只做任务交付契约判定,不执行用户任务,不调用工具,不输出正文答案。" +
+      "判断用户本轮是否要求产生、修改、保存或导出一个可交付结果。" +
+      "可交付结果包括代码、文件、文档、报告、数据、项目、配置、方案文本等；普通问答、解释、读取、查询或只要状态信息不算强制交付。" +
+      "如果用户说继续、接着、为什么停了等,必须结合历史判断是否仍在追一个未交付的结果。" +
+      "requiresDeliverable=true 时列出 1 到 8 个必需交付物；每个交付物必须能用 artifacts 或成功工具回执验证。" +
+      "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
+      "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
+      "必须严格返回 schema,不要输出 markdown。",
+    outputType: deliveryContractDecisionSchema,
+  });
+  const tracingDisabled = !(adapter.provider === "openai" && adapter.apiFormat === "responses" && !cfg.baseUrl.trim());
+  const input: string | AgentInputItem[] = history.length
+    ? [...history, { type: "message", role: "user", content: userText }]
+    : userText;
+  const result = await new Runner({ tracingDisabled }).run(classifier, input, {
+    stream: false,
+    maxTurns: 1,
+    signal,
+  });
+  return createDeliveryContract(result.finalOutput);
+}
+
 function isSimpleSingleTurnRequest(userText: string): boolean {
   const text = userText.trim();
   if (!text || text.length > 160) return false;
@@ -1627,6 +1668,7 @@ export async function runAgent(
     cfg.orchestration !== "team" &&
     options.teamTask === undefined &&
     options.taskPlan === undefined &&
+    options.deliveryContract?.requiresDeliverable !== true &&
     requiredTool === undefined;
   const structuredMode = !textStreamingMode;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
@@ -1699,6 +1741,12 @@ export async function runAgent(
         "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
         "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
       : SYSTEM_PROMPT;
+  const deliveryInstructions = options.deliveryContract?.requiresDeliverable
+    ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
+      renderDeliveryContract(options.deliveryContract) +
+      "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
+      "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。"
+    : "";
   let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
     const modelSettings = {
@@ -1709,9 +1757,10 @@ export async function runAgent(
     };
     const instructions = runtimeCompletionRepairInstruction
       ? executionInstructions +
+        deliveryInstructions +
         "\n\n运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
         runtimeCompletionRepairInstruction
-      : executionInstructions;
+      : executionInstructions + deliveryInstructions;
     // The legacy native handoff team remains available for direct callers.
     // Coordinated V3 runs always provide teamTask and use this controlled
     // executor, so their durable graph remains the source of truth.
@@ -2033,12 +2082,14 @@ export async function runAgent(
   };
 
   let completionGateRetries = 0;
-  const runCompletionGate = (finalMessage: string): CompletionGateResult =>
+  const runCompletionGate = (finalMessage: string, artifacts: Artifact[] = []): CompletionGateResult =>
     evaluateCompletionGate({
       userText,
       finalMessage,
       requiredTool,
       toolResults: [...toolResults.values()],
+      artifacts,
+      deliveryContract: options.deliveryContract,
     });
 
   const continueAfterCompletionGateFailure = (
@@ -2406,7 +2457,11 @@ export async function runAgent(
       const message = rawMessage && !isInternalToolArtifactComplaint(rawMessage)
         ? rawMessage
         : fallbackMessage ?? structuredOutput.message;
-      const gate = runCompletionGate(message);
+      const structuredProjection = projectAgentOutput(
+        industrialAgentOutputDefinition,
+        structuredOutput,
+      );
+      const gate = runCompletionGate(message, structuredProjection.artifacts);
       if (!gate.passed) {
         continueAfterCompletionGateFailure(state, gate);
         continue;

@@ -16,6 +16,7 @@ import { parseTaskPlan, type TaskPlan } from './taskPlan';
 import { parseTeamTask, type TeamTask } from '../orchestration/teamTask';
 import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 import type { StAnalyzerSettings } from '../analysis/stAnalyzer';
+import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
 
 export type DurableRunStatus =
   | 'running'
@@ -26,7 +27,7 @@ export type DurableRunStatus =
   | 'refused'
   | 'failed';
 
-export type DurableRunResumeStage = 'routing' | 'planning' | 'execution';
+export type DurableRunResumeStage = 'delivery' | 'routing' | 'planning' | 'execution';
 
 export interface DurableRunConfig {
   baseUrl: string;
@@ -62,6 +63,8 @@ export interface DurableRunRecord {
   plan?: TaskPlan;
   /** V3 team contract and serial role progress for complex tasks. */
   teamTask?: TeamTask;
+  /** Runtime-visible contract for user-requested deliverables. */
+  deliveryContract?: DeliveryContract;
   approvals: ApprovalRequest[];
   /** Canonical structured result. Absent only while the run is still active. */
   result?: AgentResult<unknown>;
@@ -150,6 +153,7 @@ export interface RunStore {
     operationId?: string,
     plan?: TaskPlan,
     teamTask?: TeamTask,
+    deliveryContract?: DeliveryContract,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -291,7 +295,7 @@ export class JsonRunStore implements RunStore {
       (run.config.stAnalyzerSettings !== undefined && !isStAnalyzerSettings(run.config.stAnalyzerSettings)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||
-      (run.resumeStage !== undefined && !['routing', 'planning', 'execution'].includes(run.resumeStage)) ||
+      (run.resumeStage !== undefined && !['delivery', 'routing', 'planning', 'execution'].includes(run.resumeStage)) ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
@@ -340,6 +344,13 @@ export class JsonRunStore implements RunStore {
         parseTeamTask(run.teamTask);
       } catch {
         throw new Error(`invalid ${field} team task`);
+      }
+    }
+    if (run.deliveryContract !== undefined) {
+      try {
+        run.deliveryContract = parseDeliveryContract(run.deliveryContract);
+      } catch {
+        throw new Error(`invalid ${field} delivery contract`);
       }
     }
   }
@@ -407,6 +418,7 @@ export class JsonRunStore implements RunStore {
     operationId: string = randomUUID(),
     plan?: TaskPlan,
     teamTask?: TeamTask,
+    deliveryContract?: DeliveryContract,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -421,6 +433,7 @@ export class JsonRunStore implements RunStore {
       canContinue: false,
       plan,
       teamTask,
+      deliveryContract,
       output: '',
       events: [],
       usage: { ...EMPTY_USAGE },

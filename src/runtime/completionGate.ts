@@ -1,5 +1,6 @@
-import type { ToolResult } from '../protocol/results';
+import type { Artifact, ToolResult } from '../protocol/results';
 import type { RequiredAgentTool } from '../policy/actionPolicy';
+import type { DeliveryContract } from './deliveryContract';
 
 export interface CompletionGateToolRecord {
   name: string;
@@ -13,6 +14,8 @@ export interface CompletionGateInput {
   finalMessage: string;
   toolResults: CompletionGateToolRecord[];
   requiredTool?: RequiredAgentTool;
+  artifacts?: Artifact[];
+  deliveryContract?: DeliveryContract;
 }
 
 export interface CompletionGateIssue {
@@ -43,7 +46,10 @@ export function evaluateCompletionGate(
   const records = input.toolResults
     .map((record, index) => ({ ...record, order: record.order ?? index + 1 }))
     .sort((a, b) => a.order - b.order);
-  const unresolvedIssues = collectUnresolvedIssues(records, input.userText);
+  const unresolvedIssues = [
+    ...collectUnresolvedIssues(records, input),
+    ...collectDeliveryContractIssues(input, records),
+  ];
   if (!unresolvedIssues.length) return { passed: true };
 
   const finalMessage = input.finalMessage.trim();
@@ -74,17 +80,17 @@ export function evaluateCompletionGate(
 
 function collectUnresolvedIssues(
   records: (CompletionGateToolRecord & { order: number })[],
-  userText: string,
+  input: CompletionGateInput,
 ): CompletionGateIssue[] {
   const issues = records
-    .map((record) => issueFromToolResult(record, userText))
+    .map((record) => issueFromToolResult(record, input))
     .filter((issue): issue is CompletionGateIssue => issue !== undefined);
-  return issues.filter((issue) => !hasLaterResolution(issue, records));
+  return issues.filter((issue) => !hasLaterResolution(issue, records, input));
 }
 
 function issueFromToolResult(
   record: CompletionGateToolRecord & { order: number },
-  userText: string,
+  input: CompletionGateInput,
 ): CompletionGateIssue | undefined {
   const diagnostics = Array.isArray(record.result.diagnostics)
     ? record.result.diagnostics
@@ -120,29 +126,95 @@ function issueFromToolResult(
     risk: record.result.risk,
     effect: record.result.effect,
     summary,
-    requiresRepair: shouldRequireRepair(record.result, userText),
+    requiresRepair: shouldRequireRepair(record.result, input),
   };
 }
 
 function hasLaterResolution(
   issue: CompletionGateIssue,
   records: (CompletionGateToolRecord & { order: number })[],
+  input: CompletionGateInput,
 ): boolean {
   return records.some((record) => {
     if (record.order <= issue.order) return false;
     if (record.name !== issue.toolName) return false;
     if (targetKeyFor(record) !== issue.targetKey) return false;
-    return !issueFromToolResult(record, '');
+    return !issueFromToolResult(record, input);
   });
 }
 
-function shouldRequireRepair(result: ToolResult, userText: string): boolean {
+function shouldRequireRepair(result: ToolResult, input: CompletionGateInput): boolean {
   if (result.risk !== 'plan') return false;
-  return hasDeliveryIntent(userText);
+  return input.deliveryContract?.requiresDeliverable === true;
 }
 
-function hasDeliveryIntent(userText: string): boolean {
-  return /(?:写|生成|编写|创建|实现|修正|修改|完善|导出|保存|完成|搭建|构建|\bwrite\b|\bgenerate\b|\bcreate\b|\bimplement\b|\bfix\b|\brepair\b|\bmodify\b|\bexport\b|\bsave\b|\bbuild\b)/iu.test(userText);
+function collectDeliveryContractIssues(
+  input: CompletionGateInput,
+  records: (CompletionGateToolRecord & { order: number })[],
+): CompletionGateIssue[] {
+  const contract = input.deliveryContract;
+  if (!contract?.requiresDeliverable) return [];
+  const artifacts = input.artifacts ?? [];
+  return contract.deliverables
+    .filter((deliverable) => deliverable.required)
+    .filter((deliverable) => !hasDeliveryEvidence(deliverable, artifacts, records))
+    .map((deliverable, index) => ({
+      toolName: 'delivery_contract',
+      args: JSON.stringify(deliverable),
+      targetKey: `delivery:${deliverable.title || index + 1}`,
+      order: records.length + index + 1,
+      risk: 'plan' as const,
+      effect: 'none' as const,
+      summary: `缺少交付证据: ${deliverable.description || deliverable.title}`,
+      requiresRepair: true,
+    }));
+}
+
+function hasDeliveryEvidence(
+  deliverable: DeliveryContract['deliverables'][number],
+  artifacts: Artifact[],
+  records: (CompletionGateToolRecord & { order: number })[],
+): boolean {
+  return deliverable.acceptableEvidence.some((evidence) => {
+    if (evidence === 'final_artifact') return hasArtifactEvidence(deliverable, artifacts);
+    return hasToolEvidence(evidence, records);
+  });
+}
+
+function hasArtifactEvidence(
+  deliverable: DeliveryContract['deliverables'][number],
+  artifacts: Artifact[],
+): boolean {
+  return artifacts.some((artifact) => {
+    if (!artifact) return false;
+    const hasPayload = !!artifact.uri || !!artifact.content?.trim();
+    if (!hasPayload) return false;
+    if (deliverable.kind === 'unknown') return true;
+    if (deliverable.kind === 'text') return artifact.kind === 'report' || artifact.kind === 'unknown' || artifact.kind === 'data';
+    if (deliverable.kind === 'project') return artifact.kind === 'file' || artifact.kind === 'report' || artifact.kind === 'unknown';
+    return artifact.kind === deliverable.kind || artifact.kind === 'unknown';
+  });
+}
+
+function hasToolEvidence(
+  evidence: DeliveryContract['deliverables'][number]['acceptableEvidence'][number],
+  records: (CompletionGateToolRecord & { order: number })[],
+): boolean {
+  return records.some((record) => {
+    if (!toolResultSucceeded(record.result)) return false;
+    if (evidence === 'successful_tool') return true;
+    if (evidence === 'successful_write') return record.result.risk === 'write' || record.result.effect === 'filesystem' || record.result.effect === 'device';
+    if (evidence === 'successful_export') return record.name === 'export_st_program' || record.name.toLowerCase().includes('export');
+    return false;
+  });
+}
+
+function toolResultSucceeded(result: ToolResult): boolean {
+  const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+  const blockingDiagnostics = diagnostics.some((diagnostic) =>
+    BLOCKING_DIAGNOSTIC_SEVERITIES.has(diagnostic.severity),
+  );
+  return result.ok === true && !result.error && !blockingDiagnostics;
 }
 
 function messageAcknowledgesProblem(message: string): boolean {
@@ -238,6 +310,9 @@ function buildRepairInstruction(
   const repairOnly = issues.filter((issue) => issue.requiresRepair);
   if (repairOnly.length) {
     lines.push('这些问题属于生成/修复/交付流程中的校验或计划失败,需要修正后重新验证通过,不能只报告失败就结束。');
+  }
+  if (issues.some((issue) => issue.toolName === 'delivery_contract')) {
+    lines.push('这些问题来自交付契约: 用户要的是可交付结果。你必须实际交付内容并放入最终 artifacts, 或调用能产生交付证据的工具；不能只给过程说明或口头承诺。');
   }
   lines.push(
     '未处理问题: ' +

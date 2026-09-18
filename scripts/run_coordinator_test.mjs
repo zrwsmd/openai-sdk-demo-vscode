@@ -6,6 +6,7 @@ import {
   JsonRunStore,
   RunCoordinator,
   createTeamTask,
+  createDeliveryContract,
   AgentActionVerificationError,
 } from './agent.testbundle.mjs';
 
@@ -64,6 +65,44 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
     verifyTeamTask,
   };
+}
+
+// Delivery contracts are classified before execution, persisted with the run,
+// and passed into the executor so CompletionGate can verify actual evidence.
+{
+  let classifierCalls = 0;
+  let receivedContract;
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '用户要求生成可交付代码',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+    }],
+  });
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    receivedContract = options.deliveryContract;
+    return { status: 'completed', output: 'delivered', usage, result: completedAgentResult('delivered') };
+  }, undefined, {
+    classifyDeliveryContract: async (_cfg, text, _signal, history) => {
+      classifierCalls += 1;
+      if (text !== '生成一个 ST 程序') throw new Error('delivery classifier received wrong user text');
+      if (!Array.isArray(history)) throw new Error('delivery classifier did not receive session history');
+      return contract;
+    },
+  });
+  await test.coordinator.start('生成一个 ST 程序', config, 'key');
+  const completed = await test.store.getLast();
+  if (
+    classifierCalls !== 1 ||
+    receivedContract?.requiresDeliverable !== true ||
+    completed?.deliveryContract?.deliverables?.[0]?.title !== 'ST 程序'
+  ) {
+    throw new Error('delivery contract was not classified, persisted, and passed to executor');
+  }
 }
 
 // A model-selected generic plan is persisted and progress is validated in
