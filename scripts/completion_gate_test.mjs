@@ -181,12 +181,78 @@ const codeContract = createDeliveryContract({
 }
 
 {
+  const stContract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '用户要求生成并保存 ST 程序',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
+    }],
+  });
+  const gate = evaluateCompletionGate({
+    userText: '生成一个 ST 程序',
+    finalMessage: '已生成、校验并保存 WaterPumpControl.st。',
+    deliveryContract: stContract,
+    toolResults: [
+      {
+        name: 'write_file',
+        args: JSON.stringify({ path: 'WaterPumpControl.st', content: 'bad' }),
+        order: 1,
+        result: createToolResult({
+          ok: false,
+          error: 'ST 代码在写入前必须先通过 validate_st_code',
+          diagnostics: [{ code: 'st_validation_required', message: '未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。', severity: 'error' }],
+          effect: 'none',
+          risk: 'plan',
+        }),
+      },
+      {
+        name: 'validate_st_code',
+        args: JSON.stringify({ code: 'bad' }),
+        order: 2,
+        result: createToolResult({
+          ok: false,
+          error: 'ST 校验未通过',
+          diagnostics: [{ code: 'E1', message: '语法错误', severity: 'error' }],
+          effect: 'none',
+          risk: 'plan',
+        }),
+      },
+      {
+        name: 'validate_st_code',
+        args: JSON.stringify({ code: 'PROGRAM WaterPumpControl\nEND_PROGRAM' }),
+        order: 3,
+        result: createToolResult({ ok: true, data: { errorCount: 0 }, effect: 'none', risk: 'plan' }),
+      },
+      {
+        name: 'write_file',
+        args: '{}',
+        order: 4,
+        result: createToolResult({
+          ok: true,
+          data: { file: 'WaterPumpControl.st', bytes: 7081 },
+          effect: 'filesystem',
+          risk: 'write',
+        }),
+      },
+    ],
+  });
+  console.log('[completion_gate:8] ST 旧失败被后续交付证据解决 =', gate.passed);
+  assert(gate.passed, 'ST 交付后续校验和写入成功后，不应被旧失败继续阻断');
+}
+
+{
   const gate = evaluateCompletionGate({
     userText: '解释一下 ST 语言',
     finalMessage: 'ST 是 IEC 61131-3 中的结构化文本语言。',
     toolResults: [],
   });
-  console.log('[completion_gate:8] 无契约普通回答不阻断 =', gate.passed);
+  console.log('[completion_gate:9] 无契约普通回答不阻断 =', gate.passed);
   assert(gate.passed, '没有交付契约时，普通回答不应被新逻辑阻断');
 }
 

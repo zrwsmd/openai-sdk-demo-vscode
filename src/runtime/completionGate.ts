@@ -135,12 +135,49 @@ function hasLaterResolution(
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
 ): boolean {
+  if (hasLaterDirectResolution(issue, records, input)) return true;
+  return hasLaterDeliveryResolution(issue, records, input);
+}
+
+function hasLaterDirectResolution(
+  issue: CompletionGateIssue,
+  records: (CompletionGateToolRecord & { order: number })[],
+  input: CompletionGateInput,
+): boolean {
   return records.some((record) => {
     if (record.order <= issue.order) return false;
     if (record.name !== issue.toolName) return false;
     if (targetKeyFor(record) !== issue.targetKey) return false;
     return !issueFromToolResult(record, input);
   });
+}
+
+function hasLaterDeliveryResolution(
+  issue: CompletionGateIssue,
+  records: (CompletionGateToolRecord & { order: number })[],
+  input: CompletionGateInput,
+): boolean {
+  const contract = input.deliveryContract;
+  if (!contract?.requiresDeliverable) return false;
+  const laterRecords = records.filter((record) => record.order > issue.order);
+  const deliverables = contract.deliverables.filter((deliverable) => deliverable.required);
+
+  if (issue.toolName === 'write_file') {
+    return deliverables.some((deliverable) =>
+      hasToolEvidence('successful_write', laterRecords, deliverable),
+    );
+  }
+
+  if (issue.toolName === 'export_st_program') {
+    return deliverables.some((deliverable) =>
+      hasToolEvidence('successful_export', laterRecords, deliverable),
+    );
+  }
+
+  return deliverables.some((deliverable) =>
+    deliverable.requiredVerificationTools?.includes(issue.toolName) &&
+    hasSuccessfulVerification(issue.toolName, laterRecords),
+  );
 }
 
 function shouldRequireRepair(result: ToolResult, input: CompletionGateInput): boolean {
@@ -238,8 +275,7 @@ function hasToolEvidence(
       if (!isWrite) return false;
       const extension = deliverable.workspaceFileExtension?.toLowerCase();
       if (!extension) return true;
-      const args = parseArgs(record.args);
-      const filePath = stringField(args, ['path', 'file', 'uri']);
+      const filePath = filePathFor(record);
       return !!filePath && filePath.toLowerCase().endsWith(extension);
     }
     if (evidence === 'successful_export') return record.name === 'export_st_program' || record.name.toLowerCase().includes('export');
@@ -281,11 +317,35 @@ function messageClaimsCompletion(message: string): boolean {
 }
 
 function targetKeyFor(record: CompletionGateToolRecord): string {
+  const target = targetFor(record);
+  return target ? `${record.name}:${normalizeTarget(target)}` : record.name;
+}
+
+function targetFor(record: CompletionGateToolRecord): string | undefined {
   const args = parseArgs(record.args);
   const target =
     stringField(args, ['path', 'file', 'uri', 'url', 'name', 'command']) ??
-    arrayField(args, ['paths', 'files', 'names']);
-  return target ? `${record.name}:${target}` : record.name;
+    arrayField(args, ['paths', 'files', 'names']) ??
+    filePathFor(record);
+  return target;
+}
+
+function filePathFor(record: CompletionGateToolRecord): string | undefined {
+  const args = parseArgs(record.args);
+  const fromArgs = stringField(args, ['path', 'file', 'uri']);
+  if (fromArgs) return fromArgs;
+  const data = record.result.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  return stringField(data as Record<string, unknown>, [
+    'path',
+    'file',
+    'uri',
+    'relativePath',
+  ]);
+}
+
+function normalizeTarget(value: string): string {
+  return value.trim().replace(/\\/g, '/');
 }
 
 function parseArgs(raw: string): Record<string, unknown> {
