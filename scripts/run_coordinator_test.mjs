@@ -398,6 +398,71 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// Multiple SDK approvals belong to one checkpoint. The coordinator must
+// accumulate user decisions and resume the SDK state only after the whole
+// pending batch has been decided; otherwise each click replays the original
+// interruption set and the run appears stuck with the same remaining count.
+{
+  let executorCalls = 0;
+  const seen = [];
+  const approvals = [
+    { id: 'approval-java', name: 'run_command', args: '{"command":"java -version"}' },
+    { id: 'approval-git', name: 'run_command', args: '{"command":"git --version"}' },
+    { id: 'approval-node', name: 'run_command', args: '{"command":"node --version"}' },
+  ];
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    executorCalls += 1;
+    seen.push({ initialState: options.initialState, decisions: options.decisions });
+    if (executorCalls === 1) {
+      return {
+        status: 'awaiting_approval',
+        output: '需要审批多个命令',
+        usage,
+        state: 'serialized-multi-approval-state',
+        approvals,
+        result: {
+          protocolVersion: 1,
+          status: 'awaiting_approval',
+          state: 'serialized-multi-approval-state',
+          approvals,
+          diagnostics: [],
+          artifacts: [],
+          usage,
+        },
+      };
+    }
+    if (
+      options.initialState !== 'serialized-multi-approval-state' ||
+      options.decisions?.['approval-java'] !== true ||
+      options.decisions?.['approval-git'] !== true ||
+      options.decisions?.['approval-node'] !== true
+    ) {
+      throw new Error('multi approval resume did not receive all accumulated decisions');
+    }
+    return { status: 'completed', output: 'versions complete', usage, result: completedAgentResult('versions complete') };
+  });
+  await test.coordinator.start('check versions with parallel commands', config, 'key');
+  let waiting = await test.store.getLast();
+  if (waiting?.status !== 'awaiting_approval' || waiting.approvals.length !== 3) {
+    throw new Error('multi approval checkpoint was not persisted');
+  }
+  await test.coordinator.approve(waiting.id, 'approval-java', true, 'key');
+  waiting = await test.store.getLast();
+  if (executorCalls !== 1 || waiting?.status !== 'awaiting_approval' || waiting.approvals.length !== 2 || waiting.approvalDecisions?.['approval-java'] !== true) {
+    throw new Error('first approval decision was not accumulated without resuming');
+  }
+  await test.coordinator.approve(waiting.id, 'approval-git', true, 'key');
+  waiting = await test.store.getLast();
+  if (executorCalls !== 1 || waiting?.status !== 'awaiting_approval' || waiting.approvals.length !== 1 || waiting.approvalDecisions?.['approval-git'] !== true) {
+    throw new Error('second approval decision was not accumulated without resuming');
+  }
+  await test.coordinator.approve(waiting.id, 'approval-node', true, 'key');
+  const completed = await test.store.getLast();
+  if (executorCalls !== 2 || completed?.status !== 'completed' || seen[1]?.decisions?.['approval-java'] !== true || completed.approvalDecisions !== undefined) {
+    throw new Error('multi approval batch did not resume once with all decisions');
+  }
+}
+
 // The request budget caps a ready parallel batch before any model call starts,
 // then fails the still-incomplete graph at the persisted budget boundary.
 {

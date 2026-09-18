@@ -597,17 +597,39 @@ export class RunCoordinator {
         return;
       }
       if (!run.state) return;
-      run.status = 'running';
-      await this.store.update(run);
-      if (this.isClearing(generation)) return;
-      await this.audit('run_resumed', run, { approvalId });
-      if (this.isClearing(generation)) return;
-      this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
+      const approvalDecisions = {
+        ...(run.approvalDecisions ?? {}),
+        [approvalId]: approved,
+      };
       this.ensureProtocolFactory(run);
       this.emitProtocol(this.protocolFactory!.next({
         type: 'approval.resolved',
         payload: { approvalId, approved, reason: approved ? undefined : 'user_rejected' },
       }));
+      const remainingApprovals = approved
+        ? run.approvals.filter((approval) => approval.id !== approvalId)
+        : [];
+      if (approved && remainingApprovals.length > 0) {
+        run.approvals = remainingApprovals;
+        run.approvalDecisions = approvalDecisions;
+        run.status = 'awaiting_approval';
+        run.canContinue = false;
+        await this.store.update(run);
+        this.writeLog(
+          `[run:${run.id}] 已记录审批决定 (${Object.keys(approvalDecisions).length} 项), ` +
+            `等待剩余 ${remainingApprovals.length} 项`,
+        );
+        this.emit({ type: 'awaitingApproval', runId: run.id, approvals: remainingApprovals });
+        return;
+      }
+      run.status = 'running';
+      run.approvals = [];
+      run.approvalDecisions = undefined;
+      await this.store.update(run);
+      if (this.isClearing(generation)) return;
+      await this.audit('run_resumed', run, { approvalId });
+      if (this.isClearing(generation)) return;
+      this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
       if (this.stopRequested) {
         this.stopRequested = false;
         await this.pausePending(run, false);
@@ -615,7 +637,7 @@ export class RunCoordinator {
       }
       await this.execute(run, apiKey, {
         initialState: run.state,
-        decisions: { [approvalId]: approved },
+        decisions: approvalDecisions,
       });
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
@@ -1152,6 +1174,7 @@ export class RunCoordinator {
               run.canContinue = false;
               run.state = checkpoint.state;
               run.approvals = checkpoint.approvals;
+              run.approvalDecisions = undefined;
               run.output = baseOutput + checkpoint.output;
               run.usage = checkpoint.usage;
               await this.store.update(run);
@@ -1219,6 +1242,9 @@ export class RunCoordinator {
       run.result = result.result;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
+      run.approvalDecisions = result.status === 'awaiting_approval'
+        ? run.approvalDecisions
+        : undefined;
       const manuallyPaused = this.pauseRequested && result.status === 'cancelled';
       const resumable = manuallyPaused
         && typeof result.state === 'string'

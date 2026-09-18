@@ -66,6 +66,8 @@ export interface DurableRunRecord {
   /** Runtime-visible contract for user-requested deliverables. */
   deliveryContract?: DeliveryContract;
   approvals: ApprovalRequest[];
+  /** Decisions collected for the current SDK approval checkpoint. */
+  approvalDecisions?: Record<string, boolean>;
   /** Canonical structured result. Absent only while the run is still active. */
   result?: AgentResult<unknown>;
   /** Derived message projection used for session/UI recovery. */
@@ -307,6 +309,9 @@ export class JsonRunStore implements RunStore {
           typeof approval.name !== 'string' ||
           typeof approval.args !== 'string',
       ) ||
+      (run.approvalDecisions !== undefined &&
+        (!isRecord(run.approvalDecisions) ||
+          Object.values(run.approvalDecisions).some((decision) => typeof decision !== 'boolean'))) ||
       typeof run.output !== 'string' ||
       (run.events !== undefined && !Array.isArray(run.events)) ||
       !run.usage ||
@@ -467,6 +472,7 @@ export class JsonRunStore implements RunStore {
         status: 'running',
         canContinue: false,
         approvals: [],
+        approvalDecisions: undefined,
         result: undefined,
         error: undefined,
         updatedAt: new Date().toISOString(),
