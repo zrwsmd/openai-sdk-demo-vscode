@@ -155,7 +155,7 @@ function collectDeliveryContractIssues(
   const contract = input.deliveryContract;
   if (!contract?.requiresDeliverable) return [];
   const artifacts = input.artifacts ?? [];
-  return contract.deliverables
+  const deliveryIssues = contract.deliverables
     .filter((deliverable) => deliverable.required)
     .filter((deliverable) => !hasDeliveryEvidence(deliverable, artifacts, records))
     .map((deliverable, index) => ({
@@ -168,6 +168,23 @@ function collectDeliveryContractIssues(
       summary: `缺少交付证据: ${deliverable.description || deliverable.title}`,
       requiresRepair: true,
     }));
+  const verificationIssues = contract.deliverables
+    .filter((deliverable) => deliverable.required)
+    .flatMap((deliverable, deliverableIndex) =>
+      (deliverable.requiredVerificationTools ?? [])
+        .filter((toolName) => !hasSuccessfulVerification(toolName, records))
+        .map((toolName, verificationIndex) => ({
+          toolName: 'delivery_verification',
+          args: JSON.stringify({ deliverable: deliverable.title, tool: toolName }),
+          targetKey: `verification:${deliverable.title || deliverableIndex + 1}:${toolName}`,
+          order: records.length + contract.deliverables.length + deliverableIndex * 8 + verificationIndex + 1,
+          risk: 'plan' as const,
+          effect: 'none' as const,
+          summary: `缺少必要验证: ${toolName} (${deliverable.description || deliverable.title})`,
+          requiresRepair: true,
+        })),
+    );
+  return [...deliveryIssues, ...verificationIssues];
 }
 
 function hasDeliveryEvidence(
@@ -175,9 +192,15 @@ function hasDeliveryEvidence(
   artifacts: Artifact[],
   records: (CompletionGateToolRecord & { order: number })[],
 ): boolean {
+  if (
+    deliverable.workspacePersistence === 'required' &&
+    !hasToolEvidence('successful_write', records, deliverable)
+  ) {
+    return false;
+  }
   return deliverable.acceptableEvidence.some((evidence) => {
     if (evidence === 'final_artifact') return hasArtifactEvidence(deliverable, artifacts);
-    return hasToolEvidence(evidence, records);
+    return hasToolEvidence(evidence, records, deliverable);
   });
 }
 
@@ -187,7 +210,9 @@ function hasArtifactEvidence(
 ): boolean {
   return artifacts.some((artifact) => {
     if (!artifact) return false;
-    const hasPayload = !!artifact.uri || !!artifact.content?.trim();
+    // A model-provided URI/name is only a claim. Inline artifact evidence must
+    // contain the actual payload; real files are evidenced by successful tools.
+    const hasPayload = !!artifact.content?.trim();
     if (!hasPayload) return false;
     if (deliverable.kind === 'unknown') return true;
     if (deliverable.kind === 'text') return artifact.kind === 'report' || artifact.kind === 'unknown' || artifact.kind === 'data';
@@ -199,13 +224,41 @@ function hasArtifactEvidence(
 function hasToolEvidence(
   evidence: DeliveryContract['deliverables'][number]['acceptableEvidence'][number],
   records: (CompletionGateToolRecord & { order: number })[],
+  deliverable: DeliveryContract['deliverables'][number],
 ): boolean {
   return records.some((record) => {
     if (!toolResultSucceeded(record.result)) return false;
     if (evidence === 'successful_tool') return true;
-    if (evidence === 'successful_write') return record.result.risk === 'write' || record.result.effect === 'filesystem' || record.result.effect === 'device';
+    if (evidence === 'successful_write') {
+      const isWrite =
+        record.name === 'write_file' ||
+        record.result.risk === 'write' ||
+        record.result.effect === 'filesystem' ||
+        record.result.effect === 'device';
+      if (!isWrite) return false;
+      const extension = deliverable.workspaceFileExtension?.toLowerCase();
+      if (!extension) return true;
+      const args = parseArgs(record.args);
+      const filePath = stringField(args, ['path', 'file', 'uri']);
+      return !!filePath && filePath.toLowerCase().endsWith(extension);
+    }
     if (evidence === 'successful_export') return record.name === 'export_st_program' || record.name.toLowerCase().includes('export');
     return false;
+  });
+}
+
+function hasSuccessfulVerification(
+  toolName: string,
+  records: (CompletionGateToolRecord & { order: number })[],
+): boolean {
+  return records.some((record) => {
+    if (record.name !== toolName || !toolResultSucceeded(record.result)) return false;
+    if (toolName !== 'validate_st_code') return true;
+    const data = record.result.data;
+    return !!data &&
+      typeof data === 'object' &&
+      !Array.isArray(data) &&
+      (data as Record<string, unknown>).errorCount === 0;
   });
 }
 

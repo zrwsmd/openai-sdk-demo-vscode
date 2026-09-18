@@ -17,6 +17,12 @@ export const deliveryEvidenceSchema = z.enum([
   'successful_export',
 ]);
 
+export const workspacePersistenceSchema = z.enum([
+  'required',
+  'not_required',
+  'optional',
+]);
+
 export const deliveryContractDecisionSchema = z.object({
   requiresDeliverable: z.boolean(),
   reason: z.string(),
@@ -26,6 +32,9 @@ export const deliveryContractDecisionSchema = z.object({
     description: z.string(),
     required: z.boolean(),
     acceptableEvidence: z.array(deliveryEvidenceSchema).min(1),
+    workspacePersistence: workspacePersistenceSchema.optional(),
+    workspaceFileExtension: z.string().regex(/^\.[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+    requiredVerificationTools: z.array(z.string().min(1)).max(8).optional(),
   }).strict()).max(8),
 }).strict();
 
@@ -40,6 +49,36 @@ function compact(value: string, maxLength: number): string {
   return value.trim().replace(/\s+/g, ' ').slice(0, maxLength);
 }
 
+type DeliveryItem = DeliveryContractDecision['deliverables'][number];
+
+function normalizeDeliverable(item: DeliveryItem) {
+  // Generated code is persisted by default. The classifier can explicitly set
+  // not_required when the user asks to only display the code.
+  const workspacePersistence =
+    item.workspacePersistence ??
+    (item.kind === 'code' ? 'required' : 'optional');
+  const acceptableEvidence = new Set(item.acceptableEvidence);
+  if (workspacePersistence === 'required') {
+    acceptableEvidence.add('successful_write');
+  }
+  const extension = item.workspaceFileExtension?.trim();
+  const requiredVerificationTools = new Set(item.requiredVerificationTools ?? []);
+  if (item.kind === 'code' && extension?.toLowerCase() === '.st') {
+    requiredVerificationTools.add('validate_st_code');
+  }
+  return {
+    ...item,
+    title: compact(item.title, 120) || '交付物',
+    description: compact(item.description, 600) || compact(item.title, 120) || '用户要求的交付内容',
+    acceptableEvidence: [...acceptableEvidence],
+    workspacePersistence,
+    ...(extension ? { workspaceFileExtension: extension } : {}),
+    ...(requiredVerificationTools.size
+      ? { requiredVerificationTools: [...requiredVerificationTools] }
+      : {}),
+  };
+}
+
 export function createDeliveryContract(value: unknown): DeliveryContract | undefined {
   const decision = deliveryContractDecisionSchema.parse(value);
   if (!decision.requiresDeliverable) {
@@ -52,12 +91,7 @@ export function createDeliveryContract(value: unknown): DeliveryContract | undef
   }
   const deliverables = decision.deliverables
     .filter((item) => item.required)
-    .map((item) => ({
-      ...item,
-      title: compact(item.title, 120) || '交付物',
-      description: compact(item.description, 600) || compact(item.title, 120) || '用户要求的交付内容',
-      acceptableEvidence: [...new Set(item.acceptableEvidence)],
-    }));
+    .map(normalizeDeliverable);
   if (!deliverables.length) {
     return deliveryContractSchema.parse({
       schemaVersion: 1,
@@ -75,7 +109,12 @@ export function createDeliveryContract(value: unknown): DeliveryContract | undef
 }
 
 export function parseDeliveryContract(value: unknown): DeliveryContract {
-  return deliveryContractSchema.parse(value);
+  const contract = deliveryContractSchema.parse(value);
+  if (!contract.requiresDeliverable) return contract;
+  return deliveryContractSchema.parse({
+    ...contract,
+    deliverables: contract.deliverables.map(normalizeDeliverable),
+  });
 }
 
 export function renderDeliveryContract(contract: DeliveryContract): string {
@@ -85,7 +124,7 @@ export function renderDeliveryContract(contract: DeliveryContract): string {
   return [
     `交付契约: ${contract.reason || '用户要求可交付结果'}`,
     ...contract.deliverables.map((item, index) =>
-      `${index + 1}. ${item.title} (${item.kind}): ${item.description}; 可接受证据: ${item.acceptableEvidence.join(', ')}`,
+      `${index + 1}. ${item.title} (${item.kind}): ${item.description}; 可接受证据: ${item.acceptableEvidence.join(', ')}; 工作区落盘: ${item.workspacePersistence ?? 'optional'}${item.workspaceFileExtension ? ` (${item.workspaceFileExtension})` : ''}${item.requiredVerificationTools?.length ? `; 必须验证: ${item.requiredVerificationTools.join(', ')}` : ''}`,
     ),
   ].join('\n');
 }

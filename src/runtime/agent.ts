@@ -74,6 +74,7 @@ import {
   type Artifact,
   type ToolResult,
   type UsageSummary,
+  parseToolResult,
 } from "../protocol/results";
 import { AgentStreamAdapter } from "./streaming";
 import type { AgentEventFactory, AgentProtocolEvent } from "../protocol/events";
@@ -369,11 +370,163 @@ export function commandToolResult(
   });
 }
 
-function buildTools(cfg: AgentConfig) {
+function sessionOutputText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const text = value
+      .map((item) => sessionOutputText(item))
+      .filter((item): item is string => Boolean(item))
+      .join("");
+    return text || undefined;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text;
+    if ("output" in record) return sessionOutputText(record.output);
+    if ("content" in record) return sessionOutputText(record.content);
+  }
+  return undefined;
+}
+
+async function loadValidatedStContent(
+  session: Session,
+  userText: string,
+): Promise<Set<string>> {
+  const validated = new Set<string>();
+  const calls = new Map<string, { name: string }>();
+  let items: AgentInputItem[] = [];
+  try {
+    items = await session.getItems();
+  } catch {
+    return validated;
+  }
+  const startIndex = [...items]
+    .map((item, index) => ({ item, index }))
+    .reverse()
+    .find(({ item }) => {
+      const value = item as { type?: string; role?: string; content?: unknown };
+      return value.type === "message" &&
+        value.role === "user" &&
+        typeof value.content === "string" &&
+        value.content === userText;
+    })?.index ?? 0;
+  for (const raw of items.slice(startIndex)) {
+    const item = raw as {
+      type?: string;
+      callId?: string;
+      name?: string;
+      output?: unknown;
+    };
+    if (item.type === "function_call" && item.callId && item.name) {
+      calls.set(item.callId, { name: item.name });
+      continue;
+    }
+    if (
+      item.type !== "function_call_result" &&
+      item.type !== "function_call_output"
+    ) {
+      continue;
+    }
+    const call = item.callId ? calls.get(item.callId) : undefined;
+    if (call?.name !== "validate_st_code") continue;
+    const text = sessionOutputText(item.output);
+    if (!text) continue;
+    try {
+      const result = JSON.parse(text) as {
+        ok?: unknown;
+        data?: { errorCount?: unknown; validatedContentHash?: unknown };
+      };
+      if (
+        result.ok === true &&
+        result.data?.errorCount === 0 &&
+        typeof result.data.validatedContentHash === "string"
+      ) {
+        validated.add(result.data.validatedContentHash);
+      }
+    } catch {
+      // Ignore non-protocol historical tool output.
+    }
+  }
+  return validated;
+}
+
+async function loadHistoricalToolResults(
+  session: Session,
+  userText: string,
+): Promise<Array<{ name: string; args: string; result: ToolResult; order: number }>> {
+  const calls = new Map<string, { name: string; args: string }>();
+  const records: Array<{ name: string; args: string; result: ToolResult; order: number }> = [];
+  let items: AgentInputItem[] = [];
+  try {
+    items = await session.getItems();
+  } catch {
+    return records;
+  }
+  const startIndex = [...items]
+    .map((item, index) => ({ item, index }))
+    .reverse()
+    .find(({ item }) => {
+      const value = item as { type?: string; role?: string; content?: unknown };
+      return value.type === "message" &&
+        value.role === "user" &&
+        typeof value.content === "string" &&
+        value.content === userText;
+    })?.index ?? 0;
+  let order = 0;
+  for (const raw of items.slice(startIndex)) {
+    const item = raw as {
+      type?: string;
+      callId?: string;
+      name?: string;
+      arguments?: string;
+      output?: unknown;
+    };
+    if (item.type === "function_call" && item.callId && item.name) {
+      calls.set(item.callId, {
+        name: item.name,
+        args: typeof item.arguments === "string" ? item.arguments : "",
+      });
+      continue;
+    }
+    if (
+      item.type !== "function_call_result" &&
+      item.type !== "function_call_output"
+    ) {
+      continue;
+    }
+    const call = item.callId ? calls.get(item.callId) : undefined;
+    const text = sessionOutputText(item.output);
+    if (!call || !text) continue;
+    try {
+      records.push({
+        ...call,
+        result: parseToolResult(JSON.parse(text)),
+        order: ++order,
+      });
+    } catch {
+      // Ignore non-protocol historical tool output.
+    }
+  }
+  return records;
+}
+
+function buildTools(
+  cfg: AgentConfig,
+  deliveryContract?: DeliveryContract,
+  previouslyValidatedStContent: Set<string> = new Set(),
+) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
   const stAnalyzer = cfg.stAnalyzer ?? new FallbackStAnalyzer();
   const stToolOptions = cfg.stAnalyzerOptions ?? {};
+  const requiresStValidation = deliveryContract?.deliverables.some(
+    (deliverable) =>
+      deliverable.required &&
+      deliverable.requiredVerificationTools?.includes("validate_st_code"),
+  ) === true;
+  const validatedStContent = previouslyValidatedStContent;
+  const stContentHash = (content: string): string =>
+    createHash("sha1").update(content).digest("hex");
   /**
    * 解析校验目标与上下文:目标优先用工作区真实文件(跨文件解析最准),
    * 只有裸代码才落到系统临时目录下的虚拟 URI(桥只把它当 URI,不读盘)。
@@ -523,20 +676,26 @@ function buildTools(cfg: AgentConfig) {
           ...diagnostic,
           path: input.label,
         }));
-        const failed = isStValidationFailure(result);
+        const validationFailed = isStValidationFailure(result);
         const summary = [
           `引擎=${result.engine.id}`,
           `error=${counts.error}`,
           `warning=${counts.warning}`,
           `上下文文件=${result.contextLoaded}`,
         ].join(" ");
+        if (!validationFailed) {
+          validatedStContent.add(stContentHash(input.target.text));
+        }
         return toolResult({
-          ok: !failed,
+          ok: !validationFailed,
           data: {
             engine: result.engine.id,
             errorCount: counts.error,
             warningCount: counts.warning,
             infoCount: counts.info,
+            validatedContentHash: validationFailed
+              ? undefined
+              : stContentHash(input.target.text),
             diagnostics,
             context: {
               files: result.contextLoaded,
@@ -550,7 +709,7 @@ function buildTools(cfg: AgentConfig) {
             },
             summary,
           },
-          ...(failed
+          ...(validationFailed
             ? {
                 error: `ST 校验未通过(${counts.error} 个 error);warning 只提示,不阻断。`,
               }
@@ -575,6 +734,19 @@ function buildTools(cfg: AgentConfig) {
     outputGuardrails: guardrails.output,
     execute: ({ code }) =>
       withEffect("export_st_program", { code }, "write", async () => {
+        if (requiresStValidation && !validatedStContent.has(stContentHash(code))) {
+          return toolResult({
+            ok: false,
+            error: "ST 代码在导出前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
+            diagnostics: [{
+              code: "st_validation_required",
+              message: "未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。",
+              severity: "error",
+            }],
+            effect: "none",
+            risk: "plan",
+          });
+        }
         const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
         const name = m?.[1] ?? `program_${Date.now()}`;
         await fs.mkdir(cfg.exportDir, { recursive: true });
@@ -683,6 +855,24 @@ function buildTools(cfg: AgentConfig) {
       guard(
         async () => {
           const target = workspace.resolve(p);
+          if (
+            requiresStValidation &&
+            target.relativePath.toLowerCase().endsWith(".st") &&
+            !validatedStContent.has(stContentHash(content))
+          ) {
+            return toolResult({
+              ok: false,
+              error: "ST 代码在写入前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
+              diagnostics: [{
+                code: "st_validation_required",
+                message: "未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。",
+                severity: "error",
+                path: target.relativePath,
+              }],
+              effect: "none",
+              risk: "plan",
+            });
+          }
           return withEffect(
             "write_file",
             {
@@ -754,7 +944,8 @@ const SYSTEM_PROMPT =
   "生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，" +
   "直到工具回执显示 errorCount=0 为止(warning 不阻断交付,但要在最终答复里说明)," +
     "最后把通过校验的代码展示给用户。" +
-  '当用户明确要求"导出/保存为文件"时，调用 export_st_program。' +
+  '用户要求生成代码时，默认按运行时交付契约调用 write_file 把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
+  '当前工作区落盘使用 write_file，不要把 export_st_program 当成当前工作区保存的替代。' +
   "你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、" +
   "search_files 搜索代码、write_file 写文件、run_command 执行命令" +
   "（write_file 和 run_command 会先征求用户批准）。" +
@@ -1513,6 +1704,9 @@ export async function classifyDeliveryContract(
       "requiresDeliverable=true 时列出 1 到 8 个必需交付物；每个交付物必须能用 artifacts 或成功工具回执验证。" +
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
+      "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
+      "如果交付物是 ST 代码，必须设置 workspaceFileExtension=.st，并在 requiredVerificationTools 中包含 validate_st_code；这是运行时强制验证依据，不是可选建议。" +
+      "若用户没有指定文件名，交付说明里要求模型在当前工作区根目录选择一个清晰的 .st 文件名。" +
       "必须严格返回 schema,不要输出 markdown。",
     outputType: deliveryContractDecisionSchema,
   });
@@ -1772,8 +1966,13 @@ export async function runAgent(
           }),
       })
     : undefined;
+  const previouslyValidatedStContent = new Set<string>();
   const tools = [
-    ...buildTools(cfg),
+    ...buildTools(
+      cfg,
+      options.deliveryContract,
+      previouslyValidatedStContent,
+    ),
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
   ];
@@ -1797,6 +1996,8 @@ export async function runAgent(
       renderDeliveryContract(options.deliveryContract) +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
       "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
+      "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。" +
+      "契约列出的验证工具必须实际调用并依据成功回执完成；不要用文字描述代替工具调用。" +
       (requiresInlineFinalArtifact
         ? "\n本轮至少有一个交付物只能用 final_artifact 验收。优先调用 deliver_artifact 提交完整内容；也可以同时把内容放入最终 JSON 的 artifacts 数组。无论采用哪种方式，交付内容必须完整，不能只放摘要、计划或口头承诺。"
         : "")
@@ -2186,7 +2387,10 @@ export async function runAgent(
       userText,
       finalMessage,
       requiredTool,
-      toolResults: [...toolResults.values()],
+       toolResults: [
+         ...historicalToolResults,
+         ...toolResults.values(),
+       ],
       artifacts: [...artifacts, ...deliveredArtifactsFromTools()],
       deliveryContract: options.deliveryContract,
     });
@@ -2370,6 +2574,14 @@ export async function runAgent(
     usage.requests = state.usage.requests;
     usage.inputTokens = state.usage.inputTokens;
     usage.outputTokens = state.usage.outputTokens;
+  }
+  const historicalToolResults = options.initialState
+    ? await loadHistoricalToolResults(session, userText)
+    : [];
+  if (options.initialState) {
+    for (const hash of await loadValidatedStContent(session, userText)) {
+      previouslyValidatedStContent.add(hash);
+    }
   }
 
   // Approval checkpoints are first-class results. The host persists the

@@ -24,6 +24,7 @@ const validationContract = createDeliveryContract({
     description: '通过校验的程序',
     required: true,
     acceptableEvidence: ['final_artifact', 'successful_tool'],
+    workspacePersistence: 'not_required',
   }],
 });
 
@@ -103,6 +104,7 @@ const codeContract = createDeliveryContract({
     description: '完整 ST 控制程序',
     required: true,
     acceptableEvidence: ['final_artifact'],
+    workspacePersistence: 'not_required',
   }],
 });
 
@@ -127,6 +129,29 @@ const codeContract = createDeliveryContract({
   });
   console.log('[completion_gate:6] artifact 交付放行 =', gate.passed);
   assert(gate.passed, '交付契约要求代码时，有 code artifact 应放行');
+}
+
+{
+  const gate = evaluateCompletionGate({
+    userText: '生成一个 ST 程序',
+    finalMessage: '已生成并保存程序。',
+    toolResults: [],
+    deliveryContract: createDeliveryContract({
+      requiresDeliverable: true,
+      reason: '默认保存生成的代码',
+      deliverables: [{
+        kind: 'code',
+        title: 'ST 程序',
+        description: '当前工作区中的 ST 程序',
+        required: true,
+        acceptableEvidence: ['final_artifact'],
+        workspaceFileExtension: '.st',
+      }],
+    }),
+    artifacts: [{ kind: 'code', name: 'Pump.st', content: 'PROGRAM Pump\nEND_PROGRAM' }],
+  });
+  console.log('[completion_gate:6b] 默认代码落盘阻断 =', !gate.passed);
+  assert(!gate.passed, '默认代码交付不能只靠内联 artifact 通过');
 }
 
 {

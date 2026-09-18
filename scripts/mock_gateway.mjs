@@ -304,6 +304,10 @@ const server = http.createServer((req, res) => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user' && typeof m.content === 'string');
     const userText = (lastUser && lastUser.content) || '';
     const serializedMessages = JSON.stringify(messages);
+    const lastAssistantToolCall = [...messages]
+      .reverse()
+      .find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
+      ?.tool_calls?.[0]?.function?.name;
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     console.log(`[mock] model=${model} tools=${(req_body.tools || []).length} stream=${req_body.stream} msgs=${messages.length} last_role=${last.role}`);
 
@@ -351,6 +355,20 @@ const server = http.createServer((req, res) => {
         kind: 'code',
         name: 'PumpControl.st',
         mimeType: 'text/plain',
+        content: ST_CODE,
+      }));
+    } else if (userText.includes('默认保存回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('默认保存回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
         content: ST_CODE,
       }));
     } else if (
@@ -423,6 +441,23 @@ const server = http.createServer((req, res) => {
       else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('交付物工具回归')) {
       await streamStructuredText(res, model, '已通过 deliver_artifact 提交完整程序。');
+    } else if (
+      last.role === 'tool' &&
+      userText.includes('默认保存回归') &&
+      lastAssistantToolCall === 'write_file'
+    ) {
+      await streamText(res, model, JSON.stringify({
+        message: '已校验并保存 PumpControl.st。',
+        diagnostics: [],
+        artifacts: [{
+          kind: 'code',
+          name: 'PumpControl.st',
+          uri: null,
+          mimeType: 'text/plain',
+          content: ST_CODE,
+        }],
+        data: null,
+      }));
     } else if (last.role === 'tool' && userText.includes('并行读取')) {
       const text = '已并行读取 pa.txt 和 pb.txt。';
       if (req_body.response_format) await streamStructuredText(res, model, text);

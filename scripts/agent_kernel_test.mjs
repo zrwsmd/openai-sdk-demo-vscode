@@ -28,6 +28,15 @@ const cfg = {
   exportDir: path.join(dir, 'exports'),
   workspaceRoot: dir,
 };
+const DEFAULT_SAVE_ST_CODE = [
+  'PROGRAM StarDelta',
+  '  VAR',
+  '    TON_Star : TON;',
+  '  END_VAR',
+  '  TON_Star(IN := Start_Btn, PT := T#5s);',
+  '  Motor_Star := TON_Star.Q;',
+  'END_PROGRAM',
+].join('\n');
 const session = new JsonFileSession(path.join(dir, 'session.json'));
 const noApproval = async (name) => {
   throw new Error(`不应触发审批,却收到 ${name}`);
@@ -72,6 +81,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       description: '完整 ST 控制程序',
       required: true,
       acceptableEvidence: ['final_artifact'],
+      workspacePersistence: 'not_required',
     }],
   });
   const r = await runTestTurn('交付物工具回归', noApproval, {
@@ -86,6 +96,47 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
   if (!r.result.artifacts[0]?.content?.includes('PROGRAM StarDelta')) {
     throw new Error('通用 deliver_artifact 恢复的内容不完整');
+  }
+}
+
+// [3c] 代码默认落盘:先验证同一份 ST 内容,再写入当前工作区;
+// write_file 的审批恢复不能丢失前一步校验状态。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    '默认保存回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'default-save-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3c] 默认 ST 落盘:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('ST 默认落盘没有先校验再写入');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 默认落盘的审批工具不正确');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('ST 默认落盘结果或最终确认不正确');
   }
 }
 
