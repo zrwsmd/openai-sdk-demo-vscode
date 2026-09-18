@@ -821,6 +821,78 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A reviewer rejection is fed back into the planner for a bounded revision
+// loop instead of being surfaced to the user as a terminal runtime error.
+{
+  const calls = [];
+  let plannerCalls = 0;
+  let reviewerCalls = 0;
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    calls.push('executor');
+    if (!options.teamTask || options.teamTask.nodes[1].status !== 'completed') {
+      throw new Error('executor received an unreviewed Team task after revision');
+    }
+    return {
+      status: 'completed',
+      output: 'revised workspace change completed',
+      usage,
+      result: completedAgentResult('revised workspace change completed'),
+    };
+  }, undefined, {
+    routeTeamTask: async () => {
+      calls.push('route');
+      return createTeamTask({
+        route: 'team',
+        goal: 'Generate simulated PLC ST code',
+        reason: 'Needs planning, review, execution and verification',
+        planSummary: 'Generate code with simulated variables',
+        reviewFocus: ['scope'],
+        verificationCriteria: ['ST code is present'],
+      }, 'Generate simulated PLC ST code');
+    },
+    planTeamTask: async (_cfg, task) => {
+      plannerCalls += 1;
+      calls.push(`planner-${plannerCalls}`);
+      if (plannerCalls === 2 && !task.planSummary.includes('补充模拟变量和完成条件')) {
+        throw new Error('planner did not receive reviewer feedback');
+      }
+      return {
+        planSummary: plannerCalls === 1
+          ? 'Draft ST code plan'
+          : 'Revised ST code plan with simulated variables and explicit completion criteria',
+        reviewFocus: ['scope', 'completion criteria'],
+        verificationCriteria: ['returns complete ST code'],
+      };
+    },
+    reviewTeamTask: async () => {
+      reviewerCalls += 1;
+      calls.push(`reviewer-${reviewerCalls}`);
+      if (reviewerCalls === 1) {
+        return {
+          approved: false,
+          summary: '需要补充模拟变量和完成条件',
+          findings: ['计划可修订'],
+          requiredChanges: ['补充模拟变量和完成条件'],
+        };
+      }
+      return { approved: true, summary: 'approved after revision', findings: ['feedback addressed'], requiredChanges: [] };
+    },
+    verifyTeamTask: async () => {
+      calls.push('verifier');
+      return { passed: true, summary: 'verified', evidence: ['revised workspace change completed'], gaps: [] };
+    },
+  });
+  await test.coordinator.start('Generate simulated PLC ST code', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    calls.join(',') !== 'route,planner-1,reviewer-1,planner-2,reviewer-2,executor,verifier' ||
+    completed?.status !== 'completed' ||
+    completed.teamTask?.nodes[1].status !== 'completed'
+  ) {
+    throw new Error('reviewer feedback was not turned into a bounded planner revision');
+  }
+}
+
 // Stopping during the planner call aborts planning, creates no agent call, and
 // leaves the already-created run resumable from its safe boundary.
 {

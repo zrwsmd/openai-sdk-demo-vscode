@@ -806,6 +806,43 @@ export function applyTeamPlannerReport(task: TeamTask, report: unknown): TeamTas
   return assertGraph(next);
 }
 
+export function reviseTeamPlanAfterReview(
+  task: TeamTask,
+  review: Pick<TeamReviewReport, 'summary' | 'findings' | 'requiredChanges'>,
+): TeamTask {
+  const feedback = [
+    review.summary,
+    ...review.requiredChanges,
+    ...review.findings,
+  ]
+    .map((item) => compact(item, 240))
+    .filter(Boolean);
+  const feedbackText = feedback.join('；') || '审查未通过，需要修订计划后重新审查';
+  const next = structuredClone(task);
+  next.status = 'pending';
+  next.planSummary = compact(`${next.planSummary}\n审查反馈：${feedbackText}`, 1_000) || next.planSummary;
+  next.reviewFocus = [...feedback, ...next.reviewFocus]
+    .map((item) => compact(item, 300))
+    .filter(Boolean)
+    .slice(0, 8);
+  next.verificationCriteria = next.verificationCriteria
+    .map((item) => compact(item, 300))
+    .filter(Boolean)
+    .slice(0, 8);
+  next.executionGraph = undefined;
+  next.pendingVerification = undefined;
+  next.nodes = next.nodes.map((node) => ({
+    ...node,
+    status: 'pending' as const,
+    output: undefined,
+    startedAt: undefined,
+    completedAt: undefined,
+    error: undefined,
+  }));
+  next.updatedAt = now();
+  return assertGraph(next);
+}
+
 export function failTeamNode(
   task: TeamTask,
   role: TeamRole,

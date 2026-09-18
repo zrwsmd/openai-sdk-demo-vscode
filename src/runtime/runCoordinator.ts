@@ -54,6 +54,7 @@ import {
   pauseExecutionGraphNode,
   reopenTeamExecution,
   retryExecutionGraphNodes,
+  reviseTeamPlanAfterReview,
   reviseExecutionGraph,
   resumeExecutionGraphNode,
   startExecutionGraphNode,
@@ -74,6 +75,7 @@ export type RuntimeEvent =
   | ({ type: string } & Record<string, unknown>);
 
 const MAX_REPLAYABLE_PROTOCOL_EVENTS = 200;
+const MAX_TEAM_REVIEW_REVISIONS = 2;
 const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'run.started',
   'tool.started',
@@ -1667,23 +1669,25 @@ export class RunCoordinator {
       run.teamTask = resumeTeamTask(run.teamTask);
       await this.store.update(run);
     }
-    const task = run.teamTask;
-    if (task.nodes[0].status === 'pending') {
-      run.teamTask = startTeamNode(task, 'planner');
-      await this.persistTeamRole(run, 'planner', 'started', generation);
-      const report = await this.planTeamTask!(
-        { ...run.config, apiKey },
-        run.teamTask,
-        signal,
-      );
-      run.teamTask = applyTeamPlannerReport(run.teamTask, report);
-      run.teamTask = completeTeamNode(run.teamTask, 'planner', {
-        summary: report.planSummary,
-        evidence: ['Team Planner 返回结构化计划、审查重点和验证标准'],
-      });
-      await this.persistTeamRole(run, 'planner', 'completed', generation);
-    }
-    if (run.teamTask.nodes[1].status === 'pending') {
+    let reviewRevisions = 0;
+    while (run.teamTask.nodes[1].status !== 'completed') {
+      if (this.isRunInvalidated(generation)) return;
+      if (run.teamTask.nodes[0].status === 'pending') {
+        run.teamTask = startTeamNode(run.teamTask, 'planner');
+        await this.persistTeamRole(run, 'planner', 'started', generation);
+        const report = await this.planTeamTask!(
+          { ...run.config, apiKey },
+          run.teamTask,
+          signal,
+        );
+        run.teamTask = applyTeamPlannerReport(run.teamTask, report);
+        run.teamTask = completeTeamNode(run.teamTask, 'planner', {
+          summary: report.planSummary,
+          evidence: ['Team Planner 返回结构化计划、审查重点和验证标准'],
+        });
+        await this.persistTeamRole(run, 'planner', 'completed', generation);
+      }
+      if (run.teamTask.nodes[1].status !== 'pending') break;
       run.teamTask = startTeamNode(run.teamTask, 'reviewer');
       await this.persistTeamRole(run, 'reviewer', 'started', generation);
       const report = await this.reviewTeamTask!(
@@ -1692,9 +1696,18 @@ export class RunCoordinator {
         signal,
       );
       if (!report.approved) {
-        run.teamTask = failTeamNode(run.teamTask, 'reviewer', report.summary || report.requiredChanges.join('；'));
-        await this.persistTeamRole(run, 'reviewer', 'failed', generation);
-        throw new Error(`Team 审查未通过：${report.summary || report.requiredChanges.join('；')}`);
+        reviewRevisions += 1;
+        const feedback = report.summary || report.requiredChanges.join('；') || '审查未通过';
+        if (reviewRevisions > MAX_TEAM_REVIEW_REVISIONS) {
+          run.teamTask = failTeamNode(run.teamTask, 'reviewer', feedback);
+          await this.persistTeamRole(run, 'reviewer', 'failed', generation);
+          throw new Error(`Team 审查未通过：${feedback}`);
+        }
+        run.teamTask = reviseTeamPlanAfterReview(run.teamTask, report);
+        await this.store.update(run);
+        if (this.isRunInvalidated(generation)) return;
+        this.emitTeamProgress(run, 'team.review.revision_requested', feedback);
+        continue;
       }
       run.teamTask = completeTeamNode(run.teamTask, 'reviewer', {
         summary: report.summary || '审查通过',

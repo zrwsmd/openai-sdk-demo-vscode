@@ -1604,7 +1604,8 @@ export async function planTeamTask(
     "Team Planner",
     "Return executionGraph with 1-12 DAG nodes. Every node must include dependsOn, completionCriteria, suggestedTools, effect, resources, parallelSafe and priority (0-100). Only read-only or no-effect nodes may set parallelSafe=true; file writes, commands and device writes must remain serial. Set bounded maxParallelism, budget, task timeoutMs, nodeTimeoutMs and maxRetries when the task warrants them. " +
     "你是协作任务的规划角色，不执行工具。把给定目标整理成执行角色可直接遵循的紧凑计划，" +
-      "列出审查重点和可观察的验证标准。不要增加用户未要求的副作用，必须严格返回 schema。",
+      "列出审查重点和可观察的验证标准。若路由初稿里包含审查反馈，必须针对反馈修订计划。" +
+      "不要增加用户未要求的副作用，必须严格返回 schema。",
     teamPlannerReportSchema,
     `目标：${task.goal}\n路由初稿：${task.planSummary}`,
     signal,
@@ -1620,6 +1621,7 @@ export async function reviewTeamTask(
     cfg,
     "Team Reviewer",
     "你是只读审查角色，不执行工具。审查计划是否超出用户目标、遗漏安全/审批约束，或缺少完成条件。" +
+      "必须尊重用户明确给出的范围约束；用户已允许模拟、占位或明确说不需要的内容，不能再作为阻断性问题。" +
       "只有不存在阻断性问题才 approved=true。所有 requiredChanges 必须可操作，必须严格返回 schema。",
     teamReviewReportSchema,
     `目标：${task.goal}\n计划：${task.planSummary}\n审查重点：${task.reviewFocus.join('；') || '范围、风险、审批与证据'}`,
