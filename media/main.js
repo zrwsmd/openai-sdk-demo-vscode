@@ -128,6 +128,18 @@ function truncateText(text, max = 140) {
   return compact.length > max ? `${compact.slice(0, max)}…` : compact;
 }
 
+function sanitizeAssistantText(text) {
+  const raw = String(text ?? '');
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const internalPatterns = [
+    /^Tool call validation failed due to the following issue:/i,
+    /^Please approve this write operation to save\b/i,
+    /^Tool call ["'][^"']+["'] .* has no available artifacts\./i,
+  ];
+  return internalPatterns.some((pattern) => pattern.test(trimmed)) ? '' : raw;
+}
+
 function byteLength(text) {
   return new TextEncoder().encode(String(text ?? '')).length;
 }
@@ -635,8 +647,9 @@ function handleProtocolEvent(event) {
           pendingAgentText += text;
         } else {
           agentText += text;
-          if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
-          renderRich(agentBubble, agentText);
+          const visibleText = sanitizeAssistantText(agentText);
+          if (hadToolThisTurn && visibleText) messagesEl.appendChild(agentBubble);
+          renderRich(agentBubble, visibleText);
         }
         scrollBottom();
       }
@@ -650,7 +663,8 @@ function handleProtocolEvent(event) {
       hadToolThisTurn = true;
       pendingToolCount += 1;
       if (agentText) {
-        pendingAgentText = agentText + pendingAgentText;
+        const visibleText = sanitizeAssistantText(agentText);
+        if (visibleText) pendingAgentText = visibleText + pendingAgentText;
         agentText = '';
         if (agentBubble) renderRich(agentBubble, '');
       }
@@ -753,10 +767,17 @@ let pendingToolCount = 0;
 let hadToolThisTurn = false;
 
 function renderAgentText(text) {
-  agentText = text;
+  agentText = sanitizeAssistantText(text);
   if (agentBubble) {
     // The streaming bubble is created immediately after the user message.
     // Once tools were involved, move the final answer below tool results.
+    if (!agentText) {
+      renderRich(agentBubble, '');
+      agentBubble.classList.remove('streaming');
+      if (agentBubble.parentElement) agentBubble.remove();
+      agentBubble = null;
+      return;
+    }
     if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
     renderRich(agentBubble, agentText);
     agentBubble.classList.remove('streaming');
@@ -772,7 +793,7 @@ function flushPendingAgentText() {
     return;
   }
   if (pendingAgentText) {
-    renderAgentText(agentText + pendingAgentText);
+    renderAgentText(sanitizeAssistantText(agentText + pendingAgentText));
     pendingAgentText = '';
   }
 }
@@ -782,8 +803,10 @@ function renderHistoryMessage(m) {
     addMessage('user', m.text);
     return;
   }
+  const text = sanitizeAssistantText(m.text);
+  if (!text.trim()) return;
   const b = addMessage('agent', '');
-  renderRich(b, m.text);
+  renderRich(b, text);
 }
 
 function replayHistoryEvents(events) {
@@ -799,6 +822,40 @@ function replayHistoryEvents(events) {
   pendingFinalText = null;
   toolRuns.clear();
   anonymousToolRuns.clear();
+}
+
+function groupHistoryEvents(events) {
+  const groups = [];
+  const byRun = new Map();
+  const legacy = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!event || typeof event !== 'object') continue;
+    if (event.type === 'run.started') {
+      const group = {
+        runId: event.runId,
+        userText: typeof event.payload?.userText === 'string' ? event.payload.userText : '',
+        events: [],
+      };
+      groups.push(group);
+      if (event.runId) byRun.set(event.runId, group);
+      continue;
+    }
+    const group = event.runId ? byRun.get(event.runId) : undefined;
+    if (group) group.events.push(event);
+    else legacy.push(event);
+  }
+  return { groups, legacy };
+}
+
+function takeNextHistoryEventGroup(groups, userText, consumed) {
+  const normalized = String(userText ?? '').trim();
+  const index = groups.findIndex((group, i) =>
+    !consumed.has(i) &&
+    group.userText.trim() === normalized &&
+    group.events.length > 0);
+  if (index < 0) return undefined;
+  consumed.add(index);
+  return groups[index];
 }
 
 window.addEventListener('message', (event) => {
@@ -818,7 +875,7 @@ window.addEventListener('message', (event) => {
       pendingLocalUserText = null;
       flushPendingAgentText();
       const waitingForToolResult = pendingToolCount > 0;
-      const empty = !agentText && !waitingForToolResult;
+      const empty = !sanitizeAssistantText(agentText).trim() && !waitingForToolResult;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (empty) agentBubble.remove(); // 空气泡看起来像卡死,换成明确说明
@@ -905,14 +962,32 @@ window.addEventListener('message', (event) => {
       hadToolThisTurn = false;
       const messages = msg.messages || [];
       const events = Array.isArray(msg.events) ? msg.events : [];
-      const eventInsertIndex = events.length
+      const { groups, legacy } = groupHistoryEvents(events);
+      const consumedGroups = new Set();
+      let pendingGroup;
+      const legacyInsertIndex = legacy.length
         ? messages.map((m) => m.role).lastIndexOf('agent')
         : -1;
       for (let i = 0; i < messages.length; i += 1) {
-        if (i === eventInsertIndex) replayHistoryEvents(events);
-        renderHistoryMessage(messages[i]);
+        const message = messages[i];
+        if (i === legacyInsertIndex) replayHistoryEvents(legacy);
+        if (message.role === 'user') {
+          if (pendingGroup) {
+            replayHistoryEvents(pendingGroup.events);
+            pendingGroup = undefined;
+          }
+          renderHistoryMessage(message);
+          pendingGroup = takeNextHistoryEventGroup(groups, message.text, consumedGroups);
+          continue;
+        }
+        if (pendingGroup) {
+          replayHistoryEvents(pendingGroup.events);
+          pendingGroup = undefined;
+        }
+        renderHistoryMessage(message);
       }
-      if (eventInsertIndex < 0) replayHistoryEvents(events);
+      if (pendingGroup) replayHistoryEvents(pendingGroup.events);
+      if (legacyInsertIndex < 0) replayHistoryEvents(legacy);
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';

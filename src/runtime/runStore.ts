@@ -90,12 +90,15 @@ interface StoreDocument {
   schemaVersion: 1;
   active?: DurableRunRecord;
   last?: DurableRunRecord;
+  /** Replayable UI protocol events across completed chat turns. */
+  historyEvents?: AgentProtocolEvent[];
   effects: Record<string, EffectRecord>;
   /** Per-attempt occurrence counters let an intentional duplicate execute twice. */
   effectAttempts?: Record<string, Record<string, number>>;
 }
 
 const EMPTY_USAGE: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
+const MAX_HISTORY_EVENTS = 1_000;
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -107,6 +110,21 @@ function stableValue(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function mergeHistoryEvents(
+  existing: AgentProtocolEvent[],
+  next: AgentProtocolEvent[],
+): AgentProtocolEvent[] {
+  if (!next.length) return existing.slice(-MAX_HISTORY_EVENTS);
+  const byId = new Map(existing.map((event) => [event.eventId, event]));
+  const merged = [...existing];
+  for (const event of next) {
+    if (byId.has(event.eventId)) continue;
+    byId.set(event.eventId, event);
+    merged.push(event);
+  }
+  return merged.slice(-MAX_HISTORY_EVENTS);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -123,6 +141,7 @@ export class RunAlreadyActiveError extends Error {
 export interface RunStore {
   getActive(): Promise<DurableRunRecord | undefined>;
   getLast(): Promise<DurableRunRecord | undefined>;
+  getHistoryEvents(): Promise<AgentProtocolEvent[]>;
   getContinuable(): Promise<DurableRunRecord | undefined>;
   begin(
     userText: string,
@@ -217,10 +236,14 @@ export class JsonRunStore implements RunStore {
           throw new Error('invalid effect attempt counter');
         }
       }
+      const historyEvents = Array.isArray(parsed.historyEvents)
+        ? parsed.historyEvents.map((event) => parseAgentEvent(event))
+        : [];
       return {
         schemaVersion: 1,
         active: parsed.active,
         last: parsed.last,
+        historyEvents,
         effects,
         effectAttempts,
       };
@@ -366,6 +389,11 @@ export class JsonRunStore implements RunStore {
     return (await this.readDocument()).last;
   }
 
+  async getHistoryEvents(): Promise<AgentProtocolEvent[]> {
+    await this.writeChain;
+    return [...((await this.readDocument()).historyEvents ?? [])];
+  }
+
   async getContinuable(): Promise<DurableRunRecord | undefined> {
     await this.writeChain;
     const last = (await this.readDocument()).last;
@@ -447,6 +475,7 @@ export class JsonRunStore implements RunStore {
       }
       document.last = next;
       document.active = next.status === 'running' || next.status === 'awaiting_approval' ? next : undefined;
+      document.historyEvents = mergeHistoryEvents(document.historyEvents ?? [], next.events ?? []);
     });
   }
 
@@ -454,6 +483,7 @@ export class JsonRunStore implements RunStore {
     await this.mutate((document) => {
       delete document.active;
       delete document.last;
+      document.historyEvents = [];
       // Keep effect history as an audit trail. A future database store can
       // apply an explicit retention policy instead of coupling it to chat UI.
       document.effectAttempts = {};

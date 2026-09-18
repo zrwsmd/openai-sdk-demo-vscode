@@ -1125,20 +1125,22 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
 // tool and approval cards, not just plain text bubbles.
 {
   const test = await fixture(async (_cfg, session, userText, options) => {
+    const file = userText.includes('again') ? 'again.txt' : 'history.txt';
+    const callId = `call-${file}`;
     await session.addItems([{ type: 'message', role: 'user', content: userText }]);
     options.protocol.onEvent(options.protocol.eventFactory.next({
       type: 'tool.started',
       payload: {
         toolName: 'read_file',
-        callId: 'call-history',
-        arguments: JSON.stringify({ path: 'history.txt' }),
+        callId,
+        arguments: JSON.stringify({ path: file }),
       },
     }));
     options.protocol.onEvent(options.protocol.eventFactory.next({
       type: 'tool.completed',
       payload: {
         toolName: 'read_file',
-        callId: 'call-history',
+        callId,
         ok: true,
         summary: '已读取文件',
         result: {
@@ -1151,13 +1153,19 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
         },
       },
     }));
-    await session.addItems([{ type: 'message', role: 'assistant', content: '已读取 history.txt' }]);
-    return { status: 'completed', output: '已读取 history.txt', usage };
+    await session.addItems([{ type: 'message', role: 'assistant', content: `已读取 ${file}` }]);
+    return { status: 'completed', output: `已读取 ${file}`, usage };
   });
   await test.coordinator.start('读取 history.txt', config, 'key');
+  await test.coordinator.start('读取 again.txt', config, 'key');
   const saved = await test.store.getLast();
-  if (!saved?.events?.some((event) => event.type === 'tool.completed')) {
-    throw new Error('protocol tool event was not persisted with the run');
+  const allEvents = await test.store.getHistoryEvents();
+  if (
+    !saved?.events?.some((event) => event.type === 'tool.completed') ||
+    allEvents.filter((event) => event.type === 'tool.completed').length !== 2 ||
+    allEvents.filter((event) => event.type === 'run.started').length !== 2
+  ) {
+    throw new Error('protocol tool events were not persisted across chat turns');
   }
   const freshEvents = [];
   const fresh = new RunCoordinator({
@@ -1167,10 +1175,13 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   });
   await fresh.initialize();
   const history = freshEvents.find((event) => event.type === 'history');
-  if (!history?.events?.some((event) => event.type === 'tool.completed')) {
-    throw new Error('history did not include persisted protocol events');
+  if (history?.events?.filter((event) => event.type === 'tool.completed').length !== 2) {
+    throw new Error('history did not include persisted protocol events from every turn');
   }
-  if (!history.messages?.some((message) => message.text === '已读取 history.txt')) {
+  if (
+    !history.messages?.some((message) => message.text === '已读取 history.txt') ||
+    !history.messages?.some((message) => message.text === '已读取 again.txt')
+  ) {
     throw new Error('history lost ordinary chat messages while restoring events');
   }
 }

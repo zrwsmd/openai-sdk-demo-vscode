@@ -74,6 +74,7 @@ export type RuntimeEvent =
 
 const MAX_REPLAYABLE_PROTOCOL_EVENTS = 200;
 const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
+  'run.started',
   'tool.started',
   'tool.completed',
   'approval.requested',
@@ -150,10 +151,23 @@ function replayableHistoryEvents(
 ): AgentProtocolEvent[] {
   if (!run?.events?.length) return [];
   if (messageCount === 0 && run.status !== 'awaiting_approval') return [];
-  if (!['completed', 'awaiting_approval', 'paused'].includes(run.status)) return [];
   return run.events
     .filter((event) => REPLAYABLE_PROTOCOL_EVENT_TYPES.has(event.type))
     .sort((a, b) => a.sequence - b.sequence);
+}
+
+function mergeReplayableHistoryEvents(
+  stored: AgentProtocolEvent[],
+  current: AgentProtocolEvent[],
+): AgentProtocolEvent[] {
+  const byId = new Map<string, AgentProtocolEvent>();
+  const merged: AgentProtocolEvent[] = [];
+  for (const event of [...stored, ...current]) {
+    if (!REPLAYABLE_PROTOCOL_EVENT_TYPES.has(event.type) || byId.has(event.eventId)) continue;
+    byId.set(event.eventId, event);
+    merged.push(event);
+  }
+  return merged;
 }
 
 /**
@@ -1842,7 +1856,11 @@ export class RunCoordinator {
   private async replayHistory(generation = this.clearGeneration): Promise<void> {
     const messages = extractChatMessages(await this.session.getItems());
     const run = await this.store.getActive() ?? await this.store.getLast();
-    const events = replayableHistoryEvents(run, messages.length);
+    const storedEvents = await this.store.getHistoryEvents();
+    const events = mergeReplayableHistoryEvents(
+      storedEvents,
+      replayableHistoryEvents(run, messages.length),
+    );
     if (this.isClearing(generation)) return;
     this.emit({ type: 'history', messages, events });
   }
