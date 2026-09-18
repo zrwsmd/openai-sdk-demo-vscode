@@ -63,6 +63,7 @@ import {
   restartTeamTask,
   resumeTeamTask,
   startTeamNode,
+  type DagNode,
   type TeamTask,
   type ExecutionGraph,
 } from '../orchestration/teamTask';
@@ -1381,6 +1382,8 @@ export class RunCoordinator {
         throw new Error(limit);
       }
       const waiting = graph.nodes.find((node) => node.status === 'awaiting_approval');
+      let resumedNodeId: string | undefined;
+      let resumedDecisions: Record<string, boolean> | undefined;
       if (waiting) {
         const hasDecision = !!decisions && waiting.approvals?.some((approval) => Object.prototype.hasOwnProperty.call(decisions, approval.id));
         if (!hasDecision) {
@@ -1393,18 +1396,29 @@ export class RunCoordinator {
         graph = resumeExecutionGraphNode(graph, waiting.id);
         run.teamTask = { ...run.teamTask, executionGraph: graph };
         await this.store.update(run);
+        resumedNodeId = waiting.id;
+        resumedDecisions = decisions;
         decisions = undefined;
       }
-      let ready = getExecutionGraphReadyNodes(graph);
-      if (graph.budget.maxRequests !== undefined) {
-        ready = ready.slice(0, Math.max(0, graph.budget.maxRequests - usage.requests));
+      let ready: DagNode[];
+      if (resumedNodeId) {
+        const resumed = graph.nodes.find((node) => node.id === resumedNodeId);
+        if (!resumed || resumed.status !== 'running') {
+          throw new Error('执行图审批节点恢复失败: ' + resumedNodeId);
+        }
+        ready = [resumed];
+      } else {
+        ready = getExecutionGraphReadyNodes(graph);
+        if (graph.budget.maxRequests !== undefined) {
+          ready = ready.slice(0, Math.max(0, graph.budget.maxRequests - usage.requests));
+        }
+        if (!ready.length) {
+          if (graph.nodes.some((node) => node.status === 'failed' || node.status === 'blocked')) throw new Error('执行图存在失败节点，无法继续完成依赖节点');
+          if (signal.aborted) return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
+          throw new Error('执行图没有可运行节点，可能存在未满足的依赖');
+        }
+        for (const node of ready) graph = startExecutionGraphNode(graph, node.id);
       }
-      if (!ready.length) {
-        if (graph.nodes.some((node) => node.status === 'failed' || node.status === 'blocked')) throw new Error('执行图存在失败节点，无法继续完成依赖节点');
-        if (signal.aborted) return { result: createAgentResult({ status: 'cancelled', reason: 'aborted', usage }), output: '', usage, status: 'cancelled' };
-        throw new Error('执行图没有可运行节点，可能存在未满足的依赖');
-      }
-      for (const node of ready) graph = startExecutionGraphNode(graph, node.id);
       run.teamTask = { ...run.teamTask, executionGraph: graph };
       run.status = 'running';
       await this.store.update(run);
@@ -1448,7 +1462,7 @@ export class RunCoordinator {
             nodePrompt,
             {
               initialState: node.state,
-              decisions,
+              decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
               signal: nodeController.signal,
               protocol: {

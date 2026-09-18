@@ -264,6 +264,66 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A DAG node waiting on a tool approval must resume that same node with the
+// persisted SDK state and approval decision instead of asking the pending-node
+// scheduler for fresh work.
+{
+  let executorCalls = 0;
+  const seen = [];
+  const approval = { id: 'approval-write-file', name: 'write_file', args: '{"path":"pump.st"}' };
+  const test = await fixture(async (_cfg, _session, _text, options) => {
+    executorCalls += 1;
+    seen.push({ initialState: options.initialState, decisions: options.decisions });
+    if (executorCalls === 1) {
+      return {
+        status: 'awaiting_approval',
+        output: '需要审批写入',
+        usage,
+        state: 'serialized-node-state',
+        approvals: [approval],
+        result: {
+          protocolVersion: 1,
+          status: 'awaiting_approval',
+          state: 'serialized-node-state',
+          approvals: [approval],
+          diagnostics: [],
+          artifacts: [],
+          usage,
+        },
+      };
+    }
+    if (options.initialState !== 'serialized-node-state' || options.decisions?.[approval.id] !== true) {
+      throw new Error('approved DAG node did not receive its saved state and approval decision');
+    }
+    return { status: 'completed', output: '写入完成', usage, result: completedAgentResult('写入完成') };
+  }, undefined, governedTeam({
+    nodes: [
+      { id: 'write', title: '写入程序', objective: '写入程序文件', dependsOn: [], completionCriteria: '写入成功', suggestedTools: ['write_file'], effect: 'write', resources: ['workspace'], parallelSafe: false, priority: 50 },
+    ],
+  }));
+  await test.coordinator.start('approval governed graph', { ...config, orchestration: 'auto' }, 'key');
+  const waiting = await test.store.getLast();
+  const pendingApproval = waiting?.approvals[0];
+  if (
+    waiting?.status !== 'awaiting_approval' ||
+    pendingApproval?.id !== approval.id ||
+    waiting.teamTask?.executionGraph?.nodes[0].status !== 'awaiting_approval'
+  ) {
+    throw new Error('DAG node approval checkpoint was not persisted');
+  }
+  await test.coordinator.approve(waiting.id, approval.id, true, 'key');
+  const completed = await test.store.getLast();
+  if (
+    executorCalls !== 2 ||
+    seen[1]?.initialState !== 'serialized-node-state' ||
+    seen[1]?.decisions?.[approval.id] !== true ||
+    completed?.status !== 'completed' ||
+    completed.teamTask?.executionGraph?.nodes[0].status !== 'completed'
+  ) {
+    throw new Error('approved DAG node did not resume and complete');
+  }
+}
+
 // The request budget caps a ready parallel batch before any model call starts,
 // then fails the still-incomplete graph at the persisted budget boundary.
 {
