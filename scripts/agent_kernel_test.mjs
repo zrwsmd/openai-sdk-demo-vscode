@@ -527,6 +527,17 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [9b] 工具已成功但最终 assistant 输出 schema 崩溃时，运行时必须按工具账本合成完成结果。
+{
+  const r = await runTestTurn('写入 schema崩写入.txt', async () => true);
+  const written = await fs.readFile(path.join(dir, 'schema崩写入.txt'), 'utf8');
+  const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
+  console.log('[9b] 写入后 schema 崩兜底:工具链 =', toolCalls.join(','), '| 内容 =', written, '| 输出 =', r.output);
+  if (toolCalls.join(',') !== 'write_file' || written !== 'hello' || !r.output.includes('schema崩写入.txt')) {
+    throw new Error('最终 schema 崩溃后没有按成功 write_file 工具账本完成');
+  }
+}
+
 // [10] 新会话:clearSession 后文件清空
 {
   await session.clearSession();

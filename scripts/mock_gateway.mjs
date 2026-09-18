@@ -461,6 +461,8 @@ const server = http.createServer((req, res) => {
       sse(res, usageChunk(model, 100, 15));
       res.write('data: [DONE]\n\n');
       res.end();
+    } else if (userText.includes('schema崩写入') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({ path: 'schema崩写入.txt', content: 'hello' }));
     } else if (userText.includes('rr.txt') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'write_file', JSON.stringify({ path: 'rr.txt', content: '你好我是agent' }));
     } else if (
@@ -570,6 +572,11 @@ const server = http.createServer((req, res) => {
       const text = '已读取 lk.txt 文件内容。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
       else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('schema崩写入')) {
+      await streamText(res, model, JSON.stringify({
+        message: 123,
+        unexpected: 'bad final schema after successful write_file',
+      }));
     } else if (last.role === 'tool' && userText.includes('rr.txt')) {
       const text = '已写入 rr.txt 文件。';
       if (req_body.response_format) await streamStructuredText(res, model, text);

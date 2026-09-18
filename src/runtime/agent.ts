@@ -80,7 +80,6 @@ import type { AgentEventFactory, AgentProtocolEvent } from "../protocol/events";
 import {
   industrialAgentOutputDefinition,
   industrialFinalArtifactOutputSchema,
-  parseIndustrialAgentOutput,
   type IndustrialAgentOutput,
   projectAgentOutput,
   AgentOutputValidationError,
@@ -117,6 +116,7 @@ import {
 import {
   createDeliveryContract,
   deliveryContractDecisionSchema,
+  inferDeliveryContractFromUserText,
   renderDeliveryContract,
   type DeliveryContract,
 } from "./deliveryContract";
@@ -1692,6 +1692,8 @@ export async function classifyDeliveryContract(
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
 ): Promise<DeliveryContract | undefined> {
+  const inferred = inferDeliveryContractFromUserText(userText);
+  if (inferred) return inferred;
   const adapter = buildModelAdapter(cfg);
   const classifier = new Agent({
     name: "交付契约判定器",
@@ -2594,6 +2596,59 @@ export async function runAgent(
       deliveryContract: options.deliveryContract,
     });
 
+  const fallbackDeliveryMessage = (): string | undefined => {
+    const records = [
+      ...historicalToolResults,
+      ...toolResults.values(),
+    ].filter((record) => record.result.ok).reverse();
+    const write = records.find((record) => record.name === "write_file");
+    if (write) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(write.args) as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      const data = write.result.data && typeof write.result.data === "object"
+        ? write.result.data as Record<string, unknown>
+        : {};
+      const file = typeof data.file === "string"
+        ? data.file
+        : typeof args.path === "string" ? args.path : "目标文件";
+      const bytes = typeof data.bytes === "number" ? ` · ${data.bytes} 字节` : "";
+      const stValidated = records.some((record) =>
+        record.name === "validate_st_code" &&
+        record.result.ok &&
+        record.result.data &&
+        typeof record.result.data === "object" &&
+        !Array.isArray(record.result.data) &&
+        (record.result.data as Record<string, unknown>).errorCount === 0,
+      );
+      return `${stValidated ? "已通过 ST 校验并" : "已"}写入 ${file}${bytes}。`;
+    }
+    const artifact = deliveredArtifactsFromTools()[0];
+    if (artifact) return `已生成 ${artifact.name}。`;
+    if (options.deliveryContract?.requiresDeliverable === true) {
+      return "已完成本轮交付。";
+    }
+    return undefined;
+  };
+
+  const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
+    const message = output.trim() ||
+      fallbackRequiredToolMessage() ||
+      fallbackDeliveryMessage();
+    if (!message) return undefined;
+    const gate = runCompletionGate(message);
+    if (!gate.passed) return undefined;
+    return {
+      message,
+      diagnostics: [],
+      artifacts: [],
+      data: null,
+    };
+  };
+
   const chooseCompletionRepairTool = (
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): string | undefined => {
@@ -2736,7 +2791,7 @@ export async function runAgent(
         cancelled = true;
       } else if (e instanceof EmptyGatewayResponseError) {
         bailed = true;
-      } else if (structuredMode && isInvalidFinalOutputTypeError(e) && output.trim()) {
+      } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
         salvagedInvalidFinalOutput = true;
       } else {
         throw e;
@@ -2756,7 +2811,7 @@ export async function runAgent(
           cancelled = true;
         } else if (e instanceof EmptyGatewayResponseError) {
           bailed = true;
-        } else if (structuredMode && isInvalidFinalOutputTypeError(e) && output.trim()) {
+        } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
           salvagedInvalidFinalOutput = true;
         } else {
           throw e;
@@ -2782,17 +2837,22 @@ export async function runAgent(
         } else {
           structuredOutput = coerceIndustrialAgentOutput(stream.finalOutput);
           if (!structuredOutput) {
-            structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
+            salvagedInvalidFinalOutput = true;
+            agentLog(
+              "[output] 最终输出不符合 schema，等待运行时根据工具账本完成验收",
+            );
           } else {
             agentLog(
               "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
             );
           }
         }
-        output = projectAgentOutput(
-          industrialAgentOutputDefinition,
-          structuredOutput,
-        ).text;
+        if (structuredOutput) {
+          output = projectAgentOutput(
+            industrialAgentOutputDefinition,
+            structuredOutput,
+          ).text;
+        }
       } else if (typeof stream.finalOutput === "string") {
         output = stream.finalOutput;
       }
@@ -2813,6 +2873,19 @@ export async function runAgent(
       agentLog(
         "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
       );
+    }
+    if (
+      structuredMode &&
+      salvagedInvalidFinalOutput &&
+      !structuredOutput
+    ) {
+      structuredOutput = synthesizeStructuredOutputFromEvidence();
+      if (structuredOutput) {
+        output = structuredOutput.message;
+        agentLog(
+          "[output] 最终输出不符合 schema，已根据工具账本合成完成结果",
+        );
+      }
     }
     if (cancelled) return "cancelled";
     return bailed ? "empty-bailed" : "done";
@@ -3055,15 +3128,19 @@ export async function runAgent(
         };
       }
       if (!structuredOutput) {
-        const fallbackMessage = fallbackRequiredToolMessage();
-        if (requiredTool && hasAttemptedRequiredAction() && fallbackMessage) {
-          structuredOutput = {
-            message: fallbackMessage,
-            diagnostics: [],
-            artifacts: [],
-            data: null,
-          };
-        } else {
+        structuredOutput = synthesizeStructuredOutputFromEvidence();
+        if (!structuredOutput) {
+          const fallbackMessage = fallbackRequiredToolMessage();
+          if (requiredTool && hasAttemptedRequiredAction() && fallbackMessage) {
+            structuredOutput = {
+              message: fallbackMessage,
+              diagnostics: [],
+              artifacts: [],
+              data: null,
+            };
+          }
+        }
+        if (!structuredOutput) {
           throw new AgentOutputValidationError(
             "Agent 未返回符合 Schema 的最终结构化结果",
           );

@@ -40,6 +40,10 @@ import {
   type TaskPlanProgress,
 } from './taskPlan';
 import {
+  inferDeliveryContractFromUserText,
+  isStCodeDeliveryContract,
+} from './deliveryContract';
+import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
   completeTeamNode,
@@ -96,6 +100,13 @@ function isTeamPreparationSchemaError(error: unknown): boolean {
   return name === 'ModelBehaviorError' ||
     name === 'AgentOutputValidationError' ||
     /(?:Invalid output type|expected schema|output does not match)/i.test(message);
+}
+
+function shouldUseRuntimeManagedStFlow(
+  contract: DurableRunRecord['deliveryContract'],
+  orchestration: DurableRunConfig['orchestration'],
+): boolean {
+  return orchestration !== 'team' && isStCodeDeliveryContract(contract);
 }
 
 export interface RunCoordinatorDependencies {
@@ -417,8 +428,14 @@ export class RunCoordinator {
             await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
             return;
           }
-          this.writeLog(`[delivery] 交付契约判定失败，继续执行但不启用交付契约: ${this.formatError(error)}`);
-          run.deliveryContract = undefined;
+          const inferred = inferDeliveryContractFromUserText(userText);
+          if (inferred) {
+            this.writeLog(`[delivery] 交付契约判定失败，已启用运行时 ST 固定交付契约: ${this.formatError(error)}`);
+            run.deliveryContract = inferred;
+          } else {
+            this.writeLog(`[delivery] 交付契约判定失败，继续执行但不启用交付契约: ${this.formatError(error)}`);
+            run.deliveryContract = undefined;
+          }
           run.resumeStage = undefined;
           await this.store.update(run);
         } finally {
@@ -433,7 +450,8 @@ export class RunCoordinator {
       if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;
-      if (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask)) {
+      const runtimeManagedStFlow = shouldUseRuntimeManagedStFlow(run.deliveryContract, config.orchestration);
+      if (!runtimeManagedStFlow && (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask))) {
         run.resumeStage = 'routing';
         await this.store.update(run);
         const routeTeam = this.routeTeamTask;
@@ -474,7 +492,7 @@ export class RunCoordinator {
           if (this.transitionController === routingController) this.transitionController = undefined;
         }
       }
-      if (!run.teamTask && this.planTask && config.orchestration !== 'team') {
+      if (!runtimeManagedStFlow && !run.teamTask && this.planTask && config.orchestration !== 'team') {
         run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
         await this.store.update(run);
@@ -803,9 +821,12 @@ export class RunCoordinator {
     if (!stage || this.isRunInvalidated(generation)) return false;
     const sessionItems = await this.session.getItems();
     if (stage === 'delivery' && !this.classifyDeliveryContract) {
+      run.deliveryContract = inferDeliveryContractFromUserText(run.userText) ?? run.deliveryContract;
       run.resumeStage = undefined;
       await this.store.update(run);
-      stage = run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+      stage = shouldUseRuntimeManagedStFlow(run.deliveryContract, run.config.orchestration)
+        ? undefined
+        : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
     }
     if (stage === 'delivery' && this.classifyDeliveryContract) {
       const deliveryController = new AbortController();
@@ -818,17 +839,25 @@ export class RunCoordinator {
           sessionItems,
         );
       } catch (error) {
-        await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
-        return false;
+        const inferred = inferDeliveryContractFromUserText(run.userText);
+        if (!inferred) {
+          await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
+          return false;
+        }
+        this.writeLog(`[delivery] 恢复交付契约判定失败，已启用运行时 ST 固定交付契约: ${this.formatError(error)}`);
+        run.deliveryContract = inferred;
       } finally {
         if (this.transitionController === deliveryController) this.transitionController = undefined;
       }
       if (this.stopRequested || this.isRunInvalidated(generation)) return false;
       run.resumeStage = undefined;
       await this.store.update(run);
-      stage = run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+      stage = shouldUseRuntimeManagedStFlow(run.deliveryContract, run.config.orchestration)
+        ? undefined
+        : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
     }
-    if (stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
+    const runtimeManagedStFlow = shouldUseRuntimeManagedStFlow(run.deliveryContract, run.config.orchestration);
+    if (!runtimeManagedStFlow && stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
       const routingController = new AbortController();
       this.transitionController = routingController;
       try {
@@ -845,7 +874,7 @@ export class RunCoordinator {
       run.resumeStage = undefined;
       await this.store.update(run);
     }
-    if (!run.teamTask && this.planTask && run.config.orchestration !== 'team') {
+    if (!runtimeManagedStFlow && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
       run.resumeStage = 'planning';
       await this.store.update(run);
       const planningController = new AbortController();

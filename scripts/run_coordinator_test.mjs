@@ -105,6 +105,49 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// Explicit ST generation requests use a runtime-managed delivery pipeline when
+// the model classifier returns malformed structured output. This keeps the
+// validate -> write flow deterministic and avoids auto Team/plan schema noise.
+{
+  let classifierCalls = 0;
+  let routeCalls = 0;
+  let planCalls = 0;
+  let receivedContract;
+  const stRequest = '设计一个 PLC 控制程序，使用 ST 语言实现 3 台水泵自动/手动控制，变量使用模拟的就行';
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    receivedContract = options.deliveryContract;
+    return { status: 'completed', output: 'st delivered', usage, result: completedAgentResult('st delivered') };
+  }, async () => {
+    planCalls += 1;
+    return undefined;
+  }, {
+    classifyDeliveryContract: async () => {
+      classifierCalls += 1;
+      const error = new Error('Invalid output type: final assistant output did not match the expected schema.');
+      error.name = 'ModelBehaviorError';
+      throw error;
+    },
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      return undefined;
+    },
+  });
+  await test.coordinator.start(stRequest, { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  const deliverable = receivedContract?.deliverables?.[0];
+  if (
+    classifierCalls !== 1 ||
+    routeCalls !== 0 ||
+    planCalls !== 0 ||
+    receivedContract?.requiresDeliverable !== true ||
+    deliverable?.workspaceFileExtension !== '.st' ||
+    !deliverable?.requiredVerificationTools?.includes('validate_st_code') ||
+    completed?.deliveryContract?.deliverables?.[0]?.workspaceFileExtension !== '.st'
+  ) {
+    throw new Error('runtime-managed ST delivery fallback did not install the fixed validate/write pipeline');
+  }
+}
+
 // A model-selected generic plan is persisted and progress is validated in
 // order without changing the existing single-agent execution contract.
 {
