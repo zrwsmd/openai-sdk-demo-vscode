@@ -217,9 +217,10 @@ export function parseStAnalyzerResponse(raw: string): StValidationResult {
   const wireResults = Array.isArray(parsed.results) ? parsed.results : [];
   const results: StValidationTargetResult[] = wireResults.map((item) => {
     const record = (item ?? {}) as Record<string, unknown>;
+    const resultPath = asString(record.path);
     const wireDiagnostics = Array.isArray(record.diagnostics) ? record.diagnostics : [];
     return {
-      path: asString(record.path),
+      path: resultPath,
       diagnostics: wireDiagnostics.map((entry): StDiagnostic => {
         const diagnostic = (entry ?? {}) as BridgeDiagnosticWire;
         const message = asString(diagnostic.message).replace(/\s+/g, ' ').slice(0, 500);
@@ -230,7 +231,9 @@ export function parseStAnalyzerResponse(raw: string): StValidationResult {
           code: wireCode || mapStDiagnosticCode(message, diagnostic.rawCode),
           ...(asString(diagnostic.rawCode) ? { rawCode: asString(diagnostic.rawCode) } : {}),
           message,
-          path: asString(diagnostic.path),
+          // 诊断项级的路径:桥通常只在结果层级给,这里用结果路径兜底,
+          // 保证下游(审计/UI/测试)拿到的每条诊断都知道自己属于哪个文件。
+          path: asString(diagnostic.path) || resultPath,
           line: asNumber(diagnostic.line),
           character: asNumber(diagnostic.character),
           endLine: asNumber(diagnostic.endLine),

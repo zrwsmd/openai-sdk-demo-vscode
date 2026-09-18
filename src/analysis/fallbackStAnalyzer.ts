@@ -28,7 +28,7 @@ function makeDiagnostic(path: string, code: string, message: string): StDiagnost
   };
 }
 
-/** 内置简易规则:只做两件低成本的事,与接入真实校验器之前的工具行为一致。 */
+/** 内置简易规则:刻意保持与接入真实校验器之前完全一致的两条判断。 */
 export function fallbackStDiagnostics(target: StTarget): StDiagnostic[] {
   const diagnostics: StDiagnostic[] = [];
   if (!/END_PROGRAM/i.test(target.text)) {
@@ -36,7 +36,8 @@ export function fallbackStDiagnostics(target: StTarget): StDiagnostic[] {
       makeDiagnostic(target.path, ST_DIAGNOSTIC_CODES.parseError, '缺少 END_PROGRAM 结束标记'),
     );
   }
-  if (/\bTON\b/i.test(target.text) && !/T#/.test(target.text)) {
+  // 与接入前的工具实现一致:子串匹配(能覆盖 TON1 / TON_Star 等实例名)
+  if (target.text.includes('TON') && !target.text.includes('T#')) {
     diagnostics.push(
       makeDiagnostic(target.path, ST_DIAGNOSTIC_CODES.timerLiteralMissing, '使用了 TON 但未发现时间字面量(如 T#5s)'),
     );
