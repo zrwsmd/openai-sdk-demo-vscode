@@ -23,7 +23,6 @@ import {
 } from "@openai/agents";
 import { z } from "zod";
 import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -1742,6 +1741,173 @@ function teamTracingDisabled(cfg: AgentConfig, adapter: ModelAdapter): boolean {
   return !(adapter.provider === "openai" && adapter.apiFormat === "responses" && !cfg.baseUrl.trim());
 }
 
+const TEAM_ROLE_REPAIR_ATTEMPTS = 1;
+
+function stringifyForPrompt(value: unknown, maxLength = 4_000): string {
+  const text = typeof value === "string"
+    ? value
+    : JSON.stringify(value, null, 2) ?? String(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function tryParseJsonLikeOutput(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  const unfenced = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(unfenced);
+  } catch {
+    const firstObject = unfenced.indexOf("{");
+    const lastObject = unfenced.lastIndexOf("}");
+    if (firstObject >= 0 && lastObject > firstObject) {
+      try {
+        return JSON.parse(unfenced.slice(firstObject, lastObject + 1));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+}
+
+function formatZodIssues(error: z.ZodError, maxIssues = 8): string {
+  return error.issues
+    .slice(0, maxIssues)
+    .map((issue) => {
+      const pathText = issue.path.length ? issue.path.join(".") : "<root>";
+      return `${pathText}: ${issue.message}`;
+    })
+    .join("; ");
+}
+
+function parseSchemaOutput<T>(
+  schema: z.ZodType<T>,
+  rawOutput: unknown,
+): { ok: true; value: T } | { ok: false; issues: string; raw: string } {
+  const candidate = tryParseJsonLikeOutput(rawOutput);
+  const parsed = schema.safeParse(candidate);
+  if (parsed.success) return { ok: true, value: parsed.data };
+  return {
+    ok: false,
+    issues: formatZodIssues(parsed.error),
+    raw: stringifyForPrompt(rawOutput),
+  };
+}
+
+function teamRoleSchemaInstruction(name: string): string {
+  switch (name) {
+    case "协作任务路由器":
+      return [
+        "只返回 JSON 对象，不要 markdown、代码块或解释文字。",
+        "字段: route('single'|'team'), goal(string), reason(string), planSummary(string), reviewFocus(string[]), verificationCriteria(string[])。",
+      ].join("\n");
+    case "Team Planner":
+      return [
+        "只返回 JSON 对象，不要 markdown、代码块或解释文字。",
+        "字段: planSummary(string), reviewFocus(string[]), verificationCriteria(string[]), executionGraph(optional object)。",
+        "executionGraph.nodes 每项必须包含 id,title,objective,dependsOn,completionCriteria,suggestedTools,effect,resources,parallelSafe,priority。",
+      ].join("\n");
+    case "Team Reviewer":
+      return [
+        "只返回 JSON 对象，不要 markdown、代码块或解释文字。",
+        "字段: approved(boolean), summary(string), findings(string[]), requiredChanges(string[])。",
+      ].join("\n");
+    case "Team Verifier":
+      return [
+        "只返回 JSON 对象，不要 markdown、代码块或解释文字。",
+        "字段: passed(boolean), summary(string), evidence(string[]), gaps(string[]), decision(optional 'pass'|'retry'|'ask_user'|'revise')。",
+      ].join("\n");
+    default:
+      return "只返回符合本角色 schema 的 JSON 对象，不要 markdown、代码块或解释文字。";
+  }
+}
+
+function appendTeamRoleRepairInput(
+  input: string | AgentInputItem[],
+  repairPrompt: string,
+): string | AgentInputItem[] {
+  if (typeof input === "string") return `${input}\n\n${repairPrompt}`;
+  return [...input, { type: "message", role: "user", content: repairPrompt }];
+}
+
+function teamRoleTextDelta(event: any): string {
+  const raw = event?.type === "raw_model_stream_event"
+    ? event.data
+    : event?.event ?? event?.data ?? event;
+  if (!raw || typeof raw !== "object") return "";
+  if (
+    (raw.type === "output_text_delta" ||
+      raw.type === "response.output_text.delta") &&
+    typeof raw.delta === "string"
+  ) {
+    return raw.delta;
+  }
+  const delta = raw.choices?.[0]?.delta ?? raw.providerData?.choices?.[0]?.delta;
+  return typeof delta?.content === "string" ? delta.content : "";
+}
+
+async function runTeamRoleRawOutput(
+  runner: Runner,
+  role: Agent<any, any>,
+  input: string | AgentInputItem[],
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const stream = await runner.run(role, input, {
+    stream: true,
+    maxTurns: 1,
+    signal,
+  });
+  let text = "";
+  try {
+    for await (const event of stream) {
+      text += teamRoleTextDelta(event);
+    }
+  } catch (error) {
+    if (!(error instanceof MaxTurnsExceededError) || !text.trim()) throw error;
+  }
+  try {
+    await stream.completed;
+  } catch (error) {
+    if (!(error instanceof MaxTurnsExceededError) || !text.trim()) throw error;
+  }
+  return typeof stream.finalOutput === "string" && stream.finalOutput.trim()
+    ? stream.finalOutput
+    : text;
+}
+
+function asPlainFinalMessage(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value;
+  const candidate = tryParseJsonLikeOutput(value);
+  if (candidate && typeof candidate === "object") {
+    const message = (candidate as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return undefined;
+}
+
+function coerceIndustrialAgentOutput(value: unknown): IndustrialAgentOutput | undefined {
+  const candidate = tryParseJsonLikeOutput(value);
+  const parsed = industrialAgentOutputDefinition.schema.safeParse(candidate);
+  if (parsed.success) return parsed.data as IndustrialAgentOutput;
+  const message = asPlainFinalMessage(value);
+  return message
+    ? { message, diagnostics: [], artifacts: [], data: null }
+    : undefined;
+}
+
+function isInvalidFinalOutputTypeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { name?: unknown; message?: unknown };
+  const name = typeof value.name === "string" ? value.name : "";
+  const message = typeof value.message === "string" ? value.message : "";
+  return name === "ModelBehaviorError" &&
+    /Invalid output type|final assistant output/i.test(message);
+}
+
 async function runTeamRole<T>(
   cfg: AgentConfig,
   name: string,
@@ -1754,19 +1920,41 @@ async function runTeamRole<T>(
   const role = new Agent({
     name,
     model: adapter.model,
-    instructions,
-    outputType,
+    instructions:
+      instructions +
+      "\n\n结构化输出要求:\n" +
+      teamRoleSchemaInstruction(name) +
+      "\n如果上一轮被指出 schema 错误,只修正 JSON 结构并重新返回完整对象。",
     // Team role schemas can contain a bounded execution graph. The gateway's
     // small default output cap can cut that JSON in the middle and surface as
     // a misleading "output did not match schema" error.
     modelSettings: { maxTokens: 8_000 },
   });
-  const result = await new Runner({ tracingDisabled: teamTracingDisabled(cfg, adapter) }).run(role, input, {
-    stream: false,
-    maxTurns: 1,
-    signal,
-  });
-  return outputType.parse(result.finalOutput);
+  const runner = new Runner({ tracingDisabled: teamTracingDisabled(cfg, adapter) });
+  let currentInput = input;
+  let lastIssues = "";
+  let lastRaw = "";
+  for (let attempt = 0; attempt <= TEAM_ROLE_REPAIR_ATTEMPTS; attempt += 1) {
+    const rawOutput = await runTeamRoleRawOutput(runner, role, currentInput, signal);
+    const parsed = parseSchemaOutput(outputType, rawOutput);
+    if (parsed.ok) return parsed.value;
+    lastIssues = parsed.issues;
+    lastRaw = parsed.raw;
+    if (attempt < TEAM_ROLE_REPAIR_ATTEMPTS) {
+      agentLog(
+        `[team] ${name} 结构化输出未通过 schema，要求模型按字段错误修正: ${lastIssues}`,
+      );
+      currentInput = appendTeamRoleRepairInput(
+        input,
+        "上一轮结构化输出没有通过 schema 校验。请根据下面的字段级错误自查并重试,只返回完整 JSON 对象。\n" +
+          `schema错误: ${lastIssues}\n` +
+          `上一轮原始输出: ${lastRaw}`,
+      );
+    }
+  }
+  throw new AgentOutputValidationError(
+    `${name} 结构化输出不符合 schema: ${lastIssues || "未知错误"}；raw=${lastRaw || "无"}`,
+  );
 }
 
 /**
@@ -1886,16 +2074,14 @@ export async function runAgent(
           (evidence) => evidence === "final_artifact",
         ),
     );
-  // The provider sees minItems=1 for inline-delivery turns. Keep this as a
-  // serialized JSON Schema rather than a Zod output type so a non-compliant
-  // gateway response still reaches CompletionGate instead of throwing during
-  // SDK final-output parsing.
-  const structuredOutputType: AgentOutputType = requiresInlineFinalArtifact
-    ? (zodTextFormat(
-        industrialFinalArtifactOutputSchema,
-        "industrial_agent_output",
-      ) as unknown as AgentOutputType)
-    : industrialAgentOutputDefinition.schema;
+  // Delivery-contract turns need runtime repair authority. Some compatible
+  // gateways redact malformed final output and throw before CompletionGate can
+  // force validation/write tools, so those turns parse final text locally.
+  // Ordinary action turns keep the old SDK-level structured response format.
+  const sdkStructuredOutputType: AgentOutputType | undefined =
+    options.deliveryContract?.requiresDeliverable === true
+      ? undefined
+      : industrialAgentOutputDefinition.schema;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   let activePlan = options.taskPlan ? structuredClone(options.taskPlan) : undefined;
   const planProgressTool = activePlan
@@ -2046,11 +2232,8 @@ export async function runAgent(
       instructions,
       tools,
       modelSettings,
-      // Gateway capability negotiation happens inside GatewayGuardedModel;
-      // Ordinary conversation stays text-native so the UI can receive
-      // text.delta events; action turns keep the canonical schema.
-      ...(structuredMode
-        ? { outputType: structuredOutputType }
+      ...(structuredMode && sdkStructuredOutputType
+        ? { outputType: sdkStructuredOutputType }
         : {}),
     });
   };
@@ -2538,6 +2721,7 @@ export async function runAgent(
   ): Promise<"done" | "empty-bailed" | "cancelled"> => {
     let bailed = false;
     let cancelled = false;
+    let salvagedInvalidFinalOutput = false;
     try {
       await protocolAdapter.consume(stream);
     } catch (e) {
@@ -2549,6 +2733,8 @@ export async function runAgent(
         cancelled = true;
       } else if (e instanceof EmptyGatewayResponseError) {
         bailed = true;
+      } else if (structuredMode && isInvalidFinalOutputTypeError(e) && output.trim()) {
+        salvagedInvalidFinalOutput = true;
       } else {
         throw e;
       }
@@ -2567,6 +2753,8 @@ export async function runAgent(
           cancelled = true;
         } else if (e instanceof EmptyGatewayResponseError) {
           bailed = true;
+        } else if (structuredMode && isInvalidFinalOutputTypeError(e) && output.trim()) {
+          salvagedInvalidFinalOutput = true;
         } else {
           throw e;
         }
@@ -2584,15 +2772,44 @@ export async function runAgent(
       stream.finalOutput !== undefined
     ) {
       if (structuredMode) {
-        structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
-        const projected = projectAgentOutput(
+        const candidate = tryParseJsonLikeOutput(stream.finalOutput);
+        const parsed = industrialAgentOutputDefinition.schema.safeParse(candidate);
+        if (parsed.success) {
+          structuredOutput = parsed.data as IndustrialAgentOutput;
+        } else {
+          structuredOutput = coerceIndustrialAgentOutput(stream.finalOutput);
+          if (!structuredOutput) {
+            structuredOutput = parseIndustrialAgentOutput(stream.finalOutput);
+          } else {
+            agentLog(
+              "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
+            );
+          }
+        }
+        output = projectAgentOutput(
           industrialAgentOutputDefinition,
           structuredOutput,
-        );
-        output = projected.text;
+        ).text;
       } else if (typeof stream.finalOutput === "string") {
         output = stream.finalOutput;
       }
+    }
+    if (
+      structuredMode &&
+      salvagedInvalidFinalOutput &&
+      !structuredOutput &&
+      output.trim()
+    ) {
+      structuredOutput = coerceIndustrialAgentOutput(output) ?? {
+        message: output,
+        diagnostics: [],
+        artifacts: [],
+        data: null,
+      };
+      output = structuredOutput.message;
+      agentLog(
+        "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
+      );
     }
     if (cancelled) return "cancelled";
     return bailed ? "empty-bailed" : "done";

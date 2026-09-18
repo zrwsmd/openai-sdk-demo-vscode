@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   AgentEventFactory,
+  planTeamTask,
   runAgent,
   setAgentLogger,
   JsonFileSession,
@@ -179,6 +180,68 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
   if (!repairLogs.some((line) => line.includes('force_tool=validate_st_code'))) {
     throw new Error('完成验收没有记录强制验证工具');
+  }
+}
+
+// [3e] 兼容坏网关/坏模型:即使主 Agent 在结构化输出请求下直接吐普通正文,
+// runtime 也要保留正文并进入交付闭环,不能把 SDK 的 schema 错误直接抛给用户。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码并默认保存到工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const before = diagLines.length;
+  const r = await runTestTurn(
+    '正文交付闭环',
+    async (name) => {
+      asked.push(name);
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'plain-output-repair-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const freshLogs = diagLines.slice(before);
+  console.log('[3e] 普通正文 schema 兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('普通正文输出没有进入校验再落盘闭环');
+  }
+  if (!freshLogs.some((line) => line.includes('最终输出不符合 schema'))) {
+    throw new Error('普通正文输出没有记录 schema 兜底日志');
+  }
+  if (!r.output.includes('PumpControl.st')) {
+    throw new Error('普通正文兜底后的最终确认不正确');
+  }
+}
+
+// [3f] Team 角色不再依赖 SDK 黑盒 schema 错误。planner 首次返回缺字段
+// JSON 时,运行时应把具体 zod issue 回灌给模型并拿到修正后的结构化计划。
+{
+  const before = diagLines.length;
+  const report = await planTeamTask(cfg, {
+    goal: 'Team schema repair',
+    planSummary: 'Team schema repair',
+    reviewFocus: [],
+    verificationCriteria: ['完成'],
+  });
+  const freshLogs = diagLines.slice(before);
+  console.log('[3f] Team schema 自修:计划 =', report.planSummary, '| 节点 =', report.executionGraph?.nodes?.length ?? 0);
+  if (report.planSummary !== '修正后的 Team 计划' || report.executionGraph?.nodes?.[0]?.id !== 'generate') {
+    throw new Error('Team schema 自修没有返回修正后的计划');
+  }
+  if (!freshLogs.some((line) => line.includes('结构化输出未通过 schema') && line.includes('completionCriteria'))) {
+    throw new Error('Team schema 自修没有记录字段级 schema 错误');
   }
 }
 

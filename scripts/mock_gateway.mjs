@@ -340,7 +340,43 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     sse(res, chunk(model, { role: 'assistant' }));
 
-    if (userText.includes('循环')) {
+    if (
+      serializedMessages.includes('Team schema repair') &&
+      serializedMessages.includes('schema错误')
+    ) {
+      await streamText(res, model, JSON.stringify({
+        planSummary: '修正后的 Team 计划',
+        reviewFocus: ['范围'],
+        verificationCriteria: ['完成'],
+        executionGraph: {
+          maxParallelism: 1,
+          nodes: [{
+            id: 'generate',
+            title: '生成程序',
+            objective: '生成 ST 程序',
+            dependsOn: [],
+            completionCriteria: '得到完整代码',
+            suggestedTools: ['validate_st_code'],
+            effect: 'none',
+            resources: ['chat'],
+            parallelSafe: true,
+            priority: 50,
+          }],
+        },
+      }));
+    } else if (serializedMessages.includes('Team schema repair')) {
+      await streamText(res, model, JSON.stringify({
+        planSummary: '坏计划',
+        reviewFocus: [],
+        verificationCriteria: ['完成'],
+        executionGraph: {
+          nodes: [{
+            id: 'generate',
+            title: '生成程序',
+          }],
+        },
+      }));
+    } else if (userText.includes('循环')) {
       // 死循环模式:无论是否收到工具结果,都再次请求工具 → 应被 maxTurns 截停
       endWithToolCall(res, model);
     } else if (
@@ -381,7 +417,13 @@ const server = http.createServer((req, res) => {
     ) {
       await streamStructuredText(res, model, '我已准备好交付程序。');
     } else if (
-      userText.includes('强制交付闭环') &&
+      userText.includes('正文交付闭环') &&
+      last.role !== 'tool' &&
+      !forcedToolChoice
+    ) {
+      await streamText(res, model, `我先直接给出程序正文,但还没有调用工具:\n\`\`\`st\n${ST_CODE}\n\`\`\``);
+    } else if (
+      (userText.includes('强制交付闭环') || userText.includes('正文交付闭环')) &&
       forcedToolChoice === 'validate_st_code'
     ) {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
@@ -389,7 +431,7 @@ const server = http.createServer((req, res) => {
         loadWorkspaceContext: false,
       }));
     } else if (
-      userText.includes('强制交付闭环') &&
+      (userText.includes('强制交付闭环') || userText.includes('正文交付闭环')) &&
       last.role === 'tool' &&
       lastAssistantToolCall === 'validate_st_code'
     ) {
@@ -398,11 +440,11 @@ const server = http.createServer((req, res) => {
         content: ST_CODE,
       }));
     } else if (
-      userText.includes('强制交付闭环') &&
+      (userText.includes('强制交付闭环') || userText.includes('正文交付闭环')) &&
       last.role === 'tool' &&
       lastAssistantToolCall === 'write_file'
     ) {
-      await streamStructuredText(res, model, '已完成校验并保存程序。');
+      await streamStructuredText(res, model, '已完成校验并保存 PumpControl.st。');
     } else if (
       ignoreCombinedToolChoice &&
       req_body.response_format &&
