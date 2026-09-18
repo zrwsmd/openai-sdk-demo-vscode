@@ -278,6 +278,28 @@ function formatToolInputError(name, rawError, meta, rawArgs) {
   };
 }
 
+function isDiagnosticCheckTool(name) {
+  return /^(?:validate|lint|check)(?:_|$)/i.test(String(name || ''));
+}
+
+function hasStructuredCheckResult(parsed) {
+  const data = parsed && typeof parsed.data === 'object' && !Array.isArray(parsed.data)
+    ? parsed.data
+    : {};
+  return Array.isArray(parsed?.diagnostics)
+    || Array.isArray(data.diagnostics)
+    || typeof data.errorCount === 'number'
+    || typeof data.warningCount === 'number'
+    || typeof data.infoCount === 'number';
+}
+
+function checkFailureHeadline(name, parsed) {
+  const error = typeof parsed?.error === 'string' ? parsed.error.trim() : '';
+  if (error) return error;
+  if (name === 'validate_st_code') return 'ST 校验未通过';
+  return '检查未通过';
+}
+
 function formatToolResult(name, summary, result, run, durationMs) {
   const parsed = result && typeof result === 'object'
     ? result
@@ -306,6 +328,15 @@ function formatToolResult(name, summary, result, run, durationMs) {
           ...inputError.detail,
           toolResult: parsed,
         },
+      };
+    }
+    if (isDiagnosticCheckTool(name) && hasStructuredCheckResult(parsed)) {
+      return {
+        headline: checkFailureHeadline(name, parsed),
+        summary: toolArgsSummary(name, run?.args),
+        meta,
+        detail: parsed,
+        suppressFailurePrefix: true,
       };
     }
     return {
@@ -387,7 +418,7 @@ function addToolResult(name, ok, summary, result, run, durationMs) {
   const body = document.createElement('div');
   body.className = 'tool-result-body';
   const formatted = formatToolResult(name, summary, result, run, durationMs);
-  if (!ok) formatted.headline = formatted.headline.startsWith('执行失败')
+  if (!ok && !formatted.suppressFailurePrefix) formatted.headline = formatted.headline.startsWith('执行失败')
     ? formatted.headline
     : `执行失败：${formatted.headline}`;
   const title = document.createElement('div');
