@@ -42,6 +42,19 @@ dag = startExecutionGraphNode(dag, 'write');
 dag = failExecutionGraphNode(dag, 'write', 'write failed');
 if (dag.status !== 'failed' || dag.nodes.find((node) => node.id === 'write')?.status !== 'failed') throw new Error('DAG failure state not persisted');
 
+const normalizedSideEffect = createExecutionGraph({
+  maxParallelism: 2,
+  nodes: [
+    { id: 'write-safe-oops', title: '误标写入', objective: 'write', dependsOn: [], completionCriteria: 'done', suggestedTools: ['write_file'], effect: 'write', resources: ['workspace'], parallelSafe: true },
+  ],
+});
+if (normalizedSideEffect.nodes[0].parallelSafe !== false) {
+  throw new Error('side-effect node parallelSafe flag was not normalized to false');
+}
+if (getExecutionGraphReadyNodes(normalizedSideEffect).map((node) => node.id).join(',') !== 'write-safe-oops') {
+  throw new Error('normalized side-effect node should still be schedulable as an exclusive node');
+}
+
 let governed = createExecutionGraph({
   maxParallelism: 2,
   budget: { maxRequests: 3 },

@@ -327,6 +327,11 @@ function graphNow(graph: ExecutionGraph, nodes: DagNode[]): ExecutionGraph {
 export function createExecutionGraph(plan: unknown): ExecutionGraph {
   const parsed = executionGraphPlanSchema.parse(plan);
   const timestamp = now();
+  const nodes = parsed.nodes.map((node) => ({
+    ...node,
+    parallelSafe: isReadOnlyEffect(node.effect) ? node.parallelSafe : false,
+    status: 'pending' as const,
+  }));
   return assertExecutionGraph({
     schemaVersion: 1,
     status: 'pending',
@@ -340,7 +345,7 @@ export function createExecutionGraph(plan: unknown): ExecutionGraph {
     retryCount: 0,
     maxRetries: parsed.maxRetries ?? 2,
     controlLog: [],
-    nodes: parsed.nodes.map((node) => ({ ...node, status: 'pending' })),
+    nodes,
     sessionCommitted: false,
     createdAt: timestamp,
     updatedAt: timestamp,
