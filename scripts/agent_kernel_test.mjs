@@ -12,6 +12,7 @@ import {
   extractChatMessages,
   MaxTurnsExceededError,
   MAX_TURNS,
+  createDeliveryContract,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
@@ -32,7 +33,7 @@ const noApproval = async (name) => {
   throw new Error(`不应触发审批,却收到 ${name}`);
 };
 let runSequence = 0;
-async function runTestTurn(userText, decide) {
+async function runTestTurn(userText, decide, extraOptions = {}, runSession = session) {
   const events = [];
   const runId = `kernel-${++runSequence}`;
   const factory = new AgentEventFactory(runId, runId);
@@ -42,20 +43,50 @@ async function runTestTurn(userText, decide) {
     eventFactory: factory,
     onEvent: (event) => events.push(event),
   };
-  let result = await runAgent(cfg, session, userText, { protocol });
+  let result = await runAgent(cfg, runSession, userText, { ...extraOptions, protocol });
   while (result.status === 'awaiting_approval') {
     if (!decide) throw new Error('测试遇到未处理的审批断点');
     const decisions = {};
     for (const approval of result.approvals || []) {
       decisions[approval.id] = await decide(approval.name, approval.args);
     }
-    result = await runAgent(cfg, session, userText, {
+    result = await runAgent(cfg, runSession, userText, {
+      ...extraOptions,
       initialState: result.state,
       decisions,
       protocol,
     });
   }
   return { ...result, events };
+}
+
+// [3b] 需要内联交付时,模型通过通用 deliver_artifact 工具提交完整内容;
+// 即使最终结构化总结仍给出空 artifacts, runtime 也应从工具回执恢复交付物。
+{
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '用户要求生成可交付 ST 程序',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+    }],
+  });
+  const r = await runTestTurn('交付物工具回归', noApproval, {
+    deliveryContract: contract,
+  }, new JsonFileSession(path.join(dir, 'delivery-session.json')));
+  const delivered = r.events.filter(
+    (event) => event.type === 'tool.completed' && event.payload.toolName === 'deliver_artifact',
+  );
+  console.log('[3b] 通用交付工具:回执 =', delivered.length, '| artifacts =', r.result.artifacts.length);
+  if (delivered.length !== 1 || r.result.artifacts.length !== 1) {
+    throw new Error('通用 deliver_artifact 回执没有恢复为最终交付物');
+  }
+  if (!r.result.artifacts[0]?.content?.includes('PROGRAM StarDelta')) {
+    throw new Error('通用 deliver_artifact 恢复的内容不完整');
+  }
 }
 
 // [1] 第一句问候 → mock 回显 msgs=2(系统提示+本句);usage 单次

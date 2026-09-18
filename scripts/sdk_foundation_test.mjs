@@ -11,6 +11,7 @@ import {
   inferRequiredTool,
   industrialAgentOutputDefinition,
   industrialAgentOutputSchema,
+  industrialFinalArtifactOutputSchema,
   parseToolResult,
   reviewReportToToolResult,
   verifyWorkspaceWrite,
@@ -97,6 +98,23 @@ const structuredValue = industrialAgentOutputSchema.parse({
   data: null,
 });
 assert.equal(structuredValue.message, '程序已校验');
+assert.throws(
+  () => industrialFinalArtifactOutputSchema.parse(structuredValue),
+  /Too small|must contain at least 1/,
+);
+assert.equal(
+  industrialFinalArtifactOutputSchema.parse({
+    ...structuredValue,
+    artifacts: [{
+      kind: 'code',
+      name: 'main.st',
+      uri: null,
+      mimeType: 'text/plain',
+      content: 'PROGRAM Main\nEND_PROGRAM',
+    }],
+  }).artifacts.length,
+  1,
+);
 assert.equal(inferRequiredTool('请把你好写入当前项目的 op.txt 文件'), 'write_file');
 assert.equal(inferRequiredTool('write this content to config.json'), 'write_file');
 assert.equal(inferRequiredTool('写你好我是agent这5个字到rr.txt下面'), 'write_file');

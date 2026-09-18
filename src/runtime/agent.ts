@@ -19,9 +19,11 @@ import {
   type AgentInputItem,
   type Session,
   type StreamedRunResult,
+  type AgentOutputType,
 } from "@openai/agents";
 import { z } from "zod";
 import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -77,6 +79,7 @@ import { AgentStreamAdapter } from "./streaming";
 import type { AgentEventFactory, AgentProtocolEvent } from "../protocol/events";
 import {
   industrialAgentOutputDefinition,
+  industrialFinalArtifactOutputSchema,
   parseIndustrialAgentOutput,
   type IndustrialAgentOutput,
   projectAgentOutput,
@@ -128,6 +131,7 @@ const TOOL_RISK_BY_NAME: Record<string, ToolRisk> = {
   get_io_table: "read",
   read_plc_variables: "read",
   validate_st_code: "plan",
+  deliver_artifact: "plan",
   list_files: "read",
   read_file: "read",
   search_files: "read",
@@ -1673,6 +1677,23 @@ export async function runAgent(
     options.deliveryContract?.requiresDeliverable !== true &&
     requiredTool === undefined;
   const structuredMode = !textStreamingMode;
+  const requiresInlineFinalArtifact =
+    options.deliveryContract?.requiresDeliverable === true &&
+    options.deliveryContract.deliverables.some(
+      (deliverable) =>
+        deliverable.required &&
+        deliverable.acceptableEvidence.includes("final_artifact"),
+    );
+  // The provider sees minItems=1 for inline-delivery turns. Keep this as a
+  // serialized JSON Schema rather than a Zod output type so a non-compliant
+  // gateway response still reaches CompletionGate instead of throwing during
+  // SDK final-output parsing.
+  const structuredOutputType: AgentOutputType = requiresInlineFinalArtifact
+    ? (zodTextFormat(
+        industrialFinalArtifactOutputSchema,
+        "industrial_agent_output",
+      ) as unknown as AgentOutputType)
+    : industrialAgentOutputDefinition.schema;
   if (model instanceof GatewayGuardedModel) model.resetEmptyStreak(); // 熔断计数每轮用户消息重新计
   let activePlan = options.taskPlan ? structuredClone(options.taskPlan) : undefined;
   const planProgressTool = activePlan
@@ -1724,9 +1745,37 @@ export async function runAgent(
         },
       })
     : undefined;
+  const artifactDeliveryTool = requiresInlineFinalArtifact
+    ? tool({
+        name: "deliver_artifact",
+        description:
+          "提交本轮用户要求的内联交付物。适用于代码、文档、报告、数据或配置等内容；必须填写完整内容，不能只写摘要或计划。该工具不修改文件、不执行命令，只把内容登记为最终交付证据。",
+        parameters: z.object({
+          kind: z.enum(["file", "code", "report", "data", "unknown"]),
+          name: z.string().min(1).describe("交付物名称"),
+          mimeType: z.string().optional().describe("可选 MIME 类型"),
+          content: z.string().min(1).describe("完整交付内容，不能省略"),
+        }),
+        execute: async ({ kind, name, mimeType, content }) =>
+          toolResult({
+            ok: true,
+            data: {
+              artifact: {
+                kind,
+                name,
+                ...(mimeType?.trim() ? { mimeType: mimeType.trim() } : {}),
+                content,
+              },
+            },
+            effect: "none",
+            risk: "plan",
+          }),
+      })
+    : undefined;
   const tools = [
     ...buildTools(cfg),
     ...(planProgressTool ? [planProgressTool] : []),
+    ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
   ];
   const executionInstructions = activePlan
     ? GENERIC_PLAN_SYSTEM_PROMPT +
@@ -1747,7 +1796,10 @@ export async function runAgent(
     ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
       renderDeliveryContract(options.deliveryContract) +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
-      "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。"
+      "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
+      (requiresInlineFinalArtifact
+        ? "\n本轮至少有一个交付物只能用 final_artifact 验收。优先调用 deliver_artifact 提交完整内容；也可以同时把内容放入最终 JSON 的 artifacts 数组。无论采用哪种方式，交付内容必须完整，不能只放摘要、计划或口头承诺。"
+        : "")
     : "";
   let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: RequiredAgentTool) => {
@@ -1784,7 +1836,7 @@ export async function runAgent(
       // Ordinary conversation stays text-native so the UI can receive
       // text.delta events; action turns keep the canonical schema.
       ...(structuredMode
-        ? { outputType: industrialAgentOutputDefinition.schema }
+        ? { outputType: structuredOutputType }
         : {}),
     });
   };
@@ -1976,6 +2028,48 @@ export async function runAgent(
     return verified;
   };
 
+  const deliveredArtifactsFromTools = (): Artifact[] => {
+    const artifacts: Artifact[] = [];
+    for (const call of toolResults.values()) {
+      if (call.name !== "deliver_artifact" || !call.result.ok) continue;
+      const data =
+        call.result.data && typeof call.result.data === "object"
+          ? call.result.data as Record<string, unknown>
+          : {};
+      const value =
+        data.artifact && typeof data.artifact === "object"
+          ? data.artifact as Record<string, unknown>
+          : data;
+      const kind = value.kind;
+      const name = value.name;
+      const content = value.content;
+      const uri = value.uri;
+      if (
+        kind !== "file" &&
+        kind !== "code" &&
+        kind !== "report" &&
+        kind !== "data" &&
+        kind !== "unknown"
+      ) {
+        continue;
+      }
+      if (typeof name !== "string" || !name.trim()) continue;
+      const hasContent = typeof content === "string" && content.trim().length > 0;
+      const hasUri = typeof uri === "string" && uri.trim().length > 0;
+      if (!hasContent && !hasUri) continue;
+      artifacts.push({
+        kind,
+        name: name.trim(),
+        ...(hasUri ? { uri: (uri as string).trim() } : {}),
+        ...(typeof value.mimeType === "string" && value.mimeType.trim()
+          ? { mimeType: value.mimeType.trim() }
+          : {}),
+        ...(hasContent ? { content: content as string } : {}),
+      });
+    }
+    return artifacts;
+  };
+
   const fallbackRequiredToolMessage = (): string | undefined => {
     if (!requiredTool) return undefined;
     const call = [...toolResults.values()]
@@ -2084,13 +2178,16 @@ export async function runAgent(
   };
 
   let completionGateRetries = 0;
-  const runCompletionGate = (finalMessage: string, artifacts: Artifact[] = []): CompletionGateResult =>
+  const runCompletionGate = (
+    finalMessage: string,
+    artifacts: Artifact[] = [],
+  ): CompletionGateResult =>
     evaluateCompletionGate({
       userText,
       finalMessage,
       requiredTool,
       toolResults: [...toolResults.values()],
-      artifacts,
+      artifacts: [...artifacts, ...deliveredArtifactsFromTools()],
       deliveryContract: options.deliveryContract,
     });
 
@@ -2463,6 +2560,7 @@ export async function runAgent(
         industrialAgentOutputDefinition,
         structuredOutput,
       );
+      const deliveredArtifacts = deliveredArtifactsFromTools();
       const gate = runCompletionGate(message, structuredProjection.artifacts);
       if (!gate.passed) {
         continueAfterCompletionGateFailure(state, gate);
@@ -2474,6 +2572,13 @@ export async function runAgent(
         message,
         artifacts: [
           ...structuredOutput.artifacts,
+          ...deliveredArtifacts.map((artifact) => ({
+            kind: artifact.kind,
+            name: artifact.name,
+            uri: artifact.uri ?? null,
+            mimeType: artifact.mimeType ?? null,
+            content: artifact.content ?? null,
+          })),
           ...verifiedArtifacts.map((artifact) => ({
             kind: artifact.kind,
             name: artifact.name,

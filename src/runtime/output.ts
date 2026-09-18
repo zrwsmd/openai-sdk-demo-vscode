@@ -42,6 +42,21 @@ export const industrialAgentOutputSchema = z.object({
 
 export type IndustrialAgentOutput = z.infer<typeof industrialAgentOutputSchema>;
 
+/**
+ * Output shape for turns whose delivery contract requires an inline artifact.
+ *
+ * Keep this separate from the normal output schema: tool-only tasks such as
+ * reading a file or saving one through write_file must still be allowed to
+ * finish with an empty model artifact list when their tool evidence is valid.
+ */
+export const industrialFinalArtifactOutputSchema = industrialAgentOutputSchema.extend({
+  artifacts: z.array(industrialArtifactSchema).min(1),
+});
+
+export type IndustrialFinalArtifactOutput = z.infer<
+  typeof industrialFinalArtifactOutputSchema
+>;
+
 export class AgentOutputValidationError extends Error {
   constructor(message: string) {
     super(message);

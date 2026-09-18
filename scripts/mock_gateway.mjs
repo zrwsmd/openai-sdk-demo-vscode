@@ -346,6 +346,13 @@ const server = http.createServer((req, res) => {
       endWithNamedToolCall(res, model, 'export_st_program', JSON.stringify({ code: ST_CODE }));
     } else if (userText.includes('自动兜底') && last.role !== 'tool') {
       await streamStructuredText(res, model, '我先说明一下,但还没有执行导出工具。');
+    } else if (userText.includes('交付物工具回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'deliver_artifact', JSON.stringify({
+        kind: 'code',
+        name: 'PumpControl.st',
+        mimeType: 'text/plain',
+        content: ST_CODE,
+      }));
     } else if (
       ignoreCombinedToolChoice &&
       req_body.response_format &&
@@ -414,6 +421,8 @@ const server = http.createServer((req, res) => {
       const text = '好的,已按你的要求导出为 .st 文件。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
       else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('交付物工具回归')) {
+      await streamStructuredText(res, model, '已通过 deliver_artifact 提交完整程序。');
     } else if (last.role === 'tool' && userText.includes('并行读取')) {
       const text = '已并行读取 pa.txt 和 pb.txt。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
