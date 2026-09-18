@@ -273,6 +273,30 @@ async function runTestTurn(userText, decide) {
   }
 }
 
+// [8f] SDK 工具入参错误也必须纳入工具账本 → completion gate 反馈坏参数并驱动修正
+{
+  await fs.writeFile(path.join(dir, 'needle.txt'), 'needle', 'utf8');
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn('参数闭环搜索 needle', noApproval);
+  const started = r.events.filter((e) => e.type === 'tool.started' && e.payload.toolName === 'search_files');
+  const completed = r.events.filter((e) => e.type === 'tool.completed' && e.payload.toolName === 'search_files');
+  const gateRetries = r.events.filter((e) => e.type === 'run.progress' && e.payload.stage === 'completion_gate.retry');
+  const requestLines = diagLines.slice(capabilityLogStart).filter((line) => line.includes('[completion_gate]'));
+  console.log('[8f] 参数错误闭环:started =', started.length, '| completed =', completed.length, '| gateRetries =', gateRetries.length, '| 输出 =', r.output);
+  if (started.length !== 2 || completed.length !== 2) {
+    throw new Error('工具入参错误未驱动第二次修正调用');
+  }
+  if (gateRetries.length !== 1 || requestLines.length !== 1) {
+    throw new Error('工具入参错误未触发完成验收重试');
+  }
+  if (!String(gateRetries[0].payload.repairInstruction || '').includes('args={"text":')) {
+    throw new Error('完成验收反馈没有包含错误工具参数');
+  }
+  if (!r.output.includes('已修正') || !r.output.includes('needle')) {
+    throw new Error('工具入参错误修正后的最终答复缺少成功依据');
+  }
+}
+
 // [8c] 同一轮多个独立工具调用 → 请求开启 parallel_tool_calls,SDK 并发执行并回喂全部结果
 {
   await fs.writeFile(path.join(dir, 'pa.txt'), '并行A', 'utf8');

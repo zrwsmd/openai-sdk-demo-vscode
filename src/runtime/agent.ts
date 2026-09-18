@@ -65,6 +65,7 @@ import {
   type IndustrialAgentMode,
 } from "../orchestration/agentRoles";
 import {
+  createToolResult,
   createAgentResult,
   type AgentResult,
   type ApprovalRequest as ProtocolApprovalRequest,
@@ -116,6 +117,18 @@ export type { RequiredAgentTool } from "../policy/actionPolicy";
 
 // 超轮次异常透传给 UI 层做友好提示
 export { MaxTurnsExceededError };
+
+const TOOL_RISK_BY_NAME: Record<string, ToolRisk> = {
+  get_io_table: "read",
+  read_plc_variables: "read",
+  validate_st_code: "plan",
+  list_files: "read",
+  read_file: "read",
+  search_files: "read",
+  export_st_program: "write",
+  write_file: "write",
+  run_command: "execute",
+};
 
 export interface AgentConfig {
   /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
@@ -1757,6 +1770,54 @@ export async function runAgent(
     toolCalls.set(key, { name, args, order: ++toolCallOrder });
   };
 
+  const syntheticToolFailureResult = (
+    name: string,
+    args: string,
+    payload: Record<string, unknown>,
+  ): ToolResult | undefined => {
+    if (payload.ok !== false || payload.result !== undefined) return undefined;
+    const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+    const details = payload.details;
+    const detailText = typeof details === "string" ? details.trim() : "";
+    const error = summary || detailText || "工具执行失败";
+    let parsedArguments: unknown;
+    try {
+      parsedArguments = args ? JSON.parse(args) : undefined;
+    } catch {
+      parsedArguments = undefined;
+    }
+    const invalidInput = /(?:InvalidToolInputError|Invalid JSON input for tool|Invalid input for tool)/i.test(error);
+    return createToolResult({
+      ok: false,
+      data: {
+        rawArguments: args || null,
+        parsedArguments: parsedArguments ?? null,
+        argumentsWereJson: parsedArguments !== undefined,
+        source: "sdk_tool_completed",
+      },
+      error,
+      diagnostics: [
+        {
+          code: invalidInput ? "invalid_tool_input" : "tool_failed",
+          message: invalidInput
+            ? `${name} 工具参数格式错误，工具实现未执行：${error}`
+            : error,
+          severity: "error",
+          details: {
+            rawArguments: args || null,
+            parsedArguments: parsedArguments ?? null,
+          },
+        },
+      ],
+      effect: "none",
+      risk: TOOL_RISK_BY_NAME[name] ?? "execute",
+      metadata: {
+        synthetic: true,
+        source: "sdk_tool_completed",
+      },
+    });
+  };
+
   const recordToolResult = (
     name: string,
     callId: string | undefined,
@@ -1806,7 +1867,23 @@ export async function runAgent(
         typeof payload.toolName === "string"
           ? payload.toolName
           : (toolNameByCallId.get(callId ?? "") ?? "tool");
-      recordToolResult(name, callId, payload.result as ToolResult | undefined);
+      const key =
+        callId && toolCalls.has(callId)
+          ? callId
+          : [...toolCalls.keys()]
+              .reverse()
+              .find(
+                (candidate) =>
+                  !toolResults.has(candidate) &&
+                  (name === "tool" || toolCalls.get(candidate)?.name === name),
+              );
+      const call = key ? toolCalls.get(key) : undefined;
+      const result = payload.result as ToolResult | undefined;
+      recordToolResult(
+        name,
+        callId,
+        result ?? syntheticToolFailureResult(name, call?.args ?? "", payload),
+      );
     }
   };
 
@@ -1985,6 +2062,8 @@ export async function runAgent(
           payload: {
             stage: "completion_gate.retry",
             message: gate.reason,
+            repairInstruction: gate.repairInstruction,
+            issues: gate.issues,
             attempt: completionGateRetries,
             maxAttempts: MAX_COMPLETION_GATE_RETRIES,
           },

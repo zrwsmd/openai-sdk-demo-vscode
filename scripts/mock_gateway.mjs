@@ -384,6 +384,10 @@ const server = http.createServer((req, res) => {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'fixed.txt' }));
     } else if (userText.includes('通用闭环') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'typo.txt' }));
+    } else if (userText.includes('参数闭环') && completionGateRepair && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'search_files', JSON.stringify({ text: 'needle' }));
+    } else if (userText.includes('参数闭环') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'search_files', '{"text":');
     } else if (userText.includes('读取缺失') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'no_such.txt' }));
     } else if (userText.includes('读取') && last.role !== 'tool') {
@@ -433,6 +437,10 @@ const server = http.createServer((req, res) => {
       else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('通用闭环')) {
       await streamStructuredText(res, model, '已读取 typo.txt 文件内容。');
+    } else if (last.role === 'tool' && userText.includes('参数闭环') && completionGateRepair) {
+      await streamStructuredText(res, model, '已修正 search_files 参数并成功搜索 needle。');
+    } else if (last.role === 'tool' && userText.includes('参数闭环')) {
+      await streamStructuredText(res, model, '已搜索完成。');
     } else if (last.role === 'tool' && userText.includes('读取缺失')) {
       await streamText(res, model, JSON.stringify({
         message: '',

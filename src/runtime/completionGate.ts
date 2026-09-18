@@ -243,8 +243,18 @@ function buildRepairInstruction(
     '未处理问题: ' +
       issues
         .slice(0, 5)
-        .map((issue) => `${issue.toolName}(${issue.targetKey}) => ${issue.summary}`)
+        .map((issue) => {
+          const args = issue.args.trim()
+            ? ` args=${truncateForInstruction(issue.args, 600)}`
+            : '';
+          return `${issue.toolName}(${issue.targetKey})${args} => ${issue.summary}`;
+        })
         .join(' | '),
   );
   return lines.join('\n');
+}
+
+function truncateForInstruction(text: string, max: number): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max)}...` : compact;
 }
