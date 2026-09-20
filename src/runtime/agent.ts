@@ -26,7 +26,6 @@ import OpenAI from "openai";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createHash } from "node:crypto";
 import {
   listFiles,
   readFileRange,
@@ -118,10 +117,16 @@ import {
   deliveryContractDecisionSchema,
   inferDeliveryContractFromUserText,
   renderDeliveryContract,
-  isStCodeDeliveryContract,
-  isStWorkspaceDeliveryContract,
   type DeliveryContract,
 } from "./deliveryContract";
+import {
+  createDeliveryWorkflow,
+  createDeliveryWorkflowRuntimeState,
+  createStValidationState,
+  hashStContent,
+  type DeliveryWorkflow,
+  type StValidationState,
+} from "./deliveryWorkflow";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -304,20 +309,6 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
 const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
 const optionalStringParam = z.union([z.string(), z.null()]).optional();
 const optionalBooleanParam = z.union([z.boolean(), z.string(), z.null()]).optional();
-
-type StValidatedDraft = {
-  hash: string;
-  content: string;
-};
-
-type StValidationState = {
-  hashes: Set<string>;
-  lastSuccessful?: StValidatedDraft;
-};
-
-function hashStContent(content: string): string {
-  return createHash("sha1").update(content).digest("hex");
-}
 
 function parseOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -528,7 +519,8 @@ async function loadHistoricalToolResults(
 function buildTools(
   cfg: AgentConfig,
   deliveryContract?: DeliveryContract,
-  stValidationState: StValidationState = { hashes: new Set<string>() },
+  deliveryWorkflow?: DeliveryWorkflow,
+  stValidationState: StValidationState = createStValidationState(),
 ) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -539,7 +531,10 @@ function buildTools(
       deliverable.required &&
       deliverable.requiredVerificationTools?.includes("validate_st_code"),
   ) === true;
-  const stWorkspaceDelivery = isStWorkspaceDeliveryContract(deliveryContract);
+  const inlineStValidation = deliveryWorkflow?.validationInputMode === "inline_code";
+  const workflowToolNames = deliveryWorkflow?.visibleToolNames
+    ? new Set(deliveryWorkflow.visibleToolNames)
+    : undefined;
   const validatedStContent = stValidationState.hashes;
   /**
    * 解析校验目标与上下文:目标优先用工作区真实文件(跨文件解析最准),
@@ -674,7 +669,7 @@ function buildTools(
     },
   });
 
-  const validateStCodeParameters = stWorkspaceDelivery
+  const validateStCodeParameters = inlineStValidation
     ? z.object({
         code: z.string().min(1).describe("当前完整 ST 草稿；必须包含完整 PROGRAM ... END_PROGRAM"),
         loadWorkspaceContext: optionalBooleanParam.describe(
@@ -690,7 +685,7 @@ function buildTools(
       });
   const validateStCode = tool({
     name: "validate_st_code",
-    description: stWorkspaceDelivery
+    description: inlineStValidation
       ? "校验内存中的完整 IEC 61131-3 ST 草稿。当前处于固定交付流水线的草稿阶段，只能传 code；不要传 path，也不要在校验成功前调用 write_file、export_st_program 或 run_command。errorCount=0 才算通过，warning 只作提示。" +
         "校验成功后运行时会锁定这份源码，下一步只能把完全相同的源码交给 write_file。"
       :
@@ -737,12 +732,10 @@ function buildTools(
         const validatedHash = hashStContent(validationInput.target.text);
         if (!validationFailed) {
           validatedStContent.add(validatedHash);
-          if (stWorkspaceDelivery && !p) {
-            stValidationState.lastSuccessful = {
-              hash: validatedHash,
-              content: validationInput.target.text,
-            };
-          }
+          if (!p) deliveryWorkflow?.recordSuccessfulValidation?.(
+            validationInput.target.text,
+            validatedHash,
+          );
         }
         return toolResult({
           ok: !validationFailed,
@@ -940,8 +933,8 @@ function buildTools(
           if (
             requiresStValidation &&
             target.relativePath.toLowerCase().endsWith(".st") &&
-            !(stWorkspaceDelivery
-              ? stValidationState.lastSuccessful?.hash === hashStContent(content)
+            !(deliveryWorkflow?.canWriteContent
+              ? deliveryWorkflow.canWriteContent(content)
               : validatedStContent.has(hashStContent(content)))
           ) {
             return toolResult({
@@ -1013,12 +1006,7 @@ function buildTools(
       ),
   });
 
-  if (stWorkspaceDelivery) {
-    // ST workspace delivery is a host-owned state machine. Do not expose
-    // unrelated tools that let the model bypass the draft/validate/write order.
-    return [validateStCode, writeFileTool];
-  }
-  return [
+  const allTools = [
     getIoTable,
     readPlcVariables,
     validateStCode,
@@ -1029,6 +1017,16 @@ function buildTools(
     writeFileTool,
     runCommandTool,
   ];
+  if (workflowToolNames) {
+    // Workflow deliveries are host-owned state machines. Only expose the tools
+    // that the active pipeline stage can use, so unrelated tools cannot bypass
+    // the validate/write contract.
+    return allTools.filter((item) => {
+      const name = (item as unknown as { name?: unknown }).name;
+      return typeof name === "string" && workflowToolNames.has(name);
+    });
+  }
+  return allTools;
 }
 
 const SYSTEM_PROMPT =
@@ -2151,7 +2149,12 @@ export async function runAgent(
   );
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
-  const stWorkspaceDelivery = isStWorkspaceDeliveryContract(options.deliveryContract);
+  const workflowState = createDeliveryWorkflowRuntimeState();
+  const stValidationState = workflowState.stValidation;
+  const deliveryWorkflow = createDeliveryWorkflow(
+    options.deliveryContract,
+    workflowState,
+  );
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
   const textStreamingMode =
@@ -2259,11 +2262,11 @@ export async function runAgent(
           }),
       })
     : undefined;
-  const stValidationState: StValidationState = { hashes: new Set<string>() };
   const tools = [
     ...buildTools(
       cfg,
       options.deliveryContract,
+      deliveryWorkflow,
       stValidationState,
     ),
     ...(planProgressTool ? [planProgressTool] : []),
@@ -2294,8 +2297,8 @@ export async function runAgent(
       renderDeliveryContract(options.deliveryContract) +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
       "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
-      (stWorkspaceDelivery
-        ? "\n本轮 .st 工作区交付由运行时按固定流水线执行：先调用 validate_st_code 的 code 参数校验完整内存草稿；校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，且 content 必须与刚通过校验的源码完全一致。不要调用 path 校验、read_file、export_st_program 或 run_command，不要并行调用工具。"
+      (deliveryWorkflow
+        ? deliveryWorkflow.instructions()
         : "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。") +
       "契约列出的验证工具必须实际调用并依据成功回执完成；不要用文字描述代替工具调用。" +
       (requiresInlineFinalArtifact
@@ -2305,7 +2308,7 @@ export async function runAgent(
   let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: string) => {
     const modelSettings = {
-      parallelToolCalls: !stWorkspaceDelivery,
+      parallelToolCalls: deliveryWorkflow?.parallelToolCalls ?? true,
       ...(forcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: forcedTool }
         : {}),
@@ -2338,13 +2341,13 @@ export async function runAgent(
         : {}),
     });
   };
-  const initialStTool = stWorkspaceDelivery && !options.initialState
-    ? "validate_st_code"
-    : undefined;
-  if (initialStTool && model instanceof GatewayGuardedModel) {
-    model.requireToolOnce(initialStTool);
+  const initialWorkflowTool = deliveryWorkflow?.initialTool({
+    isResume: Boolean(options.initialState),
+  });
+  if (initialWorkflowTool && model instanceof GatewayGuardedModel) {
+    model.requireToolOnce(initialWorkflowTool);
   }
-  let agent = buildAgent(initialStTool);
+  let agent = buildAgent(initialWorkflowTool);
 
   const tracingDisabled = !(
     modelAdapter.provider === "openai" &&
@@ -2495,7 +2498,7 @@ export async function runAgent(
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
-    const verificationTool = stWorkspaceDelivery ? "write_file" : requiredTool;
+    const verificationTool = deliveryWorkflow?.requiredActionTool ?? requiredTool;
     if (!verificationTool) return [];
     const verified: Artifact[] = [];
     const calls = [...toolResults.values()].filter(
@@ -2503,6 +2506,11 @@ export async function runAgent(
     );
     for (const call of calls) {
       if (!call.result.ok) continue;
+      if (deliveryWorkflow) {
+        const artifact = deliveryWorkflow.verifyRequiredAction(call);
+        if (artifact) verified.push(artifact);
+        continue;
+      }
       if (verificationTool !== "write_file") continue;
       let args: { path?: unknown; content?: unknown };
       try {
@@ -2512,32 +2520,7 @@ export async function runAgent(
       }
       if (typeof args.path !== "string" || typeof args.content !== "string")
         continue;
-      if (stWorkspaceDelivery) {
-        const data = call.result.data && typeof call.result.data === "object"
-          ? call.result.data as Record<string, unknown>
-          : {};
-        const writtenHash = typeof data.contentHash === "string"
-          ? data.contentHash
-          : hashStContent(args.content);
-        const expected = stValidationState.lastSuccessful;
-        if (!expected || !args.path.toLowerCase().endsWith(".st") ||
-          writtenHash !== expected.hash || hashStContent(args.content) !== expected.hash) {
-          continue;
-        }
-        const file = typeof data.file === "string" ? data.file : args.path;
-        const bytes = typeof data.bytes === "number"
-          ? data.bytes
-          : Buffer.byteLength(args.content, "utf8");
-        verified.push({
-          kind: "file",
-          name: path.basename(file),
-          uri: file,
-          mimeType: "text/plain",
-          metadata: { bytes, contentHash: expected.hash },
-        });
-      } else {
-        verified.push(await verifyWorkspaceWrite(workspace, args.path, args.content));
-      }
+      verified.push(await verifyWorkspaceWrite(workspace, args.path, args.content));
     }
     const successful = calls.some((call) => call.result.ok);
     if (!calls.length) {
@@ -2548,7 +2531,7 @@ export async function runAgent(
     if (!successful) return verified;
     if (verificationTool === "write_file" && !verified.length) {
       throw new AgentActionVerificationError(
-        stWorkspaceDelivery
+        deliveryWorkflow
           ? "工具 write_file 返回成功，但写入回执的 contentHash 与最近一次 validate_st_code 通过的完整草稿不一致"
           : "工具 write_file 返回成功，但本轮没有完成文件回读校验",
       );
@@ -2722,62 +2705,16 @@ export async function runAgent(
       deliveryContract: options.deliveryContract,
     });
 
-  const authoritativeStDeliveryMessage = (): string | undefined => {
-    if (!isStCodeDeliveryContract(options.deliveryContract)) return undefined;
-    const records = [
-      ...historicalToolResults,
-      ...toolResults.values(),
-    ].filter((record) => record.result.ok);
-    const validationHashes = new Set<string>();
-    for (const record of records) {
-      if (record.name !== "validate_st_code") continue;
-      const data = record.result.data;
-      if (!data || typeof data !== "object" || Array.isArray(data)) continue;
-      const validation = data as Record<string, unknown>;
-      if (validation.errorCount !== 0) continue;
-      const target = validation.validationTarget;
-      const targetHash = target && typeof target === "object" && !Array.isArray(target)
-        ? (target as Record<string, unknown>).contentHash
-        : undefined;
-      const hash = typeof validation.validatedContentHash === "string"
-        ? validation.validatedContentHash
-        : typeof targetHash === "string" ? targetHash : undefined;
-      if (hash) validationHashes.add(hash);
-    }
-    if (!validationHashes.size) return undefined;
+  const workflowToolRecords = () => [
+    ...historicalToolResults,
+    ...toolResults.values(),
+  ];
 
-    for (const record of [...records].reverse()) {
-      if (record.name !== "write_file" && record.name !== "export_st_program") {
-        continue;
-      }
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(record.args) as Record<string, unknown>;
-      } catch {
-        args = {};
-      }
-      const data = record.result.data && typeof record.result.data === "object"
-        ? record.result.data as Record<string, unknown>
-        : {};
-      const file = typeof data.file === "string"
-        ? data.file
-        : typeof args.path === "string" ? args.path : undefined;
-      const content = record.name === "write_file"
-        ? typeof args.content === "string" ? args.content : undefined
-        : typeof args.code === "string" ? args.code : undefined;
-      const recordedHash = typeof data.contentHash === "string"
-        ? data.contentHash
-        : typeof content === "string" ? hashStContent(content) : undefined;
-      if (!file?.toLowerCase().endsWith(".st") || !recordedHash) continue;
-      if (!validationHashes.has(recordedHash)) continue;
-      const operation = record.name === "export_st_program" ? "导出" : "写入";
-      return `已完成：${operation} ${file}；内容与 validate_st_code 通过校验的完整代码一致（errorCount=0）。read_file 的省略号只是界面摘要，不代表文件被截断。`;
-    }
-    return undefined;
-  };
+  const authoritativeWorkflowMessage = (): string | undefined =>
+    deliveryWorkflow?.authoritativeMessage(workflowToolRecords());
 
   const fallbackDeliveryMessage = (): string | undefined => {
-    const authoritative = authoritativeStDeliveryMessage();
+    const authoritative = authoritativeWorkflowMessage();
     if (authoritative) return authoritative;
     const records = [
       ...historicalToolResults,
@@ -2809,7 +2746,7 @@ export async function runAgent(
   };
 
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
-    const message = authoritativeStDeliveryMessage() ||
+    const message = authoritativeWorkflowMessage() ||
       output.trim() ||
       fallbackRequiredToolMessage() ||
       fallbackDeliveryMessage();
@@ -2827,6 +2764,13 @@ export async function runAgent(
   const chooseCompletionRepairTool = (
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): string | undefined => {
+    const workflowRepairTool = deliveryWorkflow?.chooseRepairTool(
+      gate,
+      workflowToolRecords(),
+      availableToolNames,
+    );
+    if (workflowRepairTool) return workflowRepairTool;
+
     // Verification is the first dependency in a delivery workflow. Once a
     // contract says a validator is required, force that named tool instead of
     // hoping the model will remember it from a repair paragraph.
@@ -3139,30 +3083,7 @@ export async function runAgent(
     for (const hash of await loadValidatedStContent(session, userText)) {
       stValidationState.hashes.add(hash);
     }
-    if (stWorkspaceDelivery) {
-      for (const record of historicalToolResults) {
-        if (record.name !== "validate_st_code" || !record.result.ok) continue;
-        const data = record.result.data && typeof record.result.data === "object"
-          ? record.result.data as Record<string, unknown>
-          : {};
-        if (data.errorCount !== 0) continue;
-        let args: Record<string, unknown>;
-        try {
-          args = JSON.parse(record.args) as Record<string, unknown>;
-        } catch {
-          continue;
-        }
-        const code = typeof args.code === "string" && args.code.trim()
-          ? args.code
-          : undefined;
-        const hash = typeof data.validatedContentHash === "string"
-          ? data.validatedContentHash
-          : code ? hashStContent(code) : undefined;
-        if (!code || !hash) continue;
-        stValidationState.hashes.add(hash);
-        stValidationState.lastSuccessful = { hash, content: code };
-      }
-    }
+    deliveryWorkflow?.hydrate(historicalToolResults);
   }
 
   // Approval checkpoints are first-class results. The host persists the
@@ -3346,7 +3267,7 @@ export async function runAgent(
         }
       }
       assertPlanCompleted();
-      const authoritativeMessage = authoritativeStDeliveryMessage();
+      const authoritativeMessage = authoritativeWorkflowMessage();
       const fallbackMessage = fallbackRequiredToolMessage();
       const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
