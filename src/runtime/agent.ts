@@ -90,7 +90,6 @@ import {
 import {
   createDeliveryWorkflow,
   createDeliveryWorkflowRuntimeState,
-  hashStContent,
 } from "./deliveryWorkflow";
 import {
   buildTools,
@@ -99,6 +98,7 @@ import {
   type DiagnosticSideReporter,
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
+import { PipelineStageRuntime } from "./pipeline/stageRuntime";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -1453,6 +1453,7 @@ export async function runAgent(
     options.deliveryContract,
     workflowState,
   );
+  const pipelineStageRuntime = new PipelineStageRuntime(deliveryWorkflow);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
   const textStreamingMode =
@@ -1769,26 +1770,14 @@ export async function runAgent(
     name: string,
     result: ToolResult | undefined,
   ): void => {
-    if (
-      deliveryWorkflow?.id !== "st_workspace_delivery" ||
-      name !== "validate_st_code" ||
-      !result?.ok ||
-      !availableToolNames.has("write_file") ||
-      !(model instanceof GatewayGuardedModel)
-    ) {
-      return;
-    }
-    const data = result.data && typeof result.data === "object"
-      ? result.data as Record<string, unknown>
-      : {};
-    if (
-      data.errorCount !== 0 ||
-      typeof data.validatedContentHash !== "string"
-    ) {
-      return;
-    }
-    model.requireToolOnce("write_file");
-    agentLog("[workflow] validate_st_code 通过，下一轮强制工具: write_file");
+    const decision = pipelineStageRuntime.nextToolAfterResult(
+      name,
+      result,
+      availableToolNames,
+    );
+    if (!decision || !(model instanceof GatewayGuardedModel)) return;
+    model.requireToolOnce(decision.toolName);
+    agentLog(`[workflow] ${decision.reason}`);
   };
 
   const observeProtocolEvent = (event: AgentProtocolEvent): void => {
@@ -2221,9 +2210,6 @@ export async function runAgent(
   const effectToolKeyByCallId = new Map<string, string>();
   const visibleEffectCallIdByKey = new Map<string, string>();
   const suppressedEffectCallIds = new Set<string>();
-  const validationToolKeyByCallId = new Map<string, string>();
-  const visibleValidationCallIdByKey = new Map<string, string>();
-  const suppressedValidationCallIds = new Set<string>();
   const visibleApprovalIdByKey = new Map<string, string>();
   const suppressedApprovalIds = new Set<string>();
   const protocolPayloadString = (
@@ -2236,46 +2222,6 @@ export async function runAgent(
   const shouldDedupeEffectTool = (toolName: string): boolean => {
     const risk = TOOL_RISK_BY_NAME[toolName];
     return risk === "write" || risk === "execute";
-  };
-  const stValidationDuplicateKey = (
-    payload: Record<string, unknown>,
-  ): string | undefined => {
-    if (
-      deliveryWorkflow?.id !== "st_workspace_delivery" ||
-      protocolPayloadString(payload, "toolName") !== "validate_st_code"
-    ) {
-      return undefined;
-    }
-    const args =
-      protocolPayloadString(payload, "args") ??
-      protocolPayloadString(payload, "arguments") ??
-      "";
-    try {
-      const parsed = JSON.parse(args) as {
-        code?: unknown;
-        path?: unknown;
-        loadWorkspaceContext?: unknown;
-      };
-      if (typeof parsed.code === "string" && parsed.code.length > 0) {
-        return [
-          "validate_st_code",
-          "code",
-          hashStContent(parsed.code),
-          String(parsed.loadWorkspaceContext ?? "default"),
-        ].join(":");
-      }
-      if (typeof parsed.path === "string" && parsed.path.length > 0) {
-        return [
-          "validate_st_code",
-          "path",
-          parsed.path,
-          String(parsed.loadWorkspaceContext ?? "default"),
-        ].join(":");
-      }
-    } catch {
-      // Fall back to the raw argument hash below.
-    }
-    return args ? `validate_st_code:args:${hashStContent(args)}` : undefined;
   };
   const protocolToolDuplicateKey = (
     payload: Record<string, unknown>,
@@ -2292,21 +2238,14 @@ export async function runAgent(
   const shouldSuppressProtocolEvent = (event: AgentProtocolEvent): boolean => {
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "tool.started") {
-      const validationDuplicateKey = stValidationDuplicateKey(payload);
-      if (validationDuplicateKey) {
-        const callId =
-          protocolPayloadString(payload, "callId") ??
-          protocolPayloadString(payload, "itemId") ??
-          `${validationDuplicateKey}:anonymous`;
-        const existingCallId = visibleValidationCallIdByKey.get(validationDuplicateKey);
-        if (existingCallId && existingCallId !== callId) {
-          suppressedValidationCallIds.add(callId);
-          return true;
-        }
-        visibleValidationCallIdByKey.set(validationDuplicateKey, callId);
-        validationToolKeyByCallId.set(callId, validationDuplicateKey);
-        return false;
-      }
+      if (pipelineStageRuntime.shouldSuppressStarted({
+        toolName: protocolPayloadString(payload, "toolName"),
+        args: protocolPayloadString(payload, "args") ??
+          protocolPayloadString(payload, "arguments") ??
+          "",
+        callId: protocolPayloadString(payload, "callId"),
+        itemId: protocolPayloadString(payload, "itemId"),
+      })) return true;
       const duplicateKey = protocolToolDuplicateKey(payload);
       if (!duplicateKey) return false;
       const callId =
@@ -2346,16 +2285,7 @@ export async function runAgent(
     }
     if (event.type === "tool.completed") {
       const callId = protocolPayloadString(payload, "callId");
-      if (callId && suppressedValidationCallIds.has(callId)) return true;
-      if (callId) {
-        const validationDuplicateKey = validationToolKeyByCallId.get(callId);
-        if (
-          validationDuplicateKey &&
-          visibleValidationCallIdByKey.get(validationDuplicateKey) === callId
-        ) {
-          validationToolKeyByCallId.delete(callId);
-        }
-      }
+      if (pipelineStageRuntime.shouldSuppressCompleted(callId)) return true;
       if (callId && suppressedEffectCallIds.has(callId)) return true;
       if (callId) {
         const duplicateKey = effectToolKeyByCallId.get(callId);
