@@ -1453,7 +1453,7 @@ export async function runAgent(
     options.deliveryContract,
     workflowState,
   );
-  const pipelineStageRuntime = new PipelineStageRuntime(deliveryWorkflow);
+  const pipelineStageRuntime = new PipelineStageRuntime(deliveryWorkflow?.pipelinePlan);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
   const textStreamingMode =

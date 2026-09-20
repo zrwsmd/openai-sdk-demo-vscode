@@ -2,7 +2,7 @@ import { tool } from "@openai/agents";
 import { z } from "zod";
 import { writeFileText } from "../../tools/workspaceTools";
 import { toolResult } from "../../tools/toolContract";
-import { hashStContent } from "../deliveryWorkflow";
+import { hashStContent } from "../stContentHash";
 import type { ToolBuildContext } from "./toolBuildContext";
 import type { ValidateStContentBeforeWrite } from "./validateStTool";
 

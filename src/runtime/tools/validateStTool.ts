@@ -14,7 +14,7 @@ import {
   type StTarget,
 } from "../../analysis/stAnalyzer";
 import type { Diagnostic } from "../../protocol/results";
-import { hashStContent } from "../deliveryWorkflow";
+import { hashStContent } from "../stContentHash";
 import {
   compressDiagnostics,
   repairPacketToProtocolDiagnostics,

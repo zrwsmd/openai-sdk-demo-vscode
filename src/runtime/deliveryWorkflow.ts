@@ -1,5 +1,4 @@
 import path from "node:path";
-import { createHash } from "node:crypto";
 import type { Artifact, ToolResult } from "../protocol/results";
 import type { CompletionGateResult } from "./completionGate";
 import {
@@ -7,6 +6,14 @@ import {
   isStWorkspaceDeliveryContract,
   type DeliveryContract,
 } from "./deliveryContract";
+import { hashStContent } from "./stContentHash";
+import type { PipelineStagePlan } from "./pipeline/stagePlan";
+import {
+  ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
+  ST_WORKSPACE_DELIVERY_STAGES,
+} from "./pipeline/stWorkspaceDeliveryPlan";
+
+export { hashStContent } from "./stContentHash";
 
 export type WorkflowToolRecord = {
   name: string;
@@ -61,14 +68,11 @@ export function createDeliveryWorkflowRuntimeState(): DeliveryWorkflowRuntimeSta
   return { stValidation: createStValidationState() };
 }
 
-export function hashStContent(content: string): string {
-  return createHash("sha1").update(content).digest("hex");
-}
-
 export interface DeliveryWorkflow {
   readonly id: string;
   readonly title: string;
   readonly stages: WorkflowStage[];
+  readonly pipelinePlan?: PipelineStagePlan;
   readonly visibleToolNames?: readonly string[];
   readonly parallelToolCalls: boolean;
   readonly validationInputMode?: "inline_code" | "path_or_code";
@@ -127,26 +131,8 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly id = "st_workspace_delivery";
   readonly title = "ST 代码交付";
 
-  readonly stages: WorkflowStage[] = [
-    {
-      order: 1,
-      id: "validate_draft",
-      toolName: "validate_st_code",
-      title: "校验 ST 草稿",
-      description: "校验内存中的完整 ST 草稿",
-      successEvidence: "validate_st_code 返回 errorCount=0，并记录源码哈希",
-      onFailure: "revise_draft",
-    },
-    {
-      order: 2,
-      id: "persist_final_st",
-      toolName: "write_file",
-      title: "写入 ST 文件",
-      description: "把通过校验的同一份 ST 源码写入工作区",
-      successEvidence: "write_file 返回的 contentHash 与校验哈希一致",
-      onFailure: "retry",
-    },
-  ];
+  readonly stages = ST_WORKSPACE_DELIVERY_STAGES;
+  readonly pipelinePlan = ST_WORKSPACE_DELIVERY_PIPELINE_PLAN;
 
   readonly visibleToolNames = ["validate_st_code", "write_file"] as const;
   readonly parallelToolCalls = false;
