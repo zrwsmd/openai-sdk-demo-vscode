@@ -588,6 +588,7 @@ function buildTools(
     ? new Set(deliveryWorkflow.visibleToolNames)
     : undefined;
   const validatedStContent = stValidationState.hashes;
+  const stValidationCache = new Map<string, Promise<string>>();
   /**
    * 解析校验目标与上下文:目标优先用工作区真实文件(跨文件解析最准),
    * 只有裸代码才落到系统临时目录下的虚拟 URI(桥只把它当 URI,不读盘)。
@@ -760,6 +761,19 @@ function buildTools(
           code,
           loadWorkspaceContext,
         );
+        const validationCacheKey = inlineStValidation
+          ? [
+              "validate_st_code",
+              validationInput.contentHash || hashStContent(validationInput.target.text),
+              loadWorkspaceContext === undefined ? "default" : String(loadWorkspaceContext),
+            ].join(":")
+          : undefined;
+        const cachedValidation = validationCacheKey
+          ? stValidationCache.get(validationCacheKey)
+          : undefined;
+        if (cachedValidation) return cachedValidation;
+
+        const runValidation = (async (): Promise<string> => {
         const result = await stAnalyzer.verify(
           {
             workspaceRoot: workspace.primaryRoot,
@@ -903,6 +917,14 @@ function buildTools(
           effect: "none",
           risk: "plan",
         });
+        })();
+        if (validationCacheKey) stValidationCache.set(validationCacheKey, runValidation);
+        try {
+          return await runValidation;
+        } catch (error) {
+          if (validationCacheKey) stValidationCache.delete(validationCacheKey);
+          throw error;
+        }
       }, "plan"),
   });
 
@@ -1056,11 +1078,11 @@ function buildTools(
   });
 
   // ---- 通用工作区文件工具(作用域锁定在当前工作区根目录) ----
-  const guard = (
-    fn: () => Promise<string>,
+  const guard = <T>(
+    fn: () => Promise<T>,
     risk: ToolRisk,
     effect: ToolEffect = "none",
-  ): Promise<string> =>
+  ): Promise<T | string> =>
     fn().catch((e: unknown) => {
       if (e instanceof EffectRecoveryRequiredError) throw e;
       return failed(e, risk, effect);
@@ -2743,6 +2765,32 @@ export async function runAgent(
       });
   };
 
+  const forceNextWorkflowToolAfterResult = (
+    name: string,
+    result: ToolResult | undefined,
+  ): void => {
+    if (
+      deliveryWorkflow?.id !== "st_workspace_delivery" ||
+      name !== "validate_st_code" ||
+      !result?.ok ||
+      !availableToolNames.has("write_file") ||
+      !(model instanceof GatewayGuardedModel)
+    ) {
+      return;
+    }
+    const data = result.data && typeof result.data === "object"
+      ? result.data as Record<string, unknown>
+      : {};
+    if (
+      data.errorCount !== 0 ||
+      typeof data.validatedContentHash !== "string"
+    ) {
+      return;
+    }
+    model.requireToolOnce("write_file");
+    agentLog("[workflow] validate_st_code 通过，下一轮强制工具: write_file");
+  };
+
   const observeProtocolEvent = (event: AgentProtocolEvent): void => {
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "text.delta") {
@@ -2779,11 +2827,10 @@ export async function runAgent(
               );
       const call = key ? toolCalls.get(key) : undefined;
       const result = payload.result as ToolResult | undefined;
-      recordToolResult(
-        name,
-        callId,
-        result ?? syntheticToolFailureResult(name, call?.args ?? "", payload),
-      );
+      const recordedResult =
+        result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
+      recordToolResult(name, callId, recordedResult);
+      forceNextWorkflowToolAfterResult(name, recordedResult);
     }
   };
 
@@ -3174,6 +3221,9 @@ export async function runAgent(
   const effectToolKeyByCallId = new Map<string, string>();
   const visibleEffectCallIdByKey = new Map<string, string>();
   const suppressedEffectCallIds = new Set<string>();
+  const validationToolKeyByCallId = new Map<string, string>();
+  const visibleValidationCallIdByKey = new Map<string, string>();
+  const suppressedValidationCallIds = new Set<string>();
   const visibleApprovalIdByKey = new Map<string, string>();
   const suppressedApprovalIds = new Set<string>();
   const protocolPayloadString = (
@@ -3186,6 +3236,46 @@ export async function runAgent(
   const shouldDedupeEffectTool = (toolName: string): boolean => {
     const risk = TOOL_RISK_BY_NAME[toolName];
     return risk === "write" || risk === "execute";
+  };
+  const stValidationDuplicateKey = (
+    payload: Record<string, unknown>,
+  ): string | undefined => {
+    if (
+      deliveryWorkflow?.id !== "st_workspace_delivery" ||
+      protocolPayloadString(payload, "toolName") !== "validate_st_code"
+    ) {
+      return undefined;
+    }
+    const args =
+      protocolPayloadString(payload, "args") ??
+      protocolPayloadString(payload, "arguments") ??
+      "";
+    try {
+      const parsed = JSON.parse(args) as {
+        code?: unknown;
+        path?: unknown;
+        loadWorkspaceContext?: unknown;
+      };
+      if (typeof parsed.code === "string" && parsed.code.length > 0) {
+        return [
+          "validate_st_code",
+          "code",
+          hashStContent(parsed.code),
+          String(parsed.loadWorkspaceContext ?? "default"),
+        ].join(":");
+      }
+      if (typeof parsed.path === "string" && parsed.path.length > 0) {
+        return [
+          "validate_st_code",
+          "path",
+          parsed.path,
+          String(parsed.loadWorkspaceContext ?? "default"),
+        ].join(":");
+      }
+    } catch {
+      // Fall back to the raw argument hash below.
+    }
+    return args ? `validate_st_code:args:${hashStContent(args)}` : undefined;
   };
   const protocolToolDuplicateKey = (
     payload: Record<string, unknown>,
@@ -3202,6 +3292,21 @@ export async function runAgent(
   const shouldSuppressProtocolEvent = (event: AgentProtocolEvent): boolean => {
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "tool.started") {
+      const validationDuplicateKey = stValidationDuplicateKey(payload);
+      if (validationDuplicateKey) {
+        const callId =
+          protocolPayloadString(payload, "callId") ??
+          protocolPayloadString(payload, "itemId") ??
+          `${validationDuplicateKey}:anonymous`;
+        const existingCallId = visibleValidationCallIdByKey.get(validationDuplicateKey);
+        if (existingCallId && existingCallId !== callId) {
+          suppressedValidationCallIds.add(callId);
+          return true;
+        }
+        visibleValidationCallIdByKey.set(validationDuplicateKey, callId);
+        validationToolKeyByCallId.set(callId, validationDuplicateKey);
+        return false;
+      }
       const duplicateKey = protocolToolDuplicateKey(payload);
       if (!duplicateKey) return false;
       const callId =
@@ -3241,6 +3346,16 @@ export async function runAgent(
     }
     if (event.type === "tool.completed") {
       const callId = protocolPayloadString(payload, "callId");
+      if (callId && suppressedValidationCallIds.has(callId)) return true;
+      if (callId) {
+        const validationDuplicateKey = validationToolKeyByCallId.get(callId);
+        if (
+          validationDuplicateKey &&
+          visibleValidationCallIdByKey.get(validationDuplicateKey) === callId
+        ) {
+          validationToolKeyByCallId.delete(callId);
+        }
+      }
       if (callId && suppressedEffectCallIds.has(callId)) return true;
       if (callId) {
         const duplicateKey = effectToolKeyByCallId.get(callId);

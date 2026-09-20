@@ -479,6 +479,57 @@ const server = http.createServer((req, res) => {
         { name: 'write_file', args },
         { name: 'write_file', args },
       ]);
+    } else if (
+      userText.includes('重复校验卡片回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已校验并保存 PumpControl.st。');
+    } else if (
+      userText.includes('重复校验卡片回归') &&
+      forcedToolChoice === 'write_file'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (userText.includes('重复校验卡片回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: BAD_ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('重复校验卡片回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      (serializedLastMessage.includes('ST 校验未通过') ||
+        serializedLastMessage.includes('缺少 END_PROGRAM') ||
+        serializedLastMessage.includes('missing END_PROGRAM'))
+    ) {
+      const args = JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      });
+      endWithNamedToolCalls(res, model, [
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+      ]);
+    } else if (
+      userText.includes('重复校验卡片回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      const args = JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      });
+      endWithNamedToolCalls(res, model, [
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+        { name: 'validate_st_code', args },
+      ]);
     } else if (userText.includes('ST摘要误判回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
         code: ST_CODE,

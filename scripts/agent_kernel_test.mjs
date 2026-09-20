@@ -340,6 +340,57 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c5] 坏网关/坏模型可能在一次响应里返回多个完全相同的
+// validate_st_code。运行时只展示一张成功校验卡,并在成功后强制推进到写入。
+{
+  const asked = [];
+  const capabilityLogStart = diagLines.length;
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    '重复校验卡片回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'duplicate-validation-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const freshLogs = diagLines.slice(capabilityLogStart);
+  console.log(
+    '[3c5] 重复校验折叠:工具链 =',
+    toolCalls.join(','),
+    '| 审批 =',
+    asked.map((item) => item.name).join(','),
+  );
+  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file') {
+    throw new Error('重复 validate_st_code 没有折叠成单个可见成功校验并推进写入');
+  }
+  if (!freshLogs.some((line) => line.includes('下一轮强制工具: write_file'))) {
+    throw new Error('validate_st_code 成功后没有强制推进到 write_file');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('重复校验折叠场景触发了错误的审批工具');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('重复校验折叠后的保存结果不正确');
+  }
+}
+
 // [3d] 模型先给了最终答复却没有按契约执行动作时,完成验收必须主动
 // 强制验证工具,验证通过后再强制落盘,不能只把修复要求再交给模型自觉处理。
 {
