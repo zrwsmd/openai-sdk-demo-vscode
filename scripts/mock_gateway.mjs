@@ -410,6 +410,25 @@ const server = http.createServer((req, res) => {
       hasAssistantToolCall('write_file')
     ) {
       await streamStructuredText(res, model, '已完成校验并保存 PumpControl.st。');
+    } else if (
+      userText.includes('预写校验回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已通过写入前校验并保存 PumpControl.st。');
+    } else if (userText.includes('预写校验回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: BAD_ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('预写校验回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
     } else if (userText.includes('ST草稿修正回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
         code: BAD_ST_CODE,
@@ -436,6 +455,30 @@ const server = http.createServer((req, res) => {
         path: 'PumpControl.st',
         content: ST_CODE,
       }));
+    } else if (
+      userText.includes('重复写入审批回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已校验并保存 PumpControl.st。');
+    } else if (userText.includes('重复写入审批回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('重复写入审批回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      const args = JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      });
+      endWithNamedToolCalls(res, model, [
+        { name: 'write_file', args },
+        { name: 'write_file', args },
+        { name: 'write_file', args },
+      ]);
     } else if (userText.includes('ST摘要误判回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
         code: ST_CODE,

@@ -696,6 +696,45 @@ function addToolResult(name, ok, summary, result, run, durationMs) {
   return note;
 }
 
+function addDiagnosticReport(report) {
+  if (!report || typeof report !== 'object') return;
+  const diagnostics = Array.isArray(report.diagnostics) ? report.diagnostics : [];
+  const counts = report.counts && typeof report.counts === 'object' ? report.counts : {};
+  const target = report.validationTarget && typeof report.validationTarget === 'object'
+    ? report.validationTarget
+    : {};
+  const note = document.createElement('div');
+  note.className = 'diagnostic-report';
+  const icon = document.createElement('span');
+  icon.className = 'diagnostic-report-icon';
+  icon.textContent = 'i';
+  const body = document.createElement('div');
+  body.className = 'diagnostic-report-body';
+  const title = document.createElement('div');
+  title.className = 'diagnostic-report-title';
+  title.textContent = `完整诊断旁路 · ${report.toolName || 'diagnostics'} · ${diagnostics.length} 条`;
+  body.appendChild(title);
+  const summary = document.createElement('div');
+  summary.className = 'diagnostic-report-summary';
+  summary.textContent = [
+    target.path ? `目标 ${target.path}` : '',
+    `error=${counts.error || 0}`,
+    `warning=${counts.warning || 0}`,
+    `info=${counts.info || 0}`,
+  ].filter(Boolean).join(' · ');
+  body.appendChild(summary);
+  const details = document.createElement('details');
+  const detailsSummary = document.createElement('summary');
+  detailsSummary.textContent = '查看完整诊断';
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(report, null, 2);
+  details.append(detailsSummary, pre);
+  body.appendChild(details);
+  note.append(icon, body);
+  messagesEl.appendChild(note);
+  scrollBottom();
+}
+
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
 function showUsage(usage) {
   if (!usage) return;
@@ -1080,6 +1119,10 @@ function handleProtocolEvent(event) {
       if (payload.workflow) createWorkflowStageView(event.runId, payload.workflow);
       break;
     case 'run.progress':
+      if (payload.stage === 'diagnostics.report' && payload.report) {
+        addDiagnosticReport(payload.report);
+        break;
+      }
       if (typeof payload.stage === 'string' && payload.stage.startsWith('plan.')) {
         if (payload.stage === 'plan.created' && payload.plan && Array.isArray(payload.plan.steps)) {
           addNote('tool-note', `已生成线性计划：${payload.plan.steps.length} 步`);

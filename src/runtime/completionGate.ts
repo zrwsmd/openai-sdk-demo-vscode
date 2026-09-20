@@ -210,12 +210,21 @@ function hasValidatedStWrite(
       : typeof targetHash === 'string' ? targetHash : undefined;
     if (hash) validationHashes.add(hash);
   }
-  if (!validationHashes.size) return false;
   return records.some((record) => {
     if (record.name !== 'write_file' || !toolResultSucceeded(record.result)) return false;
     const data = record.result.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
     const value = data as Record<string, unknown>;
+    const preWriteHash = preWriteValidationHash(value);
+    if (
+      typeof value.file === 'string' &&
+      value.file.toLowerCase().endsWith('.st') &&
+      typeof value.contentHash === 'string' &&
+      preWriteHash === value.contentHash
+    ) {
+      return true;
+    }
+    if (!validationHashes.size) return false;
     return typeof value.file === 'string' &&
       value.file.toLowerCase().endsWith('.st') &&
       typeof value.contentHash === 'string' &&
@@ -340,6 +349,7 @@ function hasSuccessfulVerification(
   records: (CompletionGateToolRecord & { order: number })[],
 ): boolean {
   return records.some((record) => {
+    if (toolName === 'validate_st_code' && hasSuccessfulStPreWriteValidation(record)) return true;
     if (record.name !== toolName || !toolResultSucceeded(record.result)) return false;
     if (toolName !== 'validate_st_code') return true;
     const data = record.result.data;
@@ -348,6 +358,25 @@ function hasSuccessfulVerification(
       !Array.isArray(data) &&
       (data as Record<string, unknown>).errorCount === 0;
   });
+}
+
+function hasSuccessfulStPreWriteValidation(record: CompletionGateToolRecord): boolean {
+  if (record.name !== 'write_file' || !toolResultSucceeded(record.result)) return false;
+  const data = record.result.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const value = data as Record<string, unknown>;
+  return typeof value.contentHash === 'string' &&
+    preWriteValidationHash(value) === value.contentHash;
+}
+
+function preWriteValidationHash(data: Record<string, unknown>): string | undefined {
+  const preWrite = data.preWriteValidation;
+  if (!preWrite || typeof preWrite !== 'object' || Array.isArray(preWrite)) return undefined;
+  const value = preWrite as Record<string, unknown>;
+  if (value.errorCount !== 0) return undefined;
+  return typeof value.validatedContentHash === 'string'
+    ? value.validatedContentHash
+    : undefined;
 }
 
 function toolResultSucceeded(result: ToolResult): boolean {

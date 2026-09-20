@@ -127,6 +127,11 @@ import {
   type DeliveryWorkflow,
   type StValidationState,
 } from "./deliveryWorkflow";
+import {
+  compressDiagnostics,
+  repairPacketToProtocolDiagnostics,
+  type DiagnosticRepairPacket,
+} from "./diagnosticCompression";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -243,6 +248,28 @@ export interface AgentRunResult {
 
 type ToolEffect = "none" | "filesystem" | "process" | "device";
 
+interface DiagnosticSideReport {
+  toolName: string;
+  phase: string;
+  summary: string;
+  counts: {
+    error: number;
+    warning: number;
+    info: number;
+  };
+  validationTarget: {
+    path: string;
+    complete: boolean;
+    totalLines: number;
+    totalBytes: number;
+    contentHash: string;
+  };
+  diagnostics: StDiagnostic[];
+  repairPacket?: DiagnosticRepairPacket;
+}
+
+type DiagnosticSideReporter = (report: DiagnosticSideReport) => void;
+
 function toolArguments(raw: string | undefined): unknown {
   if (!raw) return {};
   try {
@@ -250,6 +277,30 @@ function toolArguments(raw: string | undefined): unknown {
   } catch {
     return raw;
   }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function canonicalToolArguments(raw: string): string {
+  try {
+    return stableJson(JSON.parse(raw));
+  } catch {
+    return raw.trim();
+  }
+}
+
+function duplicateApprovalKey(request: Pick<ApprovalRequest, "name" | "args">): string {
+  return `${request.name}\u0000${canonicalToolArguments(request.args)}`;
 }
 
 function audit(
@@ -521,6 +572,7 @@ function buildTools(
   deliveryContract?: DeliveryContract,
   deliveryWorkflow?: DeliveryWorkflow,
   stValidationState: StValidationState = createStValidationState(),
+  diagnosticReporter?: DiagnosticSideReporter,
 ) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -730,12 +782,76 @@ function buildTools(
           `上下文文件=${result.contextLoaded}`,
         ].join(" ");
         const validatedHash = hashStContent(validationInput.target.text);
+        const repairPacket = validationFailed
+          ? compressDiagnostics({
+              toolName: "validate_st_code",
+              phase: "st_validation",
+              instruction:
+                "ST 校验失败。只根据这些压缩诊断和代码片段做最小修改；保持无关代码不变，修改后必须再次调用 validate_st_code 校验完整草稿。",
+              diagnostics,
+              sources: [{
+                path: validationInput.label,
+                text: validationInput.target.text,
+              }],
+              sourceHash: validatedHash,
+            })
+          : undefined;
+        const protocolDiagnostics = repairPacket
+          ? repairPacketToProtocolDiagnostics(repairPacket)
+          : toProtocolDiagnostics(diagnostics);
         if (!validationFailed) {
           validatedStContent.add(validatedHash);
           if (!p) deliveryWorkflow?.recordSuccessfulValidation?.(
             validationInput.target.text,
             validatedHash,
           );
+        }
+        audit(cfg, {
+          type: "tool_completed",
+          toolName: "validate_st_code",
+          risk: "plan",
+          ok: !validationFailed,
+          summary,
+          metadata: {
+            errorCount: counts.error,
+            warningCount: counts.warning,
+            infoCount: counts.info,
+            validationTarget: {
+              path: validationInput.label,
+              complete: validationInput.complete,
+              totalLines: validationInput.totalLines,
+              totalBytes: validationInput.totalBytes,
+              contentHash: validationInput.contentHash || validatedHash,
+            },
+            diagnostics,
+            ...(repairPacket
+              ? {
+                  repairPacketSummary: {
+                    totalDiagnostics: repairPacket.totalDiagnostics,
+                    duplicateCount: repairPacket.duplicateCount,
+                    omittedCount: repairPacket.omittedCount,
+                    truncated: repairPacket.truncated,
+                  },
+                }
+              : {}),
+          },
+        });
+        if (validationFailed) {
+          diagnosticReporter?.({
+            toolName: "validate_st_code",
+            phase: "st_validation",
+            summary,
+            counts,
+            validationTarget: {
+              path: validationInput.label,
+              complete: validationInput.complete,
+              totalLines: validationInput.totalLines,
+              totalBytes: validationInput.totalBytes,
+              contentHash: validationInput.contentHash || validatedHash,
+            },
+            diagnostics,
+            ...(repairPacket ? { repairPacket } : {}),
+          });
         }
         return toolResult({
           ok: !validationFailed,
@@ -752,7 +868,20 @@ function buildTools(
               totalBytes: validationInput.totalBytes,
               contentHash: validationInput.contentHash || validatedHash,
             },
-            diagnostics,
+            diagnostics: repairPacket ? repairPacket.diagnostics : diagnostics,
+            ...(repairPacket
+              ? {
+                  repairPacket,
+                  diagnosticCompression: {
+                    enabled: true,
+                    originalDiagnosticsInAudit: true,
+                    totalDiagnostics: repairPacket.totalDiagnostics,
+                    duplicateCount: repairPacket.duplicateCount,
+                    omittedCount: repairPacket.omittedCount,
+                    truncated: repairPacket.truncated,
+                  },
+                }
+              : {}),
             context: {
               files: result.contextLoaded,
               truncated: validationInput.contextTruncated,
@@ -770,12 +899,122 @@ function buildTools(
                 error: `ST 校验未通过(${counts.error} 个 error);warning 只提示,不阻断。`,
               }
             : {}),
-          diagnostics: toProtocolDiagnostics(diagnostics),
+          diagnostics: protocolDiagnostics,
           effect: "none",
           risk: "plan",
         });
       }, "plan"),
   });
+
+  const validateStContentBeforeWrite = async (
+    content: string,
+    targetLabel: string,
+    signal?: AbortSignal,
+  ) => {
+    const validationInput = await resolveStValidationInput(
+      undefined,
+      content,
+      stToolOptions.loadWorkspaceContext,
+    );
+    const result = await stAnalyzer.verify(
+      {
+        workspaceRoot: workspace.primaryRoot,
+        targets: [validationInput.target],
+        context: validationInput.context,
+        ...(stToolOptions.maxDiagnostics ? { options: { maxDiagnostics: stToolOptions.maxDiagnostics } } : {}),
+      },
+      { signal },
+    );
+    const counts = countStDiagnostics(result);
+    const diagnostics = (result.results[0]?.diagnostics ?? []).map((diagnostic: StDiagnostic) => ({
+      ...diagnostic,
+      path: targetLabel,
+    }));
+    const validationFailed = isStValidationFailure(result);
+    const contentHash = hashStContent(content);
+    const summary = [
+      `引擎=${result.engine.id}`,
+      `error=${counts.error}`,
+      `warning=${counts.warning}`,
+      `上下文文件=${result.contextLoaded}`,
+    ].join(" ");
+    const repairPacket = validationFailed
+      ? compressDiagnostics({
+          toolName: "write_file",
+          phase: "st_pre_write_validation",
+          instruction:
+            "写入前 ST 校验失败。只根据这些压缩诊断和代码片段做最小修改；修复后必须重新校验并写入同一份完整内容。",
+          diagnostics,
+          sources: [{ path: targetLabel, text: content }],
+          sourceHash: contentHash,
+        })
+      : undefined;
+    if (!validationFailed) {
+      validatedStContent.add(contentHash);
+      deliveryWorkflow?.recordSuccessfulValidation?.(content, contentHash);
+    }
+    audit(cfg, {
+      type: "tool_completed",
+      toolName: "write_file.pre_validate_st_code",
+      risk: "plan",
+      ok: !validationFailed,
+      summary,
+      metadata: {
+        errorCount: counts.error,
+        warningCount: counts.warning,
+        infoCount: counts.info,
+        validationTarget: {
+          path: targetLabel,
+          complete: true,
+          totalLines: content.split(/\r?\n/).length,
+          totalBytes: Buffer.byteLength(content, "utf8"),
+          contentHash,
+        },
+        diagnostics,
+        ...(repairPacket
+          ? {
+              repairPacketSummary: {
+                totalDiagnostics: repairPacket.totalDiagnostics,
+                duplicateCount: repairPacket.duplicateCount,
+                omittedCount: repairPacket.omittedCount,
+                truncated: repairPacket.truncated,
+              },
+            }
+          : {}),
+      },
+    });
+    if (validationFailed) {
+      diagnosticReporter?.({
+        toolName: "write_file",
+        phase: "st_pre_write_validation",
+        summary,
+        counts,
+        validationTarget: {
+          path: targetLabel,
+          complete: true,
+          totalLines: content.split(/\r?\n/).length,
+          totalBytes: Buffer.byteLength(content, "utf8"),
+          contentHash,
+        },
+        diagnostics,
+        ...(repairPacket ? { repairPacket } : {}),
+      });
+    }
+    return {
+      ok: !validationFailed,
+      contentHash,
+      counts,
+      diagnostics,
+      protocolDiagnostics: repairPacket
+        ? repairPacketToProtocolDiagnostics(repairPacket)
+        : toProtocolDiagnostics(diagnostics),
+      repairPacket,
+      summary,
+      engine: result.engine,
+      elapsedMs: result.elapsedMs,
+      contextLoaded: result.contextLoaded,
+    };
+  };
 
   // 会往磁盘写文件 → needsApproval:SDK 在真正执行前中断,由 UI 批准/拒绝
   const exportStProgram = tool({
@@ -926,10 +1165,13 @@ function buildTools(
     needsApproval: true,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
-    execute: ({ path: p, content }) =>
+    execute: ({ path: p, content }, _context, details) =>
       guard(
         async () => {
           const target = workspace.resolve(p);
+          let preWriteValidation:
+            | Awaited<ReturnType<typeof validateStContentBeforeWrite>>
+            | undefined;
           if (
             requiresStValidation &&
             target.relativePath.toLowerCase().endsWith(".st") &&
@@ -937,18 +1179,41 @@ function buildTools(
               ? deliveryWorkflow.canWriteContent(content)
               : validatedStContent.has(hashStContent(content)))
           ) {
-            return toolResult({
-              ok: false,
-              error: "ST 代码在写入前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
-              diagnostics: [{
-                code: "st_validation_required",
-                message: "未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。",
-                severity: "error",
-                path: target.relativePath,
-              }],
-              effect: "none",
-              risk: "plan",
-            });
+            preWriteValidation = await validateStContentBeforeWrite(
+              content,
+              target.relativePath,
+              details?.signal,
+            );
+            if (!preWriteValidation.ok) {
+              return toolResult({
+                ok: false,
+                error: "ST 写入内容与最近一次通过校验的草稿不一致，且写入前重新校验未通过。",
+                data: {
+                  suppliedContentHash: preWriteValidation.contentHash,
+                  lastValidatedContentHash: deliveryWorkflow?.canWriteContent
+                    ? undefined
+                    : [...validatedStContent].at(-1),
+                  errorCount: preWriteValidation.counts.error,
+                  warningCount: preWriteValidation.counts.warning,
+                  diagnostics: preWriteValidation.repairPacket
+                    ? preWriteValidation.repairPacket.diagnostics
+                    : preWriteValidation.diagnostics,
+                  ...(preWriteValidation.repairPacket
+                    ? { repairPacket: preWriteValidation.repairPacket }
+                    : {}),
+                },
+                diagnostics: preWriteValidation.protocolDiagnostics.length
+                  ? preWriteValidation.protocolDiagnostics
+                  : [{
+                      code: "st_pre_write_validation_failed",
+                      message: "写入内容未通过 ST 预写校验。",
+                      severity: "error",
+                      path: target.relativePath,
+                    }],
+                effect: "none",
+                risk: "plan",
+              });
+            }
           }
           return withEffect(
             "write_file",
@@ -967,6 +1232,17 @@ function buildTools(
                     content,
                   )),
                   contentHash: hashStContent(content),
+                  ...(preWriteValidation
+                    ? {
+                        preWriteValidation: {
+                          errorCount: preWriteValidation.counts.error,
+                          warningCount: preWriteValidation.counts.warning,
+                          infoCount: preWriteValidation.counts.info,
+                          validatedContentHash: preWriteValidation.contentHash,
+                          summary: preWriteValidation.summary,
+                        },
+                      }
+                    : {}),
                 },
                 "write",
                 "filesystem",
@@ -2262,12 +2538,26 @@ export async function runAgent(
           }),
       })
     : undefined;
+  const reportDiagnostics: DiagnosticSideReporter = (report) => {
+    if (!options.protocol.eventFactory) return;
+    options.protocol.onEvent(
+      options.protocol.eventFactory.next({
+        type: "run.progress",
+        payload: {
+          stage: "diagnostics.report",
+          message: report.summary,
+          report,
+        },
+      }),
+    );
+  };
   const tools = [
     ...buildTools(
       cfg,
       options.deliveryContract,
       deliveryWorkflow,
       stValidationState,
+      reportDiagnostics,
     ),
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
@@ -2881,6 +3171,87 @@ export async function runAgent(
     output = "";
   };
 
+  const effectToolKeyByCallId = new Map<string, string>();
+  const visibleEffectCallIdByKey = new Map<string, string>();
+  const suppressedEffectCallIds = new Set<string>();
+  const visibleApprovalIdByKey = new Map<string, string>();
+  const suppressedApprovalIds = new Set<string>();
+  const protocolPayloadString = (
+    payload: Record<string, unknown>,
+    key: string,
+  ): string | undefined => {
+    const value = payload[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  };
+  const shouldDedupeEffectTool = (toolName: string): boolean => {
+    const risk = TOOL_RISK_BY_NAME[toolName];
+    return risk === "write" || risk === "execute";
+  };
+  const protocolToolDuplicateKey = (
+    payload: Record<string, unknown>,
+  ): string | undefined => {
+    const toolName = protocolPayloadString(payload, "toolName");
+    if (!toolName || !shouldDedupeEffectTool(toolName)) return undefined;
+    return duplicateApprovalKey({
+      name: toolName,
+      args: protocolPayloadString(payload, "args")
+        ?? protocolPayloadString(payload, "arguments")
+        ?? "",
+    });
+  };
+  const shouldSuppressProtocolEvent = (event: AgentProtocolEvent): boolean => {
+    const payload = event.payload as Record<string, unknown>;
+    if (event.type === "tool.started") {
+      const duplicateKey = protocolToolDuplicateKey(payload);
+      if (!duplicateKey) return false;
+      const callId =
+        protocolPayloadString(payload, "callId") ??
+        protocolPayloadString(payload, "itemId") ??
+        `${duplicateKey}:anonymous`;
+      const existingCallId = visibleEffectCallIdByKey.get(duplicateKey);
+      if (existingCallId && existingCallId !== callId) {
+        suppressedEffectCallIds.add(callId);
+        return true;
+      }
+      visibleEffectCallIdByKey.set(duplicateKey, callId);
+      effectToolKeyByCallId.set(callId, duplicateKey);
+      return false;
+    }
+    if (event.type === "approval.requested") {
+      const approvalId = protocolPayloadString(payload, "approvalId");
+      const callId = protocolPayloadString(payload, "callId");
+      const duplicateKey = protocolToolDuplicateKey(payload);
+      if (!duplicateKey || !approvalId) return false;
+      if (callId && suppressedEffectCallIds.has(callId)) {
+        suppressedApprovalIds.add(approvalId);
+        return true;
+      }
+      const existingApprovalId = visibleApprovalIdByKey.get(duplicateKey);
+      if (existingApprovalId && existingApprovalId !== approvalId) {
+        suppressedApprovalIds.add(approvalId);
+        if (callId) suppressedEffectCallIds.add(callId);
+        return true;
+      }
+      visibleApprovalIdByKey.set(duplicateKey, approvalId);
+      return false;
+    }
+    if (event.type === "approval.resolved") {
+      const approvalId = protocolPayloadString(payload, "approvalId");
+      return !!approvalId && suppressedApprovalIds.has(approvalId);
+    }
+    if (event.type === "tool.completed") {
+      const callId = protocolPayloadString(payload, "callId");
+      if (callId && suppressedEffectCallIds.has(callId)) return true;
+      if (callId) {
+        const duplicateKey = effectToolKeyByCallId.get(callId);
+        if (duplicateKey && visibleEffectCallIdByKey.get(duplicateKey) === callId) {
+          visibleEffectCallIdByKey.delete(duplicateKey);
+        }
+      }
+    }
+    return false;
+  };
+
   // 空回复熔断:按"本轮结束"处理(工具回执已透出,不必再向用户抛错)
   const protocolAdapter = new AgentStreamAdapter({
     runId: options.protocol.runId,
@@ -2888,6 +3259,7 @@ export async function runAgent(
     structuredOutput: structuredMode,
     eventFactory: options.protocol.eventFactory,
     emit: (event) => {
+      if (shouldSuppressProtocolEvent(event)) return;
       observeProtocolEvent(event);
       options.protocol.onEvent(event);
     },
@@ -3044,11 +3416,27 @@ export async function runAgent(
         args: raw.arguments ?? "",
       };
     });
+    const duplicateKeys = requests.map(duplicateApprovalKey);
+    const firstIndexByKey = new Map<string, number>();
+    const decisionByKey = new Map<string, boolean>();
+    for (let index = 0; index < requests.length; index++) {
+      const key = duplicateKeys[index];
+      if (!firstIndexByKey.has(key)) firstIndexByKey.set(key, index);
+      const decision = decisions.get(requests[index].id);
+      if (decision !== undefined && !decisionByKey.has(key)) {
+        decisionByKey.set(key, decision);
+      }
+    }
     const unresolved: ApprovalRequest[] = [];
     const refused: ApprovalRequest[] = [];
+    const unresolvedKeys = new Set<string>();
+    const refusedKeys = new Set<string>();
     for (let index = 0; index < pending.length; index++) {
       const item = pending[index];
       const request = requests[index];
+      const duplicateKey = duplicateKeys[index];
+      const firstIndex = firstIndexByKey.get(duplicateKey) ?? index;
+      const isDuplicate = firstIndex !== index;
       // On a durable resume the SDK may emit only tool output after approval.
       // Seed the call index from the persisted approval so verification still
       // has the original tool arguments.
@@ -3056,13 +3444,24 @@ export async function runAgent(
       toolNameByCallId.set(request.id, request.name);
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
+      if (decision === undefined) decision = decisionByKey.get(duplicateKey);
       if (decision === undefined) {
-        unresolved.push(request);
+        if (!unresolvedKeys.has(duplicateKey)) {
+          unresolved.push(request);
+          unresolvedKeys.add(duplicateKey);
+        }
+      } else if (decision && isDuplicate) {
+        state.reject(item, {
+          message: "运行时已折叠同批重复的相同工具调用；只执行第一条。",
+        });
       } else if (decision) {
         state.approve(item);
       } else {
         state.reject(item, { message: "用户拒绝了该工具调用。" });
-        refused.push(request);
+        if (!refusedKeys.has(duplicateKey)) {
+          refused.push(requests[firstIndex] ?? request);
+          refusedKeys.add(duplicateKey);
+        }
       }
     }
     return { unresolved, refused };

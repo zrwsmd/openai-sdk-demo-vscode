@@ -185,6 +185,52 @@ body { display: flex; flex-direction: column; }
   font-size: 10px;
 }
 
+.diagnostic-report {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 4px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--box) 82%, transparent);
+}
+.diagnostic-report-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+.diagnostic-report-body { min-width: 0; flex: 1; }
+.diagnostic-report-title { color: var(--fg); line-height: 1.4; word-break: break-word; }
+.diagnostic-report-summary {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 3px;
+  word-break: break-word;
+}
+.diagnostic-report details { margin-top: 6px; color: var(--muted); font-size: 11px; }
+.diagnostic-report summary { cursor: pointer; user-select: none; }
+.diagnostic-report pre {
+  margin: 5px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 7px;
+  background: #1a1a1a;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 10px;
+}
+
 /* ---------- 工作流阶段视图 ---------- */
 .workflow-stage-view {
   margin: 8px 4px 10px;

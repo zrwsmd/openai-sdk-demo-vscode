@@ -184,6 +184,53 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c2b] 模型在显式校验失败后直接写入一份修正后的 ST 内容时,
+// write_file 必须在落盘前内部重新校验这份写入内容,通过后才写。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    '预写校验回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'prewrite-validation-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const completedWrite = r.events.find(
+    (event) => event.type === 'tool.completed' && event.payload.toolName === 'write_file',
+  );
+  console.log('[3c2b] ST 预写校验:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('ST 预写校验场景没有保持先尝试校验再写入');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 预写校验场景的审批工具不正确');
+  }
+  if (completedWrite?.payload?.ok !== true || !completedWrite.payload.result?.data?.preWriteValidation) {
+    throw new Error('write_file 没有对不一致写入内容执行内部预写校验');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('ST 预写校验后的写入结果不正确');
+  }
+}
+
 // [3c3] 草稿校验失败时,模型必须继续修改内存草稿并再次 validate_st_code;
 // 只有 errorCount=0 的草稿可以进入唯一一次 write_file 审批。
 {
@@ -212,9 +259,28 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const toolCalls = r.events
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
-  console.log('[3c3] ST 草稿修正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  const diagnosticReports = r.events.filter(
+    (event) => event.type === 'run.progress' && event.payload.stage === 'diagnostics.report',
+  );
+  console.log(
+    '[3c3] ST 草稿修正:工具链 =',
+    toolCalls.join(','),
+    '| 审批 =',
+    asked.map((item) => item.name).join(','),
+    '| 诊断旁路 =',
+    diagnosticReports.length,
+  );
   if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file') {
     throw new Error('ST 草稿修正没有按 校验失败 -> 再校验 -> 写入 顺序执行');
+  }
+  const diagnosticReport = diagnosticReports[0]?.payload?.report;
+  if (
+    diagnosticReports.length !== 1 ||
+    !Array.isArray(diagnosticReport?.diagnostics) ||
+    !diagnosticReport.diagnostics.length ||
+    diagnosticReport.repairPacket?.kind !== 'diagnostic_repair_packet'
+  ) {
+    throw new Error('ST 草稿校验失败没有产生完整诊断旁路和压缩修复包');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('ST 草稿修正触发了错误的审批次数或审批工具');
@@ -222,6 +288,55 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
   if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
     throw new Error('ST 草稿修正后的写入结果不正确');
+  }
+}
+
+// [3c4] 坏网关/坏模型可能忽略 parallel=false,在同一轮返回多个完全
+// 相同的 write_file 审批。运行时应折叠成一个审批,且只执行第一条。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    '重复写入审批回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'duplicate-write-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const approvalRequests = r.events.filter((event) => event.type === 'approval.requested');
+  console.log(
+    '[3c4] 重复写入审批折叠:工具链 =',
+    toolCalls.join(','),
+    '| 审批请求 =',
+    approvalRequests.length,
+    '| decide =',
+    asked.map((item) => item.name).join(','),
+  );
+  if (approvalRequests.length !== 1 || asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('重复 write_file 没有折叠成单个审批');
+  }
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('重复 write_file 被批准后不应执行多次写入');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('重复写入折叠后的保存结果不正确');
   }
 }
 
