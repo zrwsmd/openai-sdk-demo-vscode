@@ -134,6 +134,10 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   });
   await test.coordinator.start(stRequest, { ...config, orchestration: 'auto' }, 'key');
   const completed = await test.store.getLast();
+  const startedEvent = test.events
+    .map((event) => event.type === 'agentEvent' ? event.event : undefined)
+    .find((event) => event?.type === 'run.started');
+  const workflow = startedEvent?.payload?.workflow;
   const deliverable = receivedContract?.deliverables?.[0];
   if (
     classifierCalls !== 1 ||
@@ -142,9 +146,13 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     receivedContract?.requiresDeliverable !== true ||
     deliverable?.workspaceFileExtension !== '.st' ||
     !deliverable?.requiredVerificationTools?.includes('validate_st_code') ||
-    completed?.deliveryContract?.deliverables?.[0]?.workspaceFileExtension !== '.st'
+    completed?.deliveryContract?.deliverables?.[0]?.workspaceFileExtension !== '.st' ||
+    workflow?.id !== 'st_workspace_delivery' ||
+    workflow?.stages?.length !== 2 ||
+    workflow?.stages?.[0]?.toolName !== 'validate_st_code' ||
+    workflow?.stages?.[1]?.toolName !== 'write_file'
   ) {
-    throw new Error('runtime-managed ST delivery fallback did not install the fixed validate/write pipeline');
+    throw new Error('runtime-managed ST delivery fallback did not install the fixed validate/write pipeline and stage descriptor');
   }
 }
 

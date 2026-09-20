@@ -19,9 +19,24 @@ export type WorkflowStage = {
   order: number;
   id: string;
   toolName?: string;
+  title: string;
   description: string;
   successEvidence: string;
   onFailure: "retry" | "revise_draft" | "stop";
+};
+
+export type DeliveryWorkflowDescriptor = {
+  id: string;
+  title: string;
+  stages: Array<{
+    order: number;
+    id: string;
+    toolName?: string;
+    title: string;
+    description: string;
+    successEvidence: string;
+    onFailure: WorkflowStage["onFailure"];
+  }>;
 };
 
 export type StValidatedDraft = {
@@ -52,6 +67,7 @@ export function hashStContent(content: string): string {
 
 export interface DeliveryWorkflow {
   readonly id: string;
+  readonly title: string;
   readonly stages: WorkflowStage[];
   readonly visibleToolNames?: readonly string[];
   readonly parallelToolCalls: boolean;
@@ -81,14 +97,42 @@ export function createDeliveryWorkflow(
   return undefined;
 }
 
+export function describeDeliveryWorkflow(
+  contract: DeliveryContract | undefined,
+): DeliveryWorkflowDescriptor | undefined {
+  const workflow = createDeliveryWorkflow(
+    contract,
+    createDeliveryWorkflowRuntimeState(),
+  );
+  if (!workflow) return undefined;
+  return {
+    id: workflow.id,
+    title: workflow.title,
+    stages: workflow.stages
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map(({ order, id, toolName, title, description, successEvidence, onFailure }) => ({
+        order,
+        id,
+        ...(toolName ? { toolName } : {}),
+        title,
+        description,
+        successEvidence,
+        onFailure,
+      })),
+  };
+}
+
 export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly id = "st_workspace_delivery";
+  readonly title = "ST 代码交付";
 
   readonly stages: WorkflowStage[] = [
     {
       order: 1,
       id: "validate_draft",
       toolName: "validate_st_code",
+      title: "校验 ST 草稿",
       description: "校验内存中的完整 ST 草稿",
       successEvidence: "validate_st_code 返回 errorCount=0，并记录源码哈希",
       onFailure: "revise_draft",
@@ -97,6 +141,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
       order: 2,
       id: "persist_final_st",
       toolName: "write_file",
+      title: "写入 ST 文件",
       description: "把通过校验的同一份 ST 源码写入工作区",
       successEvidence: "write_file 返回的 contentHash 与校验哈希一致",
       onFailure: "retry",

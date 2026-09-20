@@ -43,6 +43,7 @@ import {
   inferDeliveryContractFromUserText,
   isStCodeDeliveryContract,
 } from './deliveryContract';
+import { describeDeliveryWorkflow } from './deliveryWorkflow';
 import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
@@ -2037,9 +2038,13 @@ export class RunCoordinator {
     this.protocolFactory = new AgentEventFactory(run.id, run.operationId);
     this.protocolRunId = run.id;
     this.protocolRun = run;
+    const workflow = describeDeliveryWorkflow(run.deliveryContract);
     this.emitProtocol(this.protocolFactory.next({
       type: 'run.started',
-      payload: { userText: run.userText },
+      payload: {
+        userText: run.userText,
+        ...(workflow ? { workflow } : {}),
+      },
     }));
   }
 

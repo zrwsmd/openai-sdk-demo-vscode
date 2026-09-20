@@ -34,6 +34,8 @@ let activeSessionId = null;
 let knownSessions = [];
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
+const workflowViews = new Map();
+const workflowApprovals = new Map();
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -235,6 +237,236 @@ function takeToolRun(name, payload) {
     return run;
   }
   return undefined;
+}
+
+const workflowStatusText = {
+  pending: '待执行',
+  running: '执行中',
+  awaiting_approval: '等待审批',
+  completed: '已完成',
+  failed: '未通过',
+  cancelled: '已停止',
+};
+
+const workflowStatusIcon = {
+  pending: '○',
+  running: '●',
+  awaiting_approval: '!',
+  completed: '✓',
+  failed: '!',
+  cancelled: '–',
+};
+
+function normalizeWorkflowDescriptor(workflow) {
+  if (!workflow || typeof workflow !== 'object' || !Array.isArray(workflow.stages)) {
+    return undefined;
+  }
+  const stages = workflow.stages
+    .filter((stage) => stage && typeof stage === 'object' && typeof stage.id === 'string')
+    .map((stage, index) => ({
+      order: typeof stage.order === 'number' ? stage.order : index + 1,
+      id: stage.id,
+      toolName: typeof stage.toolName === 'string' ? stage.toolName : '',
+      title: typeof stage.title === 'string' && stage.title.trim()
+        ? stage.title.trim()
+        : stage.id,
+      description: typeof stage.description === 'string' ? stage.description.trim() : '',
+      successEvidence: typeof stage.successEvidence === 'string'
+        ? stage.successEvidence.trim()
+        : '',
+      onFailure: typeof stage.onFailure === 'string' ? stage.onFailure : 'retry',
+    }))
+    .sort((a, b) => a.order - b.order);
+  if (!stages.length) return undefined;
+  return {
+    id: typeof workflow.id === 'string' ? workflow.id : 'workflow',
+    title: typeof workflow.title === 'string' && workflow.title.trim()
+      ? workflow.title.trim()
+      : '执行流程',
+    stages,
+  };
+}
+
+function workflowStageForTool(view, toolName) {
+  if (!view || !toolName) return undefined;
+  return [...view.stages.values()].find((stage) => stage.definition.toolName === toolName);
+}
+
+function workflowStageCount(view, status) {
+  return [...view.stages.values()].filter((stage) => stage.status === status).length;
+}
+
+function workflowOverallStatus(view) {
+  if (view.terminalStatus) return view.terminalStatus;
+  if ([...view.stages.values()].some((stage) => stage.status === 'awaiting_approval')) {
+    return 'awaiting_approval';
+  }
+  if ([...view.stages.values()].some((stage) => stage.status === 'running')) {
+    return 'running';
+  }
+  if ([...view.stages.values()].some((stage) => stage.status === 'failed')) {
+    return 'failed';
+  }
+  if ([...view.stages.values()].every((stage) => stage.status === 'completed')) {
+    return 'completed';
+  }
+  return 'pending';
+}
+
+function workflowOverallLabel(view) {
+  const status = workflowOverallStatus(view);
+  if (status === 'completed') return '流程完成';
+  if (status === 'failed') return '需要修正';
+  if (status === 'awaiting_approval') return '等待审批';
+  if (status === 'cancelled') return '已停止';
+  if (status === 'running') return '执行中';
+  return '待开始';
+}
+
+function renderWorkflowStageView(view) {
+  if (!view) return;
+  const status = workflowOverallStatus(view);
+  const completed = workflowStageCount(view, 'completed');
+  const total = view.stages.size;
+  view.statusEl.textContent = workflowOverallLabel(view);
+  view.statusEl.className = `workflow-stage-status ${status}`;
+  view.progressEl.textContent = `${completed}/${total} 阶段`;
+  view.root.className = `workflow-stage-view ${status}`;
+
+  for (const stage of view.stages.values()) {
+    const stageStatus = stage.status;
+    stage.row.className = `workflow-stage-row ${stageStatus}`;
+    stage.icon.textContent = workflowStatusIcon[stageStatus] || workflowStatusIcon.pending;
+    stage.statusEl.textContent = workflowStatusText[stageStatus] || workflowStatusText.pending;
+    stage.statusEl.className = `workflow-stage-row-status ${stageStatus}`;
+    if (stage.definition.successEvidence) {
+      stage.row.title = `完成依据：${stage.definition.successEvidence}`;
+    }
+  }
+}
+
+function createWorkflowStageView(runId, workflow) {
+  const descriptor = normalizeWorkflowDescriptor(workflow);
+  if (!runId || !descriptor) return undefined;
+  const existing = workflowViews.get(runId);
+  if (existing) return existing;
+
+  const root = document.createElement('section');
+  root.className = 'workflow-stage-view pending';
+  root.dataset.runId = runId;
+  root.setAttribute('aria-label', `${descriptor.title}阶段进度`);
+
+  const header = document.createElement('div');
+  header.className = 'workflow-stage-header';
+  const title = document.createElement('div');
+  title.className = 'workflow-stage-title';
+  title.textContent = descriptor.title;
+  const headerRight = document.createElement('div');
+  headerRight.className = 'workflow-stage-header-right';
+  const progress = document.createElement('span');
+  progress.className = 'workflow-stage-progress';
+  const status = document.createElement('span');
+  status.className = 'workflow-stage-status pending';
+  headerRight.append(progress, status);
+  header.append(title, headerRight);
+
+  const list = document.createElement('div');
+  list.className = 'workflow-stage-list';
+  const view = {
+    runId,
+    descriptor,
+    root,
+    statusEl: status,
+    progressEl: progress,
+    stages: new Map(),
+    terminalStatus: undefined,
+  };
+  for (const definition of descriptor.stages) {
+    const row = document.createElement('div');
+    row.className = 'workflow-stage-row pending';
+    row.dataset.stageId = definition.id;
+
+    const icon = document.createElement('span');
+    icon.className = 'workflow-stage-icon pending';
+    icon.textContent = workflowStatusIcon.pending;
+
+    const body = document.createElement('div');
+    body.className = 'workflow-stage-body';
+    const rowTitle = document.createElement('div');
+    rowTitle.className = 'workflow-stage-row-title';
+    rowTitle.textContent = definition.title;
+    body.appendChild(rowTitle);
+    if (definition.toolName) {
+      const tool = document.createElement('div');
+      tool.className = 'workflow-stage-tool';
+      tool.textContent = definition.toolName;
+      body.appendChild(tool);
+    }
+
+    const rowStatus = document.createElement('span');
+    rowStatus.className = 'workflow-stage-row-status pending';
+    rowStatus.textContent = workflowStatusText.pending;
+    row.append(icon, body, rowStatus);
+    list.appendChild(row);
+    view.stages.set(definition.id, {
+      definition,
+      status: 'pending',
+      attempts: 0,
+      row,
+      icon,
+      statusEl: rowStatus,
+    });
+  }
+  root.append(header, list);
+  if (agentBubble && agentBubble.parentElement === messagesEl) {
+    messagesEl.insertBefore(root, agentBubble);
+  } else {
+    messagesEl.appendChild(root);
+  }
+  workflowViews.set(runId, view);
+  renderWorkflowStageView(view);
+  scrollBottom();
+  return view;
+}
+
+function updateWorkflowStage(runId, toolName, status, result) {
+  const view = workflowViews.get(runId || currentRunId);
+  const stage = workflowStageForTool(view, toolName);
+  if (!stage) return;
+  stage.status = status;
+  if (status === 'running') stage.attempts += 1;
+  if (result !== undefined) stage.result = result;
+  renderWorkflowStageView(view);
+}
+
+function rememberWorkflowApproval(runId, approvalId, toolName) {
+  if (!approvalId || !toolName) return;
+  workflowApprovals.set(approvalId, { runId, toolName });
+  updateWorkflowStage(runId, toolName, 'awaiting_approval');
+}
+
+function resolveWorkflowApproval(approvalId, approved) {
+  const approval = workflowApprovals.get(approvalId);
+  if (!approval) return;
+  workflowApprovals.delete(approvalId);
+  updateWorkflowStage(
+    approval.runId,
+    approval.toolName,
+    approved ? 'running' : 'failed',
+  );
+}
+
+function finishWorkflowView(runId, status) {
+  const view = workflowViews.get(runId || currentRunId);
+  if (!view) return;
+  if (status === 'failed' || status === 'cancelled') {
+    const current = [...view.stages.values()].find((stage) =>
+      stage.status === 'running' || stage.status === 'awaiting_approval',
+    ) || [...view.stages.values()].find((stage) => stage.status === 'pending');
+    if (current) current.status = status === 'cancelled' ? 'cancelled' : 'failed';
+  }
+  view.terminalStatus = status;
+  renderWorkflowStageView(view);
 }
 
 function startToolHeadline(name, args) {
@@ -629,6 +861,7 @@ function showWelcomeHint() {
 function addApprovalCard(runId, approval) {
   const { id, name, args } = approval;
   if (messagesEl.querySelector(`[data-approval-id="${CSS.escape(id)}"]`)) return;
+  rememberWorkflowApproval(runId, id, name);
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.dataset.approvalId = id;
@@ -686,6 +919,7 @@ function addApprovalCard(runId, approval) {
 
 function markApprovalCard(id, approved, statusText) {
   if (!id) return;
+  resolveWorkflowApproval(id, approved);
   const card = messagesEl.querySelector(`[data-approval-id="${CSS.escape(id)}"]`);
   if (!card) return;
   const className = approved ? 'approved' : 'rejected';
@@ -759,6 +993,7 @@ function handleProtocolEvent(event) {
       const name = payload.toolName || 'tool';
       if (name === 'report_plan_progress') break;
       rememberToolRun(name, payload);
+      updateWorkflowStage(event.runId, name, 'running');
       addNote('tool-note', startToolHeadline(name, payload.arguments));
       hadToolThisTurn = true;
       pendingToolCount += 1;
@@ -782,11 +1017,13 @@ function handleProtocolEvent(event) {
         ? payload.durationMs
         : measuredDuration;
       addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
+      updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
       break;
     }
     case 'run.completed': {
+      finishWorkflowView(event.runId, 'completed');
       const result = payload.result;
       if (result && typeof result === 'object') {
         const output = result.output;
@@ -810,9 +1047,11 @@ function handleProtocolEvent(event) {
     }
     case 'run.failed':
       // The host error control message owns the detailed error bubble.
+      finishWorkflowView(event.runId, 'failed');
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
+      finishWorkflowView(event.runId, 'cancelled');
       break;
     case 'approval.requested':
       if (payload.approvalId && payload.toolName) {
@@ -838,6 +1077,7 @@ function handleProtocolEvent(event) {
     case 'run.started':
       toolRuns.clear();
       anonymousToolRuns.clear();
+      if (payload.workflow) createWorkflowStageView(event.runId, payload.workflow);
       break;
     case 'run.progress':
       if (typeof payload.stage === 'string' && payload.stage.startsWith('plan.')) {
@@ -1037,6 +1277,8 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
+      workflowViews.clear();
+      workflowApprovals.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1059,6 +1301,8 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
+      workflowViews.clear();
+      workflowApprovals.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
