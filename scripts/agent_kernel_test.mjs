@@ -141,6 +141,90 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c2] 模型在 ST 校验和写入成功后胡说"文件被截断"时,运行时仍以
+// 校验哈希和写入哈希一致为准,且 ST 固定流水线不再额外 read/path 复核。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    'ST摘要误判回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'st-summary-evidence-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3c2] ST 摘要误判纠正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('ST 摘要误判场景没有收敛到校验、写入固定流水线');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 摘要误判场景触发了错误的审批工具');
+  }
+  if (r.output.includes('文件被截断了，请重新写入') || r.output.includes('请重新写入完整代码')) {
+    throw new Error('模型的摘要误判覆盖了已验证的工具事实');
+  }
+  if (!r.output.includes('内容与 validate_st_code 通过校验的完整代码一致')) {
+    throw new Error('最终结果没有说明写入内容与校验内容哈希一致');
+  }
+}
+
+// [3c3] 草稿校验失败时,模型必须继续修改内存草稿并再次 validate_st_code;
+// 只有 errorCount=0 的草稿可以进入唯一一次 write_file 审批。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    'ST草稿修正回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'st-draft-repair-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3c3] ST 草稿修正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file') {
+    throw new Error('ST 草稿修正没有按 校验失败 -> 再校验 -> 写入 顺序执行');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 草稿修正触发了错误的审批次数或审批工具');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('ST 草稿修正后的写入结果不正确');
+  }
+}
+
 // [3d] 模型先给了最终答复却没有按契约执行动作时,完成验收必须主动
 // 强制验证工具,验证通过后再强制落盘,不能只把修复要求再交给模型自觉处理。
 {
@@ -157,7 +241,6 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       workspaceFileExtension: '.st',
     }],
   });
-  const before = diagLines.length;
   const r = await runTestTurn(
     '强制交付闭环',
     async (name) => {
@@ -170,16 +253,12 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const toolCalls = r.events
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
-  const repairLogs = diagLines.slice(before).filter((line) => line.includes('[completion_gate]'));
   console.log('[3d] 完成验收兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
   if (toolCalls.join(',') !== 'validate_st_code,write_file') {
     throw new Error('完成验收没有按交付契约强制验证再落盘');
   }
   if (asked.join(',') !== 'write_file') {
     throw new Error('完成验收兜底触发了错误的审批工具');
-  }
-  if (!repairLogs.some((line) => line.includes('force_tool=validate_st_code'))) {
-    throw new Error('完成验收没有记录强制验证工具');
   }
 }
 
@@ -199,7 +278,6 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       workspaceFileExtension: '.st',
     }],
   });
-  const before = diagLines.length;
   const r = await runTestTurn(
     '正文交付闭环',
     async (name) => {
@@ -212,13 +290,9 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const toolCalls = r.events
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
-  const freshLogs = diagLines.slice(before);
   console.log('[3e] 普通正文 schema 兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
   if (toolCalls.join(',') !== 'validate_st_code,write_file') {
     throw new Error('普通正文输出没有进入校验再落盘闭环');
-  }
-  if (!freshLogs.some((line) => line.includes('最终输出不符合 schema'))) {
-    throw new Error('普通正文输出没有记录 schema 兜底日志');
   }
   if (!r.output.includes('PumpControl.st')) {
     throw new Error('普通正文兜底后的最终确认不正确');

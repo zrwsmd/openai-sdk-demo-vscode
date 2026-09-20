@@ -20,6 +20,13 @@ const ST_CODE = [
   '  Motor_Star := TON_Star.Q;',
   'END_PROGRAM',
 ].join('\n');
+const BAD_ST_CODE = [
+  'PROGRAM StarDelta',
+  '  VAR',
+  '    Motor_Star : BOOL;',
+  '  END_VAR',
+  '  Motor_Star := TRUE;',
+].join('\n');
 
 let seq = 0;
 function usageChunk(model, prompt, completion) {
@@ -304,10 +311,12 @@ const server = http.createServer((req, res) => {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user' && typeof m.content === 'string');
     const userText = (lastUser && lastUser.content) || '';
     const serializedMessages = JSON.stringify(messages);
+    const serializedLastMessage = JSON.stringify(last);
     const lastAssistantToolCall = [...messages]
       .reverse()
       .find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
       ?.tool_calls?.[0]?.function?.name;
+    const hasAssistantToolCall = (name) => serializedMessages.includes(`"name":"${name}"`);
     const forcedToolChoice = typeof req_body.tool_choice === 'string'
       ? req_body.tool_choice
       : req_body.tool_choice?.function?.name;
@@ -395,6 +404,79 @@ const server = http.createServer((req, res) => {
         name: 'PumpControl.st',
         mimeType: 'text/plain',
         content: ST_CODE,
+      }));
+    } else if (
+      userText.includes('ST草稿修正回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已完成校验并保存 PumpControl.st。');
+    } else if (userText.includes('ST草稿修正回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: BAD_ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('ST草稿修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      (serializedLastMessage.includes('ST 校验未通过') ||
+        serializedLastMessage.includes('缺少 END_PROGRAM') ||
+        serializedLastMessage.includes('missing END_PROGRAM'))
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('ST草稿修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (userText.includes('ST摘要误判回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('ST摘要误判回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      serializedMessages.includes('PumpControl.st')
+    ) {
+      await streamStructuredText(res, model, '文件被截断了，请重新写入完整代码。');
+    } else if (
+      userText.includes('ST摘要误判回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (
+      userText.includes('ST摘要误判回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '文件被截断了，请重新写入完整代码。');
+    } else if (
+      userText.includes('默认保存回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamText(res, model, JSON.stringify({
+        message: '已校验并保存 PumpControl.st。',
+        diagnostics: [],
+        artifacts: [{
+          kind: 'code',
+          name: 'PumpControl.st',
+          uri: null,
+          mimeType: 'text/plain',
+          content: ST_CODE,
+        }],
+        data: null,
       }));
     } else if (userText.includes('默认保存回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({

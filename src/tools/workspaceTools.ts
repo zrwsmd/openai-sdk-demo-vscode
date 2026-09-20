@@ -5,12 +5,29 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.vscode', 'dist', 'out', 'build', 'bin', 'obj', '.venv', '__pycache__']);
 /** 文本搜索时跳过的二进制/资源扩展名 */
 const BINARY_EXT = new Set(['.exe', '.dll', '.so', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.zip', '.gz', '.7z', '.rar', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.woff', '.woff2', '.ttf', '.mp3', '.mp4', '.wav', '.class', '.jar']);
 
 export class ToolError extends Error {}
+
+export interface ReadFileRangeResult {
+  text: string;
+  totalLines: number;
+  startLine: number;
+  endLine: number;
+  returnedLines: number;
+  totalBytes: number;
+  returnedBytes: number;
+  complete: boolean;
+  truncated: boolean;
+  /** SHA-1 of the complete file, independent of the requested line range. */
+  fileContentHash: string;
+  /** SHA-1 of the text returned in this particular read operation. */
+  returnedContentHash: string;
+}
 
 /** 把相对路径解析为工作区内绝对路径;越界直接拒绝 */
 export function resolveInWorkspace(root: string, rel: string): string {
@@ -77,16 +94,31 @@ export async function readFileRange(
   rel: string,
   startLine = 1,
   endLine?: number,
-): Promise<{ text: string; totalLines: number }> {
+): Promise<ReadFileRangeResult> {
   const abs = resolveInWorkspace(root, rel);
   const st = await fs.stat(abs).catch(() => {
     throw new ToolError(`文件不存在:${rel}`);
   });
   if (st.size > 2 * 1024 * 1024) throw new ToolError(`文件过大(${st.size}B),请用 startLine/endLine 分段读`);
-  const all = (await fs.readFile(abs, 'utf8')).split(/\r?\n/);
+  const raw = await fs.readFile(abs, 'utf8');
+  const all = raw.split(/\r?\n/);
   const s = Math.max(1, startLine);
   const e = Math.min(all.length, endLine ?? s + 3999);
-  return { text: all.slice(s - 1, e).join('\n'), totalLines: all.length };
+  const complete = s === 1 && e === all.length;
+  const text = complete ? raw : all.slice(s - 1, e).join('\n');
+  return {
+    text,
+    totalLines: all.length,
+    startLine: s,
+    endLine: e,
+    returnedLines: Math.max(0, e - s + 1),
+    totalBytes: Buffer.byteLength(raw, 'utf8'),
+    returnedBytes: Buffer.byteLength(text, 'utf8'),
+    complete,
+    truncated: !complete,
+    fileContentHash: createHash('sha1').update(raw, 'utf8').digest('hex'),
+    returnedContentHash: createHash('sha1').update(text, 'utf8').digest('hex'),
+  };
 }
 
 export async function writeFileText(root: string, rel: string, content: string): Promise<{ file: string; bytes: number }> {

@@ -1,6 +1,7 @@
 import type { Artifact, ToolResult } from '../protocol/results';
 import type { RequiredAgentTool } from '../policy/actionPolicy';
 import type { DeliveryContract } from './deliveryContract';
+import { isStCodeDeliveryContract } from './deliveryContract';
 
 export interface CompletionGateToolRecord {
   name: string;
@@ -162,6 +163,16 @@ function hasLaterDeliveryResolution(
   const laterRecords = records.filter((record) => record.order > issue.order);
   const deliverables = contract.deliverables.filter((deliverable) => deliverable.required);
 
+  if (
+    isStCodeDeliveryContract(contract) &&
+    (issue.toolName === 'validate_st_code' ||
+      issue.toolName === 'write_file' ||
+      issue.toolName === 'delivery_verification') &&
+    hasValidatedStWrite(records)
+  ) {
+    return true;
+  }
+
   if (issue.toolName === 'write_file') {
     return deliverables.some((deliverable) =>
       hasToolEvidence('successful_write', laterRecords, deliverable),
@@ -178,6 +189,38 @@ function hasLaterDeliveryResolution(
     deliverable.requiredVerificationTools?.includes(issue.toolName) &&
     hasSuccessfulVerification(issue.toolName, laterRecords),
   );
+}
+
+function hasValidatedStWrite(
+  records: (CompletionGateToolRecord & { order: number })[],
+): boolean {
+  const validationHashes = new Set<string>();
+  for (const record of records) {
+    if (record.name !== 'validate_st_code' || !toolResultSucceeded(record.result)) continue;
+    const data = record.result.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    const value = data as Record<string, unknown>;
+    if (value.errorCount !== 0) continue;
+    const target = value.validationTarget;
+    const targetHash = target && typeof target === 'object' && !Array.isArray(target)
+      ? (target as Record<string, unknown>).contentHash
+      : undefined;
+    const hash = typeof value.validatedContentHash === 'string'
+      ? value.validatedContentHash
+      : typeof targetHash === 'string' ? targetHash : undefined;
+    if (hash) validationHashes.add(hash);
+  }
+  if (!validationHashes.size) return false;
+  return records.some((record) => {
+    if (record.name !== 'write_file' || !toolResultSucceeded(record.result)) return false;
+    const data = record.result.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    const value = data as Record<string, unknown>;
+    return typeof value.file === 'string' &&
+      value.file.toLowerCase().endsWith('.st') &&
+      typeof value.contentHash === 'string' &&
+      validationHashes.has(value.contentHash);
+  });
 }
 
 function shouldRequireRepair(result: ToolResult, input: CompletionGateInput): boolean {

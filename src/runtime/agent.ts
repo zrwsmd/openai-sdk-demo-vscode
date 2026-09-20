@@ -118,6 +118,8 @@ import {
   deliveryContractDecisionSchema,
   inferDeliveryContractFromUserText,
   renderDeliveryContract,
+  isStCodeDeliveryContract,
+  isStWorkspaceDeliveryContract,
   type DeliveryContract,
 } from "./deliveryContract";
 
@@ -302,6 +304,20 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
 const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
 const optionalStringParam = z.union([z.string(), z.null()]).optional();
 const optionalBooleanParam = z.union([z.boolean(), z.string(), z.null()]).optional();
+
+type StValidatedDraft = {
+  hash: string;
+  content: string;
+};
+
+type StValidationState = {
+  hashes: Set<string>;
+  lastSuccessful?: StValidatedDraft;
+};
+
+function hashStContent(content: string): string {
+  return createHash("sha1").update(content).digest("hex");
+}
 
 function parseOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -512,7 +528,7 @@ async function loadHistoricalToolResults(
 function buildTools(
   cfg: AgentConfig,
   deliveryContract?: DeliveryContract,
-  previouslyValidatedStContent: Set<string> = new Set(),
+  stValidationState: StValidationState = { hashes: new Set<string>() },
 ) {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -523,9 +539,8 @@ function buildTools(
       deliverable.required &&
       deliverable.requiredVerificationTools?.includes("validate_st_code"),
   ) === true;
-  const validatedStContent = previouslyValidatedStContent;
-  const stContentHash = (content: string): string =>
-    createHash("sha1").update(content).digest("hex");
+  const stWorkspaceDelivery = isStWorkspaceDeliveryContract(deliveryContract);
+  const validatedStContent = stValidationState.hashes;
   /**
    * 解析校验目标与上下文:目标优先用工作区真实文件(跨文件解析最准),
    * 只有裸代码才落到系统临时目录下的虚拟 URI(桥只把它当 URI,不读盘)。
@@ -539,19 +554,36 @@ function buildTools(
     let target: StTarget;
     let label: string;
     let excludePaths: string[] = [];
+    let complete = true;
+    let totalLines = code ? code.split(/\r?\n/).length : 0;
+    let totalBytes = code ? Buffer.byteLength(code, "utf8") : 0;
+    let contentHash = "";
     if (filePath) {
       const resolved = workspace.resolve(filePath);
-      const read = await readFileRange(resolved.root, resolved.relativePath);
+      // Validation must always use the complete file. read_file intentionally
+      // supports bounded/partial reads for large files, but a validator must
+      // never silently accept only the first page of a source file.
+      const read = await readFileRange(
+        resolved.root,
+        resolved.relativePath,
+        1,
+        Number.MAX_SAFE_INTEGER,
+      );
       target = { path: resolved.absolutePath, text: read.text };
       label = resolved.relativePath.split(path.sep).join("/");
       excludePaths = [resolved.relativePath];
+      complete = read.complete;
+      totalLines = read.totalLines;
+      totalBytes = read.totalBytes;
+      contentHash = read.fileContentHash;
     } else {
-      const digest = createHash("sha1").update(code!).digest("hex").slice(0, 12);
+      const digest = hashStContent(code!).slice(0, 12);
       target = {
         path: path.join(os.tmpdir(), "plc-agent-st", `${digest}.st`),
         text: code!,
       };
       label = "<inline st code>";
+      contentHash = hashStContent(code!);
     }
     const useContext =
       (loadWorkspaceContext ?? stToolOptions.loadWorkspaceContext !== false) &&
@@ -569,6 +601,10 @@ function buildTools(
       context: collected.files,
       contextTruncated: collected.truncated,
       contextSkipped: collected.skipped,
+      complete,
+      totalLines,
+      totalBytes,
+      contentHash,
     };
   };
   const workspace = workspaceScopeFromRoots(
@@ -638,34 +674,50 @@ function buildTools(
     },
   });
 
+  const validateStCodeParameters = stWorkspaceDelivery
+    ? z.object({
+        code: z.string().min(1).describe("当前完整 ST 草稿；必须包含完整 PROGRAM ... END_PROGRAM"),
+        loadWorkspaceContext: optionalBooleanParam.describe(
+          '是否把工作区其它 .st 一起解析；优先传 true/false，兼容 "True"/"False" 字符串',
+        ),
+      })
+    : z.object({
+        code: optionalStringParam.describe("完整 ST 源码(PROGRAM ... END_PROGRAM);不使用时可省略或传 null"),
+        path: optionalStringParam.describe("工作区内的 .st 文件路径,优先于 code;不使用时可省略或传 null"),
+        loadWorkspaceContext: optionalBooleanParam.describe(
+          '是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要);优先传 true/false,兼容 "True"/"False" 字符串',
+        ),
+      });
   const validateStCode = tool({
     name: "validate_st_code",
-    description:
+    description: stWorkspaceDelivery
+      ? "校验内存中的完整 IEC 61131-3 ST 草稿。当前处于固定交付流水线的草稿阶段，只能传 code；不要传 path，也不要在校验成功前调用 write_file、export_st_program 或 run_command。errorCount=0 才算通过，warning 只作提示。" +
+        "校验成功后运行时会锁定这份源码，下一步只能把完全相同的源码交给 write_file。"
+      :
       "用 ST 语言服务器(st-analyze)校验 IEC 61131-3 ST 代码,返回带行列号的诊断。" +
       "优先用 path 校验工作区里的真实 .st 文件,只有裸代码才用 code。" +
       "结果里 errorCount=0 才算通过校验;warningCount 只作提示,不阻断交付。" +
+      "path 校验始终读取完整文件;返回的 validatedContentHash 是本次实际校验内容的哈希。" +
+      "不要因为 read_file 界面里的摘要省略号就重写文件,只有 data.truncated=true 才表示本次读取确实是分段结果。" +
       "该校验器不覆盖全部语义(例如内置 FB 参数类型),不要把它当成可上机运行的证明。",
-    parameters: z.object({
-      code: optionalStringParam.describe("完整 ST 源码(PROGRAM ... END_PROGRAM);不使用时可省略或传 null"),
-      path: optionalStringParam.describe("工作区内的 .st 文件路径,优先于 code;不使用时可省略或传 null"),
-      loadWorkspaceContext: optionalBooleanParam.describe(
-        '是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要);优先传 true/false,兼容 "True"/"False" 字符串',
-      ),
-    }),
+    parameters: validateStCodeParameters,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
-    execute: ({ code, path: p, loadWorkspaceContext }, _context, details) =>
+    execute: (input, _context, details) =>
       guard(async () => {
-        const input = await resolveStValidationInput(
-          parseOptionalString(p),
-          parseOptionalString(code),
-          parseOptionalBoolean(loadWorkspaceContext),
+        const code = "code" in input ? parseOptionalString(input.code) : undefined;
+        const p = "path" in input ? parseOptionalString(input.path) : undefined;
+        const loadWorkspaceContext = parseOptionalBoolean(input.loadWorkspaceContext);
+        const validationInput = await resolveStValidationInput(
+          p,
+          code,
+          loadWorkspaceContext,
         );
         const result = await stAnalyzer.verify(
           {
             workspaceRoot: workspace.primaryRoot,
-            targets: [input.target],
-            context: input.context,
+            targets: [validationInput.target],
+            context: validationInput.context,
             ...(stToolOptions.maxDiagnostics ? { options: { maxDiagnostics: stToolOptions.maxDiagnostics } } : {}),
           },
           { signal: details?.signal },
@@ -673,7 +725,7 @@ function buildTools(
         const counts = countStDiagnostics(result);
         const diagnostics = (result.results[0]?.diagnostics ?? []).map((diagnostic: StDiagnostic) => ({
           ...diagnostic,
-          path: input.label,
+          path: validationInput.label,
         }));
         const validationFailed = isStValidationFailure(result);
         const summary = [
@@ -682,8 +734,15 @@ function buildTools(
           `warning=${counts.warning}`,
           `上下文文件=${result.contextLoaded}`,
         ].join(" ");
+        const validatedHash = hashStContent(validationInput.target.text);
         if (!validationFailed) {
-          validatedStContent.add(stContentHash(input.target.text));
+          validatedStContent.add(validatedHash);
+          if (stWorkspaceDelivery && !p) {
+            stValidationState.lastSuccessful = {
+              hash: validatedHash,
+              content: validationInput.target.text,
+            };
+          }
         }
         return toolResult({
           ok: !validationFailed,
@@ -692,14 +751,19 @@ function buildTools(
             errorCount: counts.error,
             warningCount: counts.warning,
             infoCount: counts.info,
-            validatedContentHash: validationFailed
-              ? undefined
-              : stContentHash(input.target.text),
+            validatedContentHash: validationFailed ? undefined : validatedHash,
+            validationTarget: {
+              path: validationInput.label,
+              complete: validationInput.complete,
+              totalLines: validationInput.totalLines,
+              totalBytes: validationInput.totalBytes,
+              contentHash: validationInput.contentHash || validatedHash,
+            },
             diagnostics,
             context: {
               files: result.contextLoaded,
-              truncated: input.contextTruncated,
-              ...(input.contextSkipped ? { skipped: input.contextSkipped } : {}),
+              truncated: validationInput.contextTruncated,
+              ...(validationInput.contextSkipped ? { skipped: validationInput.contextSkipped } : {}),
             },
             elapsedMs: result.elapsedMs,
             analyzer: {
@@ -733,7 +797,7 @@ function buildTools(
     outputGuardrails: guardrails.output,
     execute: ({ code }) =>
       withEffect("export_st_program", { code }, "write", async () => {
-        if (requiresStValidation && !validatedStContent.has(stContentHash(code))) {
+        if (requiresStValidation && !validatedStContent.has(hashStContent(code))) {
           return toolResult({
             ok: false,
             error: "ST 代码在导出前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
@@ -751,7 +815,11 @@ function buildTools(
         await fs.mkdir(cfg.exportDir, { recursive: true });
         const file = path.join(cfg.exportDir, `${name}.st`);
         await fs.writeFile(file, code, "utf8");
-        return contract({ file }, "write", "filesystem");
+        return contract({
+          file,
+          bytes: Buffer.byteLength(code, "utf8"),
+          contentHash: hashStContent(code),
+        }, "write", "filesystem");
       }),
   });
 
@@ -789,7 +857,9 @@ function buildTools(
   const readFileTool = tool({
     name: "read_file",
     description:
-      "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。",
+      "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。" +
+      "结果 data.complete/data.truncated 明确表示是否完整读取；data.fileContentHash 是完整文件哈希。" +
+      "界面可能只展示 content 的摘要，摘要省略不代表文件被截断。",
     parameters: z.object({
       path: z.string().describe("相对工作区的文件路径"),
       startLine: optionalIntParam.describe(
@@ -808,7 +878,20 @@ function buildTools(
         const s = parseOptionalInt(startLine) ?? 1;
         const e = parseOptionalInt(endLine);
         const r = await readFileRange(target.root, target.relativePath, s, e);
-        return contract({ totalLines: r.totalLines, content: r.text }, "read");
+        return contract({
+          path: target.relativePath,
+          content: r.text,
+          totalLines: r.totalLines,
+          startLine: r.startLine,
+          endLine: r.endLine,
+          returnedLines: r.returnedLines,
+          totalBytes: r.totalBytes,
+          returnedBytes: r.returnedBytes,
+          complete: r.complete,
+          truncated: r.truncated,
+          fileContentHash: r.fileContentHash,
+          returnedContentHash: r.returnedContentHash,
+        }, "read");
       }, "read"),
   });
 
@@ -857,7 +940,9 @@ function buildTools(
           if (
             requiresStValidation &&
             target.relativePath.toLowerCase().endsWith(".st") &&
-            !validatedStContent.has(stContentHash(content))
+            !(stWorkspaceDelivery
+              ? stValidationState.lastSuccessful?.hash === hashStContent(content)
+              : validatedStContent.has(hashStContent(content)))
           ) {
             return toolResult({
               ok: false,
@@ -882,7 +967,14 @@ function buildTools(
             "write",
             async () =>
               contract(
-                await writeFileText(target.root, target.relativePath, content),
+                {
+                  ...(await writeFileText(
+                    target.root,
+                    target.relativePath,
+                    content,
+                  )),
+                  contentHash: hashStContent(content),
+                },
                 "write",
                 "filesystem",
               ),
@@ -921,7 +1013,12 @@ function buildTools(
       ),
   });
 
-  const allTools = [
+  if (stWorkspaceDelivery) {
+    // ST workspace delivery is a host-owned state machine. Do not expose
+    // unrelated tools that let the model bypass the draft/validate/write order.
+    return [validateStCode, writeFileTool];
+  }
+  return [
     getIoTable,
     readPlcVariables,
     validateStCode,
@@ -932,10 +1029,6 @@ function buildTools(
     writeFileTool,
     runCommandTool,
   ];
-  // Keep the full tool surface even when a required side-effect is inferred.
-  // toolChoice / requireToolOnce still forces that tool on the first model
-  // call; hiding the rest would block get_io_table / validate_st_code / etc.
-  return allTools;
 }
 
 const SYSTEM_PROMPT =
@@ -2058,6 +2151,7 @@ export async function runAgent(
   );
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
+  const stWorkspaceDelivery = isStWorkspaceDeliveryContract(options.deliveryContract);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
   const textStreamingMode =
@@ -2165,12 +2259,12 @@ export async function runAgent(
           }),
       })
     : undefined;
-  const previouslyValidatedStContent = new Set<string>();
+  const stValidationState: StValidationState = { hashes: new Set<string>() };
   const tools = [
     ...buildTools(
       cfg,
       options.deliveryContract,
-      previouslyValidatedStContent,
+      stValidationState,
     ),
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
@@ -2200,7 +2294,9 @@ export async function runAgent(
       renderDeliveryContract(options.deliveryContract) +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
       "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
-      "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。" +
+      (stWorkspaceDelivery
+        ? "\n本轮 .st 工作区交付由运行时按固定流水线执行：先调用 validate_st_code 的 code 参数校验完整内存草稿；校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，且 content 必须与刚通过校验的源码完全一致。不要调用 path 校验、read_file、export_st_program 或 run_command，不要并行调用工具。"
+        : "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。") +
       "契约列出的验证工具必须实际调用并依据成功回执完成；不要用文字描述代替工具调用。" +
       (requiresInlineFinalArtifact
         ? "\n本轮至少有一个交付物只能用 final_artifact 验收。优先调用 deliver_artifact 提交完整内容；也可以同时把内容放入最终 JSON 的 artifacts 数组。无论采用哪种方式，交付内容必须完整，不能只放摘要、计划或口头承诺。"
@@ -2209,7 +2305,7 @@ export async function runAgent(
   let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: string) => {
     const modelSettings = {
-      parallelToolCalls: true,
+      parallelToolCalls: !stWorkspaceDelivery,
       ...(forcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: forcedTool }
         : {}),
@@ -2242,7 +2338,13 @@ export async function runAgent(
         : {}),
     });
   };
-  let agent = buildAgent();
+  const initialStTool = stWorkspaceDelivery && !options.initialState
+    ? "validate_st_code"
+    : undefined;
+  if (initialStTool && model instanceof GatewayGuardedModel) {
+    model.requireToolOnce(initialStTool);
+  }
+  let agent = buildAgent(initialStTool);
 
   const tracingDisabled = !(
     modelAdapter.provider === "openai" &&
@@ -2393,16 +2495,15 @@ export async function runAgent(
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
-    if (!requiredTool) return [];
+    const verificationTool = stWorkspaceDelivery ? "write_file" : requiredTool;
+    if (!verificationTool) return [];
     const verified: Artifact[] = [];
     const calls = [...toolResults.values()].filter(
-      (call) => call.name === requiredTool,
+      (call) => call.name === verificationTool,
     );
     for (const call of calls) {
       if (!call.result.ok) continue;
-      // Every required side-effect must have a successful structured tool
-      // result. File writes additionally get a read-back byte-for-byte check.
-      if (requiredTool !== "write_file") continue;
+      if (verificationTool !== "write_file") continue;
       let args: { path?: unknown; content?: unknown };
       try {
         args = JSON.parse(call.args) as { path?: unknown; content?: unknown };
@@ -2411,20 +2512,45 @@ export async function runAgent(
       }
       if (typeof args.path !== "string" || typeof args.content !== "string")
         continue;
-      verified.push(
-        await verifyWorkspaceWrite(workspace, args.path, args.content),
-      );
+      if (stWorkspaceDelivery) {
+        const data = call.result.data && typeof call.result.data === "object"
+          ? call.result.data as Record<string, unknown>
+          : {};
+        const writtenHash = typeof data.contentHash === "string"
+          ? data.contentHash
+          : hashStContent(args.content);
+        const expected = stValidationState.lastSuccessful;
+        if (!expected || !args.path.toLowerCase().endsWith(".st") ||
+          writtenHash !== expected.hash || hashStContent(args.content) !== expected.hash) {
+          continue;
+        }
+        const file = typeof data.file === "string" ? data.file : args.path;
+        const bytes = typeof data.bytes === "number"
+          ? data.bytes
+          : Buffer.byteLength(args.content, "utf8");
+        verified.push({
+          kind: "file",
+          name: path.basename(file),
+          uri: file,
+          mimeType: "text/plain",
+          metadata: { bytes, contentHash: expected.hash },
+        });
+      } else {
+        verified.push(await verifyWorkspaceWrite(workspace, args.path, args.content));
+      }
     }
     const successful = calls.some((call) => call.result.ok);
     if (!calls.length) {
       throw new AgentActionVerificationError(
-        `用户明确要求执行 ${requiredTool}，但本轮没有调用该工具`,
+        `用户明确要求执行 ${verificationTool}，但本轮没有调用该工具`,
       );
     }
     if (!successful) return verified;
-    if (requiredTool === "write_file" && !verified.length) {
+    if (verificationTool === "write_file" && !verified.length) {
       throw new AgentActionVerificationError(
-        "工具 write_file 返回成功，但本轮没有完成文件回读校验",
+        stWorkspaceDelivery
+          ? "工具 write_file 返回成功，但写入回执的 contentHash 与最近一次 validate_st_code 通过的完整草稿不一致"
+          : "工具 write_file 返回成功，但本轮没有完成文件回读校验",
       );
     }
     return verified;
@@ -2596,7 +2722,63 @@ export async function runAgent(
       deliveryContract: options.deliveryContract,
     });
 
+  const authoritativeStDeliveryMessage = (): string | undefined => {
+    if (!isStCodeDeliveryContract(options.deliveryContract)) return undefined;
+    const records = [
+      ...historicalToolResults,
+      ...toolResults.values(),
+    ].filter((record) => record.result.ok);
+    const validationHashes = new Set<string>();
+    for (const record of records) {
+      if (record.name !== "validate_st_code") continue;
+      const data = record.result.data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+      const validation = data as Record<string, unknown>;
+      if (validation.errorCount !== 0) continue;
+      const target = validation.validationTarget;
+      const targetHash = target && typeof target === "object" && !Array.isArray(target)
+        ? (target as Record<string, unknown>).contentHash
+        : undefined;
+      const hash = typeof validation.validatedContentHash === "string"
+        ? validation.validatedContentHash
+        : typeof targetHash === "string" ? targetHash : undefined;
+      if (hash) validationHashes.add(hash);
+    }
+    if (!validationHashes.size) return undefined;
+
+    for (const record of [...records].reverse()) {
+      if (record.name !== "write_file" && record.name !== "export_st_program") {
+        continue;
+      }
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(record.args) as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      const data = record.result.data && typeof record.result.data === "object"
+        ? record.result.data as Record<string, unknown>
+        : {};
+      const file = typeof data.file === "string"
+        ? data.file
+        : typeof args.path === "string" ? args.path : undefined;
+      const content = record.name === "write_file"
+        ? typeof args.content === "string" ? args.content : undefined
+        : typeof args.code === "string" ? args.code : undefined;
+      const recordedHash = typeof data.contentHash === "string"
+        ? data.contentHash
+        : typeof content === "string" ? hashStContent(content) : undefined;
+      if (!file?.toLowerCase().endsWith(".st") || !recordedHash) continue;
+      if (!validationHashes.has(recordedHash)) continue;
+      const operation = record.name === "export_st_program" ? "导出" : "写入";
+      return `已完成：${operation} ${file}；内容与 validate_st_code 通过校验的完整代码一致（errorCount=0）。read_file 的省略号只是界面摘要，不代表文件被截断。`;
+    }
+    return undefined;
+  };
+
   const fallbackDeliveryMessage = (): string | undefined => {
+    const authoritative = authoritativeStDeliveryMessage();
+    if (authoritative) return authoritative;
     const records = [
       ...historicalToolResults,
       ...toolResults.values(),
@@ -2616,15 +2798,7 @@ export async function runAgent(
         ? data.file
         : typeof args.path === "string" ? args.path : "目标文件";
       const bytes = typeof data.bytes === "number" ? ` · ${data.bytes} 字节` : "";
-      const stValidated = records.some((record) =>
-        record.name === "validate_st_code" &&
-        record.result.ok &&
-        record.result.data &&
-        typeof record.result.data === "object" &&
-        !Array.isArray(record.result.data) &&
-        (record.result.data as Record<string, unknown>).errorCount === 0,
-      );
-      return `${stValidated ? "已通过 ST 校验并" : "已"}写入 ${file}${bytes}。`;
+      return `已写入 ${file}${bytes}。`;
     }
     const artifact = deliveredArtifactsFromTools()[0];
     if (artifact) return `已生成 ${artifact.name}。`;
@@ -2635,7 +2809,8 @@ export async function runAgent(
   };
 
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
-    const message = output.trim() ||
+    const message = authoritativeStDeliveryMessage() ||
+      output.trim() ||
       fallbackRequiredToolMessage() ||
       fallbackDeliveryMessage();
     if (!message) return undefined;
@@ -2962,7 +3137,31 @@ export async function runAgent(
     : [];
   if (options.initialState) {
     for (const hash of await loadValidatedStContent(session, userText)) {
-      previouslyValidatedStContent.add(hash);
+      stValidationState.hashes.add(hash);
+    }
+    if (stWorkspaceDelivery) {
+      for (const record of historicalToolResults) {
+        if (record.name !== "validate_st_code" || !record.result.ok) continue;
+        const data = record.result.data && typeof record.result.data === "object"
+          ? record.result.data as Record<string, unknown>
+          : {};
+        if (data.errorCount !== 0) continue;
+        let args: Record<string, unknown>;
+        try {
+          args = JSON.parse(record.args) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        const code = typeof args.code === "string" && args.code.trim()
+          ? args.code
+          : undefined;
+        const hash = typeof data.validatedContentHash === "string"
+          ? data.validatedContentHash
+          : code ? hashStContent(code) : undefined;
+        if (!code || !hash) continue;
+        stValidationState.hashes.add(hash);
+        stValidationState.lastSuccessful = { hash, content: code };
+      }
     }
   }
 
@@ -3147,13 +3346,16 @@ export async function runAgent(
         }
       }
       assertPlanCompleted();
+      const authoritativeMessage = authoritativeStDeliveryMessage();
       const fallbackMessage = fallbackRequiredToolMessage();
       const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
         : "";
-      const message = rawMessage && !isInternalToolArtifactComplaint(rawMessage)
-        ? rawMessage
-        : fallbackMessage ?? structuredOutput.message;
+      const message = authoritativeMessage ?? (
+        rawMessage && !isInternalToolArtifactComplaint(rawMessage)
+          ? rawMessage
+          : fallbackMessage ?? structuredOutput.message
+      );
       const structuredProjection = projectAgentOutput(
         industrialAgentOutputDefinition,
         structuredOutput,

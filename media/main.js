@@ -352,10 +352,24 @@ function formatToolResult(name, summary, result, run, durationMs) {
     const lines = typeof data.totalLines === 'number' ? ` · ${data.totalLines} 行` : '';
     const content = typeof data.content === 'string' ? data.content : '';
     const bytes = content ? ` · ${byteLength(content)} 字节` : '';
+    const complete = data.complete === true;
+    const truncated = data.truncated === true;
+    const range = typeof data.startLine === 'number' && typeof data.endLine === 'number'
+      ? `第 ${data.startLine}-${data.endLine} 行`
+      : '';
+    const previewLabel = truncated
+      ? `结果摘要（当前仅返回${range || '部分内容'}，共 ${data.totalLines ?? '?'} 行）`
+      : complete
+        ? '结果摘要（界面仅展示前 140 字符，文件内容完整）'
+        : '结果摘要（请以执行详情中的完整字段为准）';
     return {
       headline: `已读取 ${path}${lines}`,
-      summary: content ? `结果摘要：${truncateText(content)}` : '',
-      meta: [...metaParts, bytes.replace(/^ · /, '')].filter(Boolean).join(' · '),
+      summary: content ? `${previewLabel}：${truncateText(content)}` : '',
+      meta: [
+        ...metaParts,
+        complete ? '完整读取' : truncated ? '分段读取' : '',
+        bytes.replace(/^ · /, ''),
+      ].filter(Boolean).join(' · '),
       detail: parsed,
     };
   }

@@ -24,8 +24,21 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
 {
   const all = await readFileRange(ws, 'main.st');
   const part = await readFileRange(ws, 'main.st', 2, 2);
-  console.log('[2] read_file: totalLines =', all.totalLines, '| 第2行 =', JSON.stringify(part.text));
-  if (all.totalLines !== 4 || part.text.trim() !== 'x := 1;') throw new Error('读取分段错误');
+  console.log(
+    '[2] read_file: totalLines =', all.totalLines,
+    '| 完整 =', all.complete,
+    '| 分段 =', part.truncated,
+    '| 第2行 =', JSON.stringify(part.text),
+  );
+  if (
+    all.totalLines !== 4
+    || all.complete !== true
+    || all.truncated !== false
+    || !all.fileContentHash
+    || part.complete !== false
+    || part.truncated !== true
+    || part.text.trim() !== 'x := 1;'
+  ) throw new Error('读取完整性标记或分段内容错误');
 }
 
 // [3] write_file:嵌套目录自动创建 + 覆盖写

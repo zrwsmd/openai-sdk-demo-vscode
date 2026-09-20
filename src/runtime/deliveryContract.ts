@@ -150,6 +150,15 @@ export function isStCodeDeliveryContract(contract?: DeliveryContract): boolean {
     );
 }
 
+export function isStWorkspaceDeliveryContract(contract?: DeliveryContract): boolean {
+  return isStCodeDeliveryContract(contract) &&
+    contract?.deliverables.some((deliverable) =>
+      deliverable.required &&
+      deliverable.workspacePersistence === 'required' &&
+      deliverable.workspaceFileExtension?.toLowerCase() === '.st',
+    ) === true;
+}
+
 function isStCodeGenerationRequest(text: string): boolean {
   if (!text) return false;
   const asksToProduce =
