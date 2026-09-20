@@ -4,7 +4,7 @@ import {
   type StValidationState,
 } from "./deliveryWorkflow";
 import type { DeliveryContract } from "./deliveryContract";
-import type { AgentConfig } from "./agent";
+import type { AgentConfig } from "./agentConfig";
 import {
   commandToolResult,
   createToolBuildContext,

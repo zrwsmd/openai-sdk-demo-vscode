@@ -1,6 +1,7 @@
 import { Agent, Runner, type AgentInputItem } from '@openai/agents';
 import { z } from 'zod';
-import { buildModelAdapter, type AgentConfig } from './agent';
+import { buildModelAdapter } from './agent';
+import type { AgentConfig } from './agentConfig';
 
 export const CONTEXT_SUMMARY_MARKER = '[plc-agent-context-summary:v1]';
 

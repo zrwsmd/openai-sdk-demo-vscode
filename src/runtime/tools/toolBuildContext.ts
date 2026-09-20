@@ -10,7 +10,7 @@ import {
   type ToolRisk,
 } from "../../tools/toolContract";
 import { EffectRecoveryRequiredError } from "../errors";
-import type { AgentConfig } from "../agent";
+import type { AgentConfig } from "../agentConfig";
 import type { AuditEvent } from "../../observability/audit";
 import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/workspaceScope";
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";

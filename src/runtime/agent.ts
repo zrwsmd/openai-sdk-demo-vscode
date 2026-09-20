@@ -24,26 +24,15 @@ import OpenAI from "openai";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EffectRecoveryRequiredError } from "./errors";
-import {
-  type ToolPolicy,
-  type ToolPolicyOverrides,
-  toolResult,
-} from "../tools/toolContract";
-import { DefaultActionPolicy, type ActionPolicy } from "../policy/actionPolicy";
+import { toolResult } from "../tools/toolContract";
+import { DefaultActionPolicy } from "../policy/actionPolicy";
 import type { RequiredAgentTool } from "../policy/actionPolicy";
 import {
   WorkspaceScope,
   workspaceScopeFromRoots,
 } from "../workspace/workspaceScope";
-import type { PlcAdapter } from "../plc/plcAdapter";
-import {
-  type StAnalyzer,
-  type StAnalyzerToolOptions,
-} from "../analysis/stAnalyzer";
-import type { AuditEvent } from "../observability/audit";
 import {
   createIndustrialAgentTeam,
-  type IndustrialAgentMode,
 } from "../orchestration/agentRoles";
 import {
   createToolResult,
@@ -66,8 +55,6 @@ import {
 } from "./output";
 import {
   createModelAdapter,
-  type AgentApiFormat,
-  type AgentProvider,
   type ModelAdapter,
 } from "./modelAdapter";
 import {
@@ -111,49 +98,16 @@ import {
   TOOL_RISK_BY_NAME,
   type DiagnosticSideReporter,
 } from "./toolRegistry";
+import type { AgentConfig } from "./agentConfig";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
+export type { AgentConfig } from "./agentConfig";
 export { commandToolResult };
+export { validateConfig } from "./agentConfig";
 
 // 超轮次异常透传给 UI 层做友好提示
 export { MaxTurnsExceededError };
-
-export interface AgentConfig {
-  /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  /** Provider identity. The first supported provider is OpenAI. */
-  provider?: AgentProvider;
-  /** Explicit API wire format; omitted/auto preserves the historical route. */
-  apiFormat?: AgentApiFormat | "auto";
-  /** export_st_program 工具的落盘目录 */
-  exportDir: string;
-  /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
-  workspaceRoot: string;
-  /** Host-authorized workspace roots. Relative paths use workspaceRoot. */
-  workspaceRoots?: string[];
-  /** Host-owned effect journal. It may return a previously committed result. */
-  executeEffect?: <T>(
-    toolName: string,
-    input: unknown,
-    execute: () => Promise<T>,
-  ) => Promise<T>;
-  /** Policy is host-owned and must be enforced before side effects. */
-  policy?: ToolPolicy;
-  policyContext?: ToolPolicyOverrides;
-  plcAdapter?: PlcAdapter;
-  /**
-   * ST 校验端口。宿主注入;缺省用内置简易校验,
-   * 这样内核脱离宿主(CLI/边缘/单测)仍然可运行。
-   */
-  stAnalyzer?: StAnalyzer;
-  stAnalyzerOptions?: StAnalyzerToolOptions;
-  audit?: (event: Omit<AuditEvent, "id" | "timestamp">) => void | Promise<void>;
-  orchestration?: IndustrialAgentMode;
-  actionPolicy?: ActionPolicy;
-}
 
 /** UI 关心的事件:正文增量 / 工具调用提示 / 工具执行结果 */
 /**
@@ -222,7 +176,6 @@ function stableJson(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-
 function canonicalToolArguments(raw: string): string {
   try {
     return stableJson(JSON.parse(raw));
@@ -230,7 +183,6 @@ function canonicalToolArguments(raw: string): string {
     return raw.trim();
   }
 }
-
 function duplicateApprovalKey(request: Pick<ApprovalRequest, "name" | "args">): string {
   return `${request.name}\u0000${canonicalToolArguments(request.args)}`;
 }
@@ -2890,10 +2842,4 @@ export async function runAgent(
       };
     }
   }
-}
-
-export function validateConfig(cfg: AgentConfig): string | null {
-  if (!cfg.apiKey)
-    return "尚未配置 API Key:点击输入框右下角的 ⚙ 齿轮,在设置面板里填写 Base URL / API Key / Model(配置一次即可)";
-  return null;
 }
