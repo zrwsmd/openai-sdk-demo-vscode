@@ -340,6 +340,55 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c4b] 坏模型可能在交付已经完成后又发起新的 write_file。
+// 运行时应基于 workflow 已完成状态自动拒绝,不再弹第二张审批卡。
+{
+  const asked = [];
+  const contract = createDeliveryContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+    }],
+  });
+  const r = await runTestTurn(
+    '交付后重复写入回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'post-delivery-duplicate-write-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  const approvalRequests = r.events.filter((event) => event.type === 'approval.requested');
+  console.log(
+    '[3c4b] 交付后重复写入拦截:工具链 =',
+    toolCalls.join(','),
+    '| 审批请求 =',
+    approvalRequests.length,
+    '| decide =',
+    asked.map((item) => item.name).join(','),
+  );
+  if (approvalRequests.length !== 1 || asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('交付完成后的重复 write_file 不应再次暴露给用户审批');
+  }
+  if (toolCalls.join(',') !== 'validate_st_code,write_file') {
+    throw new Error('交付完成后的重复 workflow 工具调用不应再显示或执行');
+  }
+  const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
+  if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
+    throw new Error('交付后重复写入拦截后的保存结果不正确');
+  }
+}
+
 // [3c5] 坏网关/坏模型可能在一次响应里返回多个完全相同的
 // validate_st_code。运行时只展示一张成功校验卡,并在成功后强制推进到写入。
 {

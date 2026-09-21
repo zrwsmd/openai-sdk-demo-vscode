@@ -10,6 +10,7 @@ import {
   createToolBuildContext,
   TOOL_RISK_BY_NAME,
   type DiagnosticSideReporter,
+  type RuntimeToolCallGuard,
 } from "./tools/toolBuildContext";
 import { createWorkspaceReadTools } from "./tools/workspaceReadTools";
 import { createValidateStTools } from "./tools/validateStTool";
@@ -20,6 +21,7 @@ export {
   commandToolResult,
   TOOL_RISK_BY_NAME,
   type DiagnosticSideReporter,
+  type RuntimeToolCallGuard,
 };
 
 export function buildTools(
@@ -28,6 +30,7 @@ export function buildTools(
   deliveryWorkflow?: DeliveryWorkflow,
   stValidationState: StValidationState = createStValidationState(),
   diagnosticReporter?: DiagnosticSideReporter,
+  runtimeToolGuard?: RuntimeToolCallGuard,
 ) {
   const context = createToolBuildContext(
     cfg,
@@ -35,6 +38,7 @@ export function buildTools(
     deliveryWorkflow,
     stValidationState,
     diagnosticReporter,
+    runtimeToolGuard,
   );
   const workflowToolNames = deliveryWorkflow?.visibleToolNames
     ? new Set(deliveryWorkflow.visibleToolNames)

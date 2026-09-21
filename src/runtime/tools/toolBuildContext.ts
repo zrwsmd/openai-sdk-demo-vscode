@@ -63,6 +63,10 @@ export interface DiagnosticSideReport {
 }
 
 export type DiagnosticSideReporter = (report: DiagnosticSideReport) => void;
+export type RuntimeToolCallGuard = (
+  toolName: string,
+  input: unknown,
+) => string | undefined;
 
 export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
@@ -182,7 +186,11 @@ function audit(
   void Promise.resolve(cfg.audit?.(event)).catch(() => undefined);
 }
 
-function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
+function buildToolGuardrails(
+  cfg: AgentConfig,
+  policy: ToolPolicy,
+  runtimeToolGuard?: RuntimeToolCallGuard,
+) {
   const context = {
     workspaceRoot: cfg.workspaceRoot,
     workspaceRoots: cfg.workspaceRoots,
@@ -193,26 +201,33 @@ function buildToolGuardrails(cfg: AgentConfig, policy: ToolPolicy) {
     run: async ({ toolCall }) => {
       const call = toolCall as { name?: string; arguments?: string };
       const name = call.name ?? "unknown_tool";
+      const input = toolArguments(call.arguments);
       const decision = policy.evaluate(
         name,
-        toolArguments(call.arguments),
+        input,
         context,
       );
+      const runtimeReason = decision.allowed
+        ? runtimeToolGuard?.(name, input)
+        : undefined;
+      const finalDecision = runtimeReason
+        ? { ...decision, allowed: false, reason: runtimeReason }
+        : decision;
       audit(cfg, {
         type: "guardrail_evaluated",
         toolName: name,
-        risk: decision.risk,
-        decision: decision.allowed ? "allow" : "deny",
+        risk: finalDecision.risk,
+        decision: finalDecision.allowed ? "allow" : "deny",
         metadata: {
-          requiresApproval: decision.requiresApproval,
-          reason: decision.reason,
+          requiresApproval: finalDecision.requiresApproval,
+          reason: finalDecision.reason,
         },
       });
-      return decision.allowed
-        ? ToolGuardrailFunctionOutputFactory.allow(decision)
+      return finalDecision.allowed
+        ? ToolGuardrailFunctionOutputFactory.allow(finalDecision)
         : ToolGuardrailFunctionOutputFactory.rejectContent(
-            decision.reason ?? "工具调用被工控安全策略拒绝。",
-            decision,
+            finalDecision.reason ?? "工具调用被工控安全策略拒绝。",
+            finalDecision,
           );
     },
   });
@@ -225,6 +240,7 @@ export function createToolBuildContext(
   deliveryWorkflow: DeliveryWorkflow | undefined,
   stValidationState: StValidationState,
   diagnosticReporter?: DiagnosticSideReporter,
+  runtimeToolGuard?: RuntimeToolCallGuard,
 ): ToolBuildContext {
   const policy = cfg.policy ?? new DefaultToolPolicy();
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
@@ -240,7 +256,7 @@ export function createToolBuildContext(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
   );
-  const guardrails = buildToolGuardrails(cfg, policy);
+  const guardrails = buildToolGuardrails(cfg, policy, runtimeToolGuard);
   const withEffect = <T>(
     toolName: string,
     input: unknown,

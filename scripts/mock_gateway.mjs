@@ -480,6 +480,45 @@ const server = http.createServer((req, res) => {
         { name: 'write_file', args },
       ]);
     } else if (
+      userText.includes('交付后重复写入回归') &&
+      serializedMessages.includes('运行时交付工作流')
+    ) {
+      await streamStructuredText(res, model, '已校验并保存 PumpControl.st。');
+    } else if (
+      userText.includes('交付后重复写入回归') &&
+      last.role !== 'tool'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('交付后重复写入回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (
+      userText.includes('交付后重复写入回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'write_file'
+    ) {
+      const writeArgs = JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      });
+      const validateArgs = JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      });
+      endWithNamedToolCalls(res, model, [
+        { name: 'write_file', args: writeArgs },
+        { name: 'validate_st_code', args: validateArgs },
+      ]);
+    } else if (
       userText.includes('重复校验卡片回归') &&
       hasAssistantToolCall('write_file')
     ) {

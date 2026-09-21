@@ -97,6 +97,7 @@ import {
   commandToolResult,
   TOOL_RISK_BY_NAME,
   type DiagnosticSideReporter,
+  type RuntimeToolCallGuard,
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
@@ -1615,6 +1616,21 @@ export async function runAgent(
     options.deliveryContract,
     workflowState,
   );
+  let deliveryWorkflowCompleted = false;
+  let deliveryWorkflowCompletionLogged = false;
+  const deliveryWorkflowToolNames = deliveryWorkflow?.visibleToolNames
+    ? new Set(deliveryWorkflow.visibleToolNames)
+    : undefined;
+  const completedWorkflowToolRejection = (toolName: string): string | undefined => {
+    if (!deliveryWorkflow || !deliveryWorkflowCompleted) return undefined;
+    if (deliveryWorkflowToolNames && !deliveryWorkflowToolNames.has(toolName)) {
+      return undefined;
+    }
+    return `运行时交付工作流“${deliveryWorkflow.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
+  };
+  const runtimeToolGuard: RuntimeToolCallGuard | undefined = deliveryWorkflow
+    ? (toolName) => completedWorkflowToolRejection(toolName)
+    : undefined;
   const pipelineStageRuntime = new PipelineStageRuntime(deliveryWorkflow?.pipelinePlan);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
@@ -1743,6 +1759,7 @@ export async function runAgent(
       deliveryWorkflow,
       stValidationState,
       reportDiagnostics,
+      runtimeToolGuard,
     ),
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
@@ -1944,6 +1961,7 @@ export async function runAgent(
     name: string,
     result: ToolResult | undefined,
   ): void => {
+    if (deliveryWorkflowCompleted) return;
     const decision = pipelineStageRuntime.nextToolAfterResult(
       name,
       result,
@@ -1993,6 +2011,7 @@ export async function runAgent(
       const recordedResult =
         result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
       recordToolResult(name, callId, recordedResult);
+      refreshDeliveryWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);
     }
   };
@@ -2210,6 +2229,29 @@ export async function runAgent(
     ...toolResults.values(),
   ];
 
+  const deliveredWorkflowArtifacts = (): Artifact[] => {
+    if (!deliveryWorkflow) return [];
+    const artifacts: Artifact[] = [];
+    for (const call of workflowToolRecords()) {
+      if (!call.result.ok) continue;
+      const artifact = deliveryWorkflow.verifyRequiredAction(call);
+      if (artifact) artifacts.push(artifact);
+    }
+    return artifacts;
+  };
+
+  const refreshDeliveryWorkflowCompletion = (): void => {
+    if (!deliveryWorkflow || deliveryWorkflowCompleted) return;
+    if (!deliveredWorkflowArtifacts().length) return;
+    deliveryWorkflowCompleted = true;
+    if (!deliveryWorkflowCompletionLogged) {
+      deliveryWorkflowCompletionLogged = true;
+      agentLog(
+        `[workflow] ${deliveryWorkflow.title} 已完成，后续 workflow 工具调用将被阻止以避免重复执行`,
+      );
+    }
+  };
+
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
   const reviewCompletionGateDecision = async (
     finalMessage: string,
@@ -2322,6 +2364,8 @@ export async function runAgent(
   const chooseCompletionRepairTool = (
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): string | undefined => {
+    refreshDeliveryWorkflowCompletion();
+    if (deliveryWorkflowCompleted) return undefined;
     const workflowRepairTool = deliveryWorkflow?.chooseRepairTool(
       gate,
       workflowToolRecords(),
@@ -2470,8 +2514,10 @@ export async function runAgent(
   const shouldSuppressProtocolEvent = (event: AgentProtocolEvent): boolean => {
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "tool.started") {
+      const toolName = protocolPayloadString(payload, "toolName");
+      if (toolName && completedWorkflowToolRejection(toolName)) return true;
       if (pipelineStageRuntime.shouldSuppressStarted({
-        toolName: protocolPayloadString(payload, "toolName"),
+        toolName,
         args: protocolPayloadString(payload, "args") ??
           protocolPayloadString(payload, "arguments") ??
           "",
@@ -2496,6 +2542,12 @@ export async function runAgent(
     if (event.type === "approval.requested") {
       const approvalId = protocolPayloadString(payload, "approvalId");
       const callId = protocolPayloadString(payload, "callId");
+      const toolName = protocolPayloadString(payload, "toolName");
+      if (toolName && completedWorkflowToolRejection(toolName)) {
+        if (approvalId) suppressedApprovalIds.add(approvalId);
+        if (callId) suppressedEffectCallIds.add(callId);
+        return true;
+      }
       const duplicateKey = protocolToolDuplicateKey(payload);
       if (!duplicateKey || !approvalId) return false;
       if (callId && suppressedEffectCallIds.has(callId)) {
@@ -2517,6 +2569,8 @@ export async function runAgent(
     }
     if (event.type === "tool.completed") {
       const callId = protocolPayloadString(payload, "callId");
+      const toolName = protocolPayloadString(payload, "toolName");
+      if (toolName && completedWorkflowToolRejection(toolName)) return true;
       if (pipelineStageRuntime.shouldSuppressCompleted(callId)) return true;
       if (callId && suppressedEffectCallIds.has(callId)) return true;
       if (callId) {
@@ -2719,6 +2773,14 @@ export async function runAgent(
       // has the original tool arguments.
       recordToolCall(request.name, request.id, request.args);
       toolNameByCallId.set(request.id, request.name);
+      const completedWorkflowRejection = completedWorkflowToolRejection(request.name);
+      if (completedWorkflowRejection) {
+        state.reject(item, { message: completedWorkflowRejection });
+        agentLog(
+          `[workflow] 已拒绝交付完成后的重复工具调用: ${request.name}`,
+        );
+        continue;
+      }
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
       if (decision === undefined) decision = decisionByKey.get(duplicateKey);
@@ -2760,6 +2822,7 @@ export async function runAgent(
       stValidationState.hashes.add(hash);
     }
     deliveryWorkflow?.hydrate(historicalToolResults);
+    refreshDeliveryWorkflowCompletion();
   }
 
   // Approval checkpoints are first-class results. The host persists the
