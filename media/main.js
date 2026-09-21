@@ -38,6 +38,9 @@ const anonymousToolRuns = new Map();
 const workflowViews = new Map();
 const workflowApprovals = new Map();
 const thinkingViews = new Map();
+const activeThinkingSegments = new Map();
+const thinkingItemSegments = new Map();
+const thinkingSegmentCounters = new Map();
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -117,7 +120,7 @@ function beginUserTurn(text, runId, reusePendingLocal = false) {
   const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
   if (!reuseExisting) addMessage('user', displayText);
   currentRunId = runId || null;
-  if (currentRunId) thinkingViews.delete(currentRunId);
+  if (currentRunId) resetThinkingTracking(currentRunId);
   agentText = '';
   pendingAgentText = '';
   pendingFinalText = null;
@@ -160,10 +163,57 @@ function setShowThinking(value) {
   showThinking = value !== false;
   if (showThinking) return;
   for (const view of thinkingViews.values()) view.el.remove();
-  thinkingViews.clear();
+  clearThinkingState();
 }
 
-function createThinkingView(runId) {
+function clearThinkingState() {
+  thinkingViews.clear();
+  activeThinkingSegments.clear();
+  thinkingItemSegments.clear();
+  thinkingSegmentCounters.clear();
+}
+
+function resetThinkingTracking(runId) {
+  if (!runId) return;
+  activeThinkingSegments.delete(runId);
+  thinkingSegmentCounters.delete(runId);
+  for (const key of [...thinkingItemSegments.keys()]) {
+    if (key.startsWith(`${runId}:`)) thinkingItemSegments.delete(key);
+  }
+}
+
+function closeThinkingSegment(runId) {
+  if (!runId) return;
+  activeThinkingSegments.delete(runId);
+}
+
+function nextThinkingSegmentKey(runId) {
+  const count = (thinkingSegmentCounters.get(runId) || 0) + 1;
+  thinkingSegmentCounters.set(runId, count);
+  return `${runId}:segment:${count}`;
+}
+
+function thinkingSegmentKey(event, payload) {
+  const runId = event.runId || currentRunId || 'standalone';
+  const itemId = typeof payload.itemId === 'string' && payload.itemId.trim()
+    ? payload.itemId.trim()
+    : '';
+  if (itemId) {
+    const itemKey = `${runId}:item:${itemId}`;
+    const existing = thinkingItemSegments.get(itemKey);
+    if (existing) return existing;
+    const segmentKey = `${runId}:reasoning:${itemId}`;
+    thinkingItemSegments.set(itemKey, segmentKey);
+    return segmentKey;
+  }
+  const active = activeThinkingSegments.get(runId);
+  if (active) return active;
+  const segmentKey = nextThinkingSegmentKey(runId);
+  activeThinkingSegments.set(runId, segmentKey);
+  return segmentKey;
+}
+
+function createThinkingView(key, runId) {
   const details = document.createElement('details');
   details.className = 'thinking-card';
   const summary = document.createElement('summary');
@@ -172,8 +222,8 @@ function createThinkingView(runId) {
   body.className = 'thinking-body hidden';
   details.append(summary, body);
   messagesEl.appendChild(details);
-  const view = { el: details, body, text: '' };
-  thinkingViews.set(runId, view);
+  const view = { el: details, body, text: '', runId, key };
+  thinkingViews.set(key, view);
   scrollBottom();
   return view;
 }
@@ -181,8 +231,9 @@ function createThinkingView(runId) {
 function addThinkingUpdate(event) {
   if (!showThinking) return;
   const payload = event.payload || {};
-  const runId = event.runId || currentRunId || `thinking-${thinkingViews.size + 1}`;
-  const view = thinkingViews.get(runId) || createThinkingView(runId);
+  const runId = event.runId || currentRunId || 'standalone';
+  const key = thinkingSegmentKey(event, payload);
+  const view = thinkingViews.get(key) || createThinkingView(key, runId);
   const fullText = typeof payload.text === 'string' ? payload.text : '';
   const textDelta = typeof payload.textDelta === 'string' ? payload.textDelta : '';
   const summary = typeof payload.summary === 'string' ? payload.summary : '';
@@ -198,6 +249,9 @@ function addThinkingUpdate(event) {
     view.text = payload.status === 'completed' ? summary : view.text + summary;
     view.body.textContent = view.text;
     view.body.classList.remove('hidden');
+  }
+  if (payload.status === 'completed' || payload.status === 'incomplete') {
+    closeThinkingSegment(runId);
   }
   scrollBottom();
 }
@@ -1080,6 +1134,7 @@ function handleProtocolEvent(event) {
     case 'tool.started': {
       const name = payload.toolName || 'tool';
       if (name === 'report_plan_progress') break;
+      closeThinkingSegment(event.runId || currentRunId);
       rememberToolRun(name, payload);
       updateWorkflowStage(event.runId, name, 'running');
       addNote('tool-note', startToolHeadline(name, payload.arguments));
@@ -1108,6 +1163,7 @@ function handleProtocolEvent(event) {
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
+      closeThinkingSegment(event.runId || currentRunId);
       break;
     }
     case 'run.completed': {
@@ -1131,17 +1187,21 @@ function handleProtocolEvent(event) {
           addNote('tool-note', `已生成 ${artifacts.length} 个产物${names ? `：${names}` : ''}`);
         }
       }
+      closeThinkingSegment(event.runId || currentRunId);
       break;
     }
     case 'run.failed':
       // The host error control message owns the detailed error bubble.
       finishWorkflowView(event.runId, 'failed');
+      closeThinkingSegment(event.runId || currentRunId);
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
       finishWorkflowView(event.runId, 'cancelled');
+      closeThinkingSegment(event.runId || currentRunId);
       break;
     case 'approval.requested':
+      closeThinkingSegment(event.runId || currentRunId);
       if (payload.approvalId && payload.toolName) {
         addApprovalCard(event.runId || currentRunId, {
           id: payload.approvalId,
@@ -1165,7 +1225,13 @@ function handleProtocolEvent(event) {
     case 'run.started':
       toolRuns.clear();
       anonymousToolRuns.clear();
+      resetThinkingTracking(event.runId || currentRunId);
       if (payload.workflow) createWorkflowStageView(event.runId, payload.workflow);
+      break;
+    case 'model.event':
+      if (payload.status === 'completed' || payload.status === 'incomplete' || payload.status === 'failed') {
+        closeThinkingSegment(event.runId || currentRunId);
+      }
       break;
     case 'run.progress':
       if (payload.stage === 'diagnostics.report' && payload.report) {
@@ -1371,7 +1437,7 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       workflowViews.clear();
       workflowApprovals.clear();
-      thinkingViews.clear();
+      clearThinkingState();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1396,7 +1462,7 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       workflowViews.clear();
       workflowApprovals.clear();
-      thinkingViews.clear();
+      clearThinkingState();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
