@@ -340,27 +340,49 @@ async function loadHistoricalToolResults(
   return records;
 }
 
-const SYSTEM_PROMPT =
+const BASE_AGENT_PROMPT =
   "你是工控行业的 PLC 编程助手，精通 IEC 61131-3。" +
-  "编写程序前先调用 get_io_table 查询变量表，只使用表中已有的变量名。" +
-  "生成 ST 代码后必须调用 validate_st_code 校验；如有错误要自行修正后重新校验，" +
-  "直到工具回执显示 errorCount=0 为止(warning 不阻断交付,但要在最终答复里说明)," +
-    "最后把通过校验的代码展示给用户。" +
-  '用户要求生成代码时，默认按运行时交付契约调用 write_file 把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
-  '当前工作区落盘使用 write_file，不要把 export_st_program 当成当前工作区保存的替代。' +
-  "你还可以操作当前打开的工作区：用 list_files 看目录、read_file 读文件、" +
-  "search_files 搜索代码、write_file 写文件、run_command 执行命令" +
-  "（write_file 和 run_command 会先征求用户批准）。" +
-  "当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；" +
-  "只有收到工具成功回执后，才能在最终结果中报告写入完成。" +
+  "你必须只依据用户请求、上下文和真实工具回执工作，不得声称未完成的动作已经完成。" +
+  "只能调用当前可用工具列表中的工具；不要调用未列出的工具名。" +
   "任何工具执行完成后，无论成功还是失败，都必须用一两句中文向用户确认执行结果，" +
   "不允许调用完工具不给结论就结束。回答要简洁，用中文。";
+
+const GENERAL_WORKSPACE_PROMPT =
+  "\n\n普通任务工具使用规则：" +
+  "如果当前可用工具列表中包含 get_io_table，且你需要依据真实 I/O 表编写 PLC 程序，可以先调用它查询变量表；" +
+  "如果用户明确允许模拟变量，或该工具不可用，不要为了查询 I/O 表阻塞。" +
+  "生成或修改 ST 代码时，如果 validate_st_code 可用，必须校验；如有错误要自行修正后重新校验，直到工具回执显示 errorCount=0 为止。" +
+  "warning 不阻断交付，但要在最终答复里说明。" +
+  '用户要求生成代码时，默认把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
+  "当前工作区落盘时，如果 write_file 可用，必须调用 write_file；不要只用文字声称已经写入。" +
+  "需要查看目录、读文件、搜索代码或执行命令时，只能在对应工具出现在当前可用工具列表时调用。" +
+  "当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；" +
+  "只有收到工具成功回执后，才能在最终结果中报告写入完成。";
+
+const WORKFLOW_EXECUTION_PROMPT =
+  "\n\n当前请求由运行时 workflow 接管。必须严格按照 workflow 阶段、交付契约和工具回执执行。" +
+  "当前可用工具列表是唯一可调用工具集合；不要调用列表之外的工具，也不要用旧流程假设补工具。" +
+  "如果缺少资料查询工具，基于用户请求、上下文和用户允许的模拟变量继续完成；确实无法继续时如实说明阻塞原因。";
 
 const GENERIC_PLAN_SYSTEM_PROMPT =
   "你是通用任务执行助手，处理用户提出的文件、代码、命令、数据、PLC 或其他可用工具任务。" +
   "只在用户目标需要时调用相应工具，不要臆造额外领域步骤。" +
   "写文件、运行命令和设备写入必须经过现有审批、策略与审计约束；工具失败时如实处理。" +
   "最终答复必须基于真实工具回执和计划步骤结果，不得声称未完成的动作已经完成。";
+
+function toolNameOf(item: unknown): string | undefined {
+  const name = (item as { name?: unknown }).name;
+  return typeof name === "string" && name.length > 0 ? name : undefined;
+}
+
+function renderAvailableToolsPrompt(toolNames: readonly string[]): string {
+  if (toolNames.length === 0) {
+    return "\n\n当前没有可调用工具。不要尝试调用任何工具，只能用文字回答或说明阻塞原因。";
+  }
+  return "\n\n当前可用工具仅限以下列表：\n" +
+    toolNames.map((name) => `- ${name}`).join("\n") +
+    "\n只能调用上面列出的工具；不要调用未列出的工具名。";
+}
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
@@ -1724,16 +1746,19 @@ export async function runAgent(
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
   ].filter((item) => {
     if (!options.allowedToolNames) return true;
-    const name = (item as unknown as { name?: unknown }).name;
+    const name = toolNameOf(item);
     return typeof name === "string" && options.allowedToolNames.includes(name);
   });
-  const availableToolNames = new Set(
-    tools
-      .map((item) => (item as unknown as { name?: unknown }).name)
-      .filter((name): name is string => typeof name === "string" && name.length > 0),
-  );
+  const availableToolNameList = tools
+    .map(toolNameOf)
+    .filter((name): name is string => typeof name === "string");
+  const availableToolNames = new Set(availableToolNameList);
+  const availableToolsPrompt = renderAvailableToolsPrompt(availableToolNameList);
   const executionInstructions = activePlan
-    ? GENERIC_PLAN_SYSTEM_PROMPT +
+    ? BASE_AGENT_PROMPT +
+      availableToolsPrompt +
+      "\n\n" +
+      GENERIC_PLAN_SYSTEM_PROMPT +
       "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种 PLC/ST 场景；以计划目标和用户原始要求为准。" +
       "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
       "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
@@ -1742,11 +1767,16 @@ export async function runAgent(
       "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
       renderTaskPlan(activePlan)
     : options.teamTask
-      ? GENERIC_PLAN_SYSTEM_PROMPT +
+      ? BASE_AGENT_PROMPT +
+        availableToolsPrompt +
+        "\n\n" +
+        GENERIC_PLAN_SYSTEM_PROMPT +
         "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
         "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
         "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
-      : SYSTEM_PROMPT;
+      : deliveryWorkflow
+        ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
+        : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT;
   const deliveryInstructions = options.deliveryContract?.requiresDeliverable
     ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
       renderDeliveryContract(options.deliveryContract) +

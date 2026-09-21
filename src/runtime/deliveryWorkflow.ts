@@ -156,10 +156,11 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   instructions(): string {
     return "\n本轮 .st 工作区交付由运行时按固定流水线执行：" +
       "先调用 validate_st_code 的 code 参数校验完整内存草稿；" +
+      "code 必须是完整 ST 源码，不要传文件路径、工具错误回执、JSON 包装或摘要。" +
       "校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。" +
       "校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，" +
       "且 content 必须与刚通过校验的源码完全一致。" +
-      "不要调用 path 校验、read_file、export_st_program 或 run_command，不要并行调用工具。";
+      "不要并行调用工具，也不要调用当前 workflow 未暴露的工具。";
   }
 
   recordSuccessfulValidation(content: string, hash: string): void {
