@@ -873,11 +873,11 @@ export class AgentDecisionService {
       : '';
     this.log(
       `[jev] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
-      `${usage} delivery=${hint.delivery}(${hint.deliveryConfidence.toFixed(2)})` +
-      ` orchestration=${hint.orchestration}(${hint.orchestrationConfidence.toFixed(2)})` +
-      ` workflow=${hint.workflow}(${hint.workflowConfidence.toFixed(2)})` +
+      `${usage} delivery=${this.formatDecisionLabel(hint.delivery)}(conf=${hint.deliveryConfidence.toFixed(2)})` +
+      ` orchestration=${this.formatDecisionLabel(hint.orchestration)}(conf=${hint.orchestrationConfidence.toFixed(2)})` +
+      ` workflow=${this.formatDecisionLabel(hint.workflow)}(conf=${hint.workflowConfidence.toFixed(2)})` +
       ` tools=${this.formatToolNeeds(hint.toolNeeds)}` +
-      ` risk=${hint.riskLevel}(${hint.riskConfidence.toFixed(2)})` +
+      ` risk=${this.formatDecisionLabel(hint.riskLevel)}(conf=${hint.riskConfidence.toFixed(2)})` +
       ` approval=${this.formatBinary(hint.needsApproval)}`,
     );
   }
@@ -903,7 +903,7 @@ export class AgentDecisionService {
       `[jev:completion] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
       `${usage} complete=${this.formatBinary(hint.looksComplete)}` +
       ` missingDeliverable=${this.formatBinary(hint.missingDeliverable)}` +
-      ` next=${hint.nextAction}(${hint.nextActionConfidence.toFixed(2)})`,
+      ` next=${this.formatDecisionLabel(hint.nextAction)}(conf=${hint.nextActionConfidence.toFixed(2)})`,
     );
   }
 
@@ -926,7 +926,7 @@ export class AgentDecisionService {
       : '';
     this.log(
       `[jev:diagnostic] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
-      `${usage} action=${hint.action}(${hint.actionConfidence.toFixed(2)})`,
+      `${usage} action=${this.formatDecisionLabel(hint.action)}(conf=${hint.actionConfidence.toFixed(2)})`,
     );
   }
 
@@ -940,10 +940,15 @@ export class AgentDecisionService {
   }
 
   private formatBinary(value: BinaryDecisionHint): string {
+    const label = this.formatDecisionLabel(value.value);
     const probability = typeof value.probability === 'number'
-      ? value.probability.toFixed(2)
-      : value.confidence.toFixed(2);
-    return `${value.value}(${probability})`;
+      ? `p=${value.probability.toFixed(2)},`
+      : '';
+    return `${label}(${probability}conf=${value.confidence.toFixed(2)})`;
+  }
+
+  private formatDecisionLabel(value: string): string {
+    return value === 'unknown' ? 'uncertain' : value;
   }
 }
 
