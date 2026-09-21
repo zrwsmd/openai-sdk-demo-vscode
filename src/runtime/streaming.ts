@@ -119,8 +119,9 @@ export class AgentStreamAdapter {
       this.emit('reasoning.updated', 'model', {
         itemId: itemIdOf(raw),
         status: 'in_progress',
+        textDelta: reasoningText,
         characterCount: reasoningText.length,
-        redacted: true,
+        redacted: false,
       });
       return '';
     }
@@ -166,8 +167,9 @@ export class AgentStreamAdapter {
       this.emit('reasoning.updated', 'model', {
         itemId: itemIdOf(raw),
         status: type.endsWith('.done') ? 'completed' : 'in_progress',
+        ...(type.endsWith('.done') ? { text } : { textDelta: text }),
         characterCount: text.length,
-        redacted: true,
+        redacted: false,
       });
       return '';
     }

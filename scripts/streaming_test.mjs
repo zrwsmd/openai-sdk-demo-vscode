@@ -205,8 +205,8 @@ const extendedResult = await extendedAdapter.consume(extendedStream);
 assert.equal(extendedResult.output, '');
 for (const event of extended) parseAgentEvent(event);
 assert.equal(extended.some((event) => event.type === 'reasoning.updated'
-  && event.payload.redacted === true
-  && event.payload.summary === undefined), true);
+  && event.payload.redacted === false
+  && event.payload.textDelta === 'hidden reasoning'), true);
 assert.equal(extended.some((event) => event.type === 'reasoning.updated'
   && event.payload.summary === '检查安全约束'
   && event.payload.redacted === false), true);

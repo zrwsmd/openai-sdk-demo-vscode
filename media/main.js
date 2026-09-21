@@ -31,11 +31,13 @@ let pendingLocalUserText = null;
 let awaitingRunAck = false;
 let stopRequestedBeforeRunAck = false;
 let activeSessionId = null;
+let showThinking = true;
 let knownSessions = [];
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 const workflowViews = new Map();
 const workflowApprovals = new Map();
+const thinkingViews = new Map();
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -115,6 +117,7 @@ function beginUserTurn(text, runId, reusePendingLocal = false) {
   const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
   if (!reuseExisting) addMessage('user', displayText);
   currentRunId = runId || null;
+  if (currentRunId) thinkingViews.delete(currentRunId);
   agentText = '';
   pendingAgentText = '';
   pendingFinalText = null;
@@ -151,6 +154,52 @@ function addNote(className, text) {
   messagesEl.appendChild(el);
   scrollBottom();
   return el;
+}
+
+function setShowThinking(value) {
+  showThinking = value !== false;
+  if (showThinking) return;
+  for (const view of thinkingViews.values()) view.el.remove();
+  thinkingViews.clear();
+}
+
+function createThinkingView(runId) {
+  const details = document.createElement('details');
+  details.className = 'thinking-card';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Thinking >';
+  const body = document.createElement('div');
+  body.className = 'thinking-body hidden';
+  details.append(summary, body);
+  messagesEl.appendChild(details);
+  const view = { el: details, body, text: '' };
+  thinkingViews.set(runId, view);
+  scrollBottom();
+  return view;
+}
+
+function addThinkingUpdate(event) {
+  if (!showThinking) return;
+  const payload = event.payload || {};
+  const runId = event.runId || currentRunId || `thinking-${thinkingViews.size + 1}`;
+  const view = thinkingViews.get(runId) || createThinkingView(runId);
+  const fullText = typeof payload.text === 'string' ? payload.text : '';
+  const textDelta = typeof payload.textDelta === 'string' ? payload.textDelta : '';
+  const summary = typeof payload.summary === 'string' ? payload.summary : '';
+  if (fullText) {
+    view.text = fullText;
+    view.body.textContent = view.text;
+    view.body.classList.remove('hidden');
+  } else if (textDelta) {
+    view.text += textDelta;
+    view.body.textContent = view.text;
+    view.body.classList.remove('hidden');
+  } else if (summary.trim()) {
+    view.text = payload.status === 'completed' ? summary : view.text + summary;
+    view.body.textContent = view.text;
+    view.body.classList.remove('hidden');
+  }
+  scrollBottom();
 }
 
 function parseJsonValue(value) {
@@ -1109,9 +1158,9 @@ function handleProtocolEvent(event) {
       );
       break;
     case 'usage.updated':
+      break;
     case 'reasoning.updated':
-      // Reasoning is not a user-facing execution fact. Show tool calls,
-      // file/command targets and results instead.
+      addThinkingUpdate(event);
       break;
     case 'run.started':
       toolRuns.clear();
@@ -1322,6 +1371,7 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       workflowViews.clear();
       workflowApprovals.clear();
+      thinkingViews.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1346,6 +1396,7 @@ window.addEventListener('message', (event) => {
       messagesEl.textContent = '';
       workflowViews.clear();
       workflowApprovals.clear();
+      thinkingViews.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1511,6 +1562,7 @@ window.addEventListener('message', (event) => {
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
       updateModelChip(msg.model);
+      setShowThinking(msg.showThinking !== false);
       break;
     case 'settingsError':
       settingsSavePending = false;

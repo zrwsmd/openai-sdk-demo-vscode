@@ -258,6 +258,8 @@ const reasoningUpdated = eventBase.extend({
     itemId: z.string().optional(),
     status: z.enum(['in_progress', 'completed', 'incomplete']),
     summary: z.string().optional(),
+    textDelta: z.string().optional(),
+    text: z.string().optional(),
     characterCount: z.number().int().nonnegative(),
     /** True when the payload intentionally omits hidden reasoning content. */
     redacted: z.boolean(),

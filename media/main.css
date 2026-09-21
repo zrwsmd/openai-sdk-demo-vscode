@@ -140,6 +140,32 @@ body { display: flex; flex-direction: column; }
 }
 .tool-note::before { content: '⚙ '; }
 
+.thinking-card {
+  margin: 4px 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.thinking-card summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  color: var(--fg);
+  opacity: 0.9;
+}
+.thinking-card summary::-webkit-details-marker { display: none; }
+.thinking-card summary::marker { content: ''; }
+.thinking-body {
+  margin-top: 5px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  white-space: pre-wrap;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .tool-result {
   display: flex;
   align-items: flex-start;

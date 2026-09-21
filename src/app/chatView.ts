@@ -61,6 +61,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
+    this.context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('plcAgent.ui.showThinking')) {
+        void this.sendSettingsToWebview();
+      }
+    }));
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -199,6 +204,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
+    const showThinking = cfg.get<boolean>('ui.showThinking') ?? true;
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -292,6 +298,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
+      showThinking,
       savedInPlugin: !!storedProfile || useLegacyProfile || !!formatKeyValue,
     };
   }
@@ -310,6 +317,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         provider: cfg.provider,
         apiFormat: cfg.apiFormat,
         hasKey: !!cfg.apiKey,
+        showThinking: cfg.showThinking !== false,
         source: cfg.savedInPlugin ? 'plugin' : 'other',
         ...(requestId === undefined ? {} : { requestId }),
       });

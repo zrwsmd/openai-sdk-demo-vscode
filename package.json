@@ -141,6 +141,11 @@
           "default": false,
           "description": "干运行模式：禁止写文件、执行命令和设备写入等副作用操作"
         },
+        "plcAgent.ui.showThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "在聊天界面显示可折叠的 Thinking 块；只展示公开推理摘要，不展示隐藏推理原文"
+        },
         "plcAgent.stAnalyzer.enabled": {
           "type": "boolean",
           "default": true,
