@@ -104,6 +104,7 @@ const DEFAULT_JEV_TIMEOUT_MS = 3_000;
 const DEFAULT_JEV_MAX_RETRIES = 1;
 const DEFAULT_JEV_MIN_CONFIDENCE = 0.78;
 const TASK_CACHE_TTL_MS = 15_000;
+const TASK_CACHE_MAX_ENTRIES = 128;
 
 function asFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -806,6 +807,7 @@ export class AgentDecisionService {
     const cacheKey = `${key}|${userText}`;
     const cached = this.taskCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.promise;
+    if (cached) this.taskCache.delete(cacheKey);
     const promise = provider.evaluate({
       state: { request: userText },
       questions: TASK_QUESTIONS,
@@ -813,13 +815,30 @@ export class AgentDecisionService {
     }).then((evaluation) => {
       const hint = buildTaskHint(evaluation, normalized.minConfidence);
       this.logResult(hint);
+      if (evaluation.status !== 'ok') this.taskCache.delete(cacheKey);
       return hint;
+    }).catch((error) => {
+      this.taskCache.delete(cacheKey);
+      throw error;
     });
+    this.pruneTaskCache();
     this.taskCache.set(cacheKey, {
       expiresAt: Date.now() + TASK_CACHE_TTL_MS,
       promise,
     });
     return promise;
+  }
+
+  private pruneTaskCache(): void {
+    const now = Date.now();
+    for (const [key, cached] of this.taskCache) {
+      if (cached.expiresAt <= now) this.taskCache.delete(key);
+    }
+    while (this.taskCache.size >= TASK_CACHE_MAX_ENTRIES) {
+      const oldest = this.taskCache.keys().next().value;
+      if (typeof oldest !== 'string') break;
+      this.taskCache.delete(oldest);
+    }
   }
 
   async completionGateHint(

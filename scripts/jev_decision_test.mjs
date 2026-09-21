@@ -191,5 +191,40 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+let flakyCalls = 0;
+globalThis.fetch = async () => {
+  flakyCalls += 1;
+  if (flakyCalls === 1) {
+    return response({ error: { message: 'temporary failure' } }, 500);
+  }
+  return response({
+    model: 'jev-test',
+    answers: {
+      delivery: { type: 'noul', noul: 0.04 },
+      orchestration: {
+        type: 'choice',
+        choice: 'single',
+        probabilities: { single: 0.91, team: 0.09 },
+        confidence: 0.86,
+      },
+    },
+    usage: { input_tokens: 3, output_tokens: 2 },
+  });
+};
+try {
+  const service = new AgentDecisionService();
+  const settings = { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 };
+  const first = await service.taskHint(settings, '同一句失败后重试');
+  const second = await service.taskHint(settings, '同一句失败后重试');
+  if (flakyCalls !== 2) {
+    throw new Error(`failed Jev task hint should not be cached, got ${flakyCalls} calls`);
+  }
+  if (first.evaluation.status !== 'failed' || second.evaluation.status !== 'ok') {
+    throw new Error('Jev failed task hint retry did not recover');
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 if (calls !== 1) throw new Error(`expected one provider call, got ${calls}`);
 console.log('jev decision tests passed');
