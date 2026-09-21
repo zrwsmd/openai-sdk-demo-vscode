@@ -352,17 +352,95 @@ export class JevDecisionProvider {
   }
 }
 
-interface CachedTaskDecision {
-  expiresAt: number;
-  promise: Promise<TaskDecisionHint>;
-}
-
 export interface TaskDecisionHint {
   delivery: 'required' | 'not_required' | 'unknown';
   deliveryConfidence: number;
   orchestration: 'single' | 'team' | 'unknown';
   orchestrationConfidence: number;
+  workflow: AgentWorkflowRoute;
+  workflowConfidence: number;
+  toolNeeds: ToolNeedDecisionHint;
+  riskLevel: AgentRiskLevel;
+  riskConfidence: number;
+  needsApproval: BinaryDecisionHint;
   evaluation: JevEvaluation;
+}
+
+export type BinaryDecisionValue = 'yes' | 'no' | 'unknown';
+
+export interface BinaryDecisionHint {
+  value: BinaryDecisionValue;
+  probability?: number;
+  confidence: number;
+}
+
+export type AgentWorkflowRoute =
+  | 'st_delivery'
+  | 'st_inspection'
+  | 'file_read'
+  | 'file_edit'
+  | 'general_chat'
+  | 'team_candidate'
+  | 'unknown';
+
+export interface ToolNeedDecisionHint {
+  readFile: BinaryDecisionHint;
+  writeFile: BinaryDecisionHint;
+  validateStCode: BinaryDecisionHint;
+  runCommand: BinaryDecisionHint;
+}
+
+export type AgentRiskLevel = 'low' | 'medium' | 'high' | 'critical' | 'unknown';
+
+export type CompletionGateAction =
+  | 'pass'
+  | 'retry'
+  | 'revise'
+  | 'stop'
+  | 'escalate'
+  | 'unknown';
+
+export interface CompletionGateDecisionInput {
+  userText: string;
+  finalMessage: string;
+  rulePassed: boolean;
+  deliveryRequired: boolean;
+  issueSummaries: string[];
+  toolSummaries: string[];
+  artifactSummaries: string[];
+}
+
+export interface CompletionGateDecisionHint {
+  looksComplete: BinaryDecisionHint;
+  missingDeliverable: BinaryDecisionHint;
+  nextAction: CompletionGateAction;
+  nextActionConfidence: number;
+  evaluation: JevEvaluation;
+}
+
+export type DiagnosticRecoveryAction =
+  | 'retry'
+  | 'revise'
+  | 'stop'
+  | 'escalate'
+  | 'unknown';
+
+export interface DiagnosticRecoveryDecisionInput {
+  userText: string;
+  failureReason: string;
+  issues: string[];
+  repairInstruction?: string;
+}
+
+export interface DiagnosticRecoveryDecisionHint {
+  action: DiagnosticRecoveryAction;
+  actionConfidence: number;
+  evaluation: JevEvaluation;
+}
+
+interface CachedTaskDecision {
+  expiresAt: number;
+  promise: Promise<TaskDecisionHint>;
 }
 
 const TASK_QUESTIONS: Record<string, JevQuestion> = {
@@ -383,16 +461,174 @@ const TASK_QUESTIONS: Record<string, JevQuestion> = {
       team: 'The request has genuinely independent planning, review, execution, and verification responsibilities, or a high-risk multi-step change where those roles should be separated.',
     },
   },
+  workflow: {
+    type: 'choice',
+    instructions: 'Which main product workflow should own this request?',
+    criteria: {
+      st_delivery:
+        'Generate, modify, repair, validate, save, export, compile, upload, or otherwise deliver IEC 61131-3 ST/PLC code or a PLC program artifact.',
+      st_inspection:
+        'Read, inspect, explain, or diagnose existing ST/PLC code without being asked to save or deliver a new artifact.',
+      file_read:
+        'Read, list, search, or summarize workspace files without modifying them.',
+      file_edit:
+        'Create, modify, save, or export workspace files that are not primarily an ST/PLC delivery workflow.',
+      general_chat:
+        'Answer a normal question, explain a concept, or provide status with no tool workflow required.',
+      team_candidate:
+        'The request appears broad or high-risk enough that a planner/reviewer/executor/verifier split may be useful.',
+    },
+  },
+  needs_read_file: {
+    type: 'noul',
+    instructions: 'Does satisfying the request likely require reading workspace files?',
+    criteria: {
+      true: 'The user asks to read, inspect, verify, compare, search, or continue work based on existing files or logs.',
+      false: 'The answer can be produced from the user message and conversation context without opening workspace files.',
+    },
+  },
+  needs_write_file: {
+    type: 'noul',
+    instructions: 'Does satisfying the request likely require writing, saving, exporting, or modifying a file?',
+    criteria: {
+      true: 'The user asks to create, update, save, export, generate a file, or persist a deliverable in the workspace.',
+      false: 'The user only asks for information, explanation, status, or read-only inspection.',
+    },
+  },
+  needs_validate_st_code: {
+    type: 'noul',
+    instructions: 'Does the request likely require validating ST code before it can be considered complete?',
+    criteria: {
+      true: 'The user asks for ST/PLC program generation, modification, repair, export, compile preparation, or delivery.',
+      false: 'The request is unrelated to ST code validation or only asks a general question/read-only status.',
+    },
+  },
+  needs_run_command: {
+    type: 'noul',
+    instructions: 'Does the request likely require running a local command or process?',
+    criteria: {
+      true: 'The user asks to compile, test, execute, install, inspect command output, or run a CLI/toolchain command.',
+      false: 'No local process execution is needed to satisfy the request.',
+    },
+  },
+  needs_approval: {
+    type: 'noul',
+    instructions: 'Would the likely next workflow need explicit user approval before a side effect?',
+    criteria: {
+      true: 'The likely next step writes files, runs commands, touches devices, uploads to PLC, or performs another side effect.',
+      false: 'The likely next step is read-only or conversational.',
+    },
+  },
+  risk_level: {
+    type: 'choice',
+    instructions: 'What is the highest likely operational risk level of the requested workflow?',
+    criteria: {
+      low: 'Conversational or read-only; no filesystem, process, or device side effect.',
+      medium: 'Workspace file writes or generated artifacts, but no process execution or device interaction.',
+      high: 'Runs commands, compiles, installs, or performs non-device side effects with possible local environment impact.',
+      critical: 'Uploads to PLC, changes device/runtime state, deploys binaries, or affects industrial equipment.',
+    },
+  },
 };
+
+const COMPLETION_GATE_QUESTIONS: Record<string, JevQuestion> = {
+  looks_complete: {
+    type: 'noul',
+    instructions:
+      'Given the user request, final message, tool evidence, and rule-gate result, does the turn appear genuinely complete?',
+    criteria: {
+      true: 'The final answer is supported by successful tool evidence or clearly reports a real blocking reason.',
+      false: 'The answer claims success without evidence, skips a required deliverable/verification, or leaves a recoverable failure unresolved.',
+    },
+  },
+  missing_deliverable: {
+    type: 'noul',
+    instructions: 'Is a required deliverable or verification still missing?',
+    criteria: {
+      true: 'The user asked for a concrete result but the evidence lacks the file/artifact/tool verification needed to prove completion.',
+      false: 'No deliverable was required, or required deliverables and verifications are evidenced.',
+    },
+  },
+  next_action: {
+    type: 'choice',
+    instructions: 'What should the agent do next?',
+    criteria: {
+      pass: 'Accept completion; no further action is needed.',
+      retry: 'Retry the same tool or workflow step because the failure may be transient or missing a repeated check.',
+      revise: 'Modify generated content, arguments, file path, or workflow state, then rerun the relevant check/tool.',
+      stop: 'Stop and report a concrete unrecoverable reason to the user.',
+      escalate: 'Ask the user or require human/approval input before continuing.',
+    },
+  },
+};
+
+const DIAGNOSTIC_RECOVERY_QUESTIONS: Record<string, JevQuestion> = {
+  repair_action: {
+    type: 'choice',
+    instructions:
+      'Choose the best recovery strategy for the compressed diagnostic/failure packet.',
+    criteria: {
+      retry:
+        'Retry the same operation unchanged; the problem is likely transient or caused by incomplete tool observation.',
+      revise:
+        'Make the smallest content/argument/workflow change that addresses the diagnostic, then validate again.',
+      stop:
+        'Stop because the request is impossible or blocked by an unrecoverable condition that should be reported.',
+      escalate:
+        'Escalate to the user or a higher-risk approval path because more information, permission, or human judgment is required.',
+    },
+  },
+};
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
 
 function answerConfidence(answer: JevAnswer | undefined): number {
   if (typeof answer?.confidence === 'number' && Number.isFinite(answer.confidence)) {
-    return Math.max(0, Math.min(1, answer.confidence));
+    return clamp01(answer.confidence);
   }
   if (answer?.type === 'choice' && answer.choice && answer.probabilities) {
-    return Math.max(0, Math.min(1, answer.probabilities[answer.choice] ?? 0));
+    return clamp01(answer.probabilities[answer.choice] ?? 0);
   }
   return 0;
+}
+
+function binaryDecision(
+  answer: JevAnswer | undefined,
+  minConfidence: number,
+): BinaryDecisionHint {
+  if (answer?.type !== 'noul' || typeof answer.noul !== 'number' || !Number.isFinite(answer.noul)) {
+    return { value: 'unknown', confidence: 0 };
+  }
+  const probability = clamp01(answer.noul);
+  const confidence = clamp01(Math.abs(probability - 0.5) * 2);
+  return {
+    value: probability >= minConfidence
+      ? 'yes'
+      : probability <= 1 - minConfidence
+        ? 'no'
+        : 'unknown',
+    probability,
+    confidence,
+  };
+}
+
+function choiceDecision<T extends string>(
+  answer: JevAnswer | undefined,
+  choices: readonly T[],
+  minConfidence: number,
+): { value: T | 'unknown'; confidence: number } {
+  const confidence = answerConfidence(answer);
+  if (
+    answer?.type === 'choice' &&
+    typeof answer.choice === 'string' &&
+    (choices as readonly string[]).includes(answer.choice) &&
+    confidence >= minConfidence
+  ) {
+    return { value: answer.choice as T, confidence };
+  }
+  return { value: 'unknown', confidence };
 }
 
 function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDecisionHint {
@@ -402,17 +638,28 @@ function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDe
       deliveryConfidence: 0,
       orchestration: 'unknown',
       orchestrationConfidence: 0,
+      workflow: 'unknown',
+      workflowConfidence: 0,
+      toolNeeds: {
+        readFile: { value: 'unknown', confidence: 0 },
+        writeFile: { value: 'unknown', confidence: 0 },
+        validateStCode: { value: 'unknown', confidence: 0 },
+        runCommand: { value: 'unknown', confidence: 0 },
+      },
+      riskLevel: 'unknown',
+      riskConfidence: 0,
+      needsApproval: { value: 'unknown', confidence: 0 },
       evaluation,
     };
   }
   const deliveryAnswer = evaluation.answers?.delivery;
   const deliveryProbability = deliveryAnswer?.type === 'noul' &&
     typeof deliveryAnswer.noul === 'number'
-    ? Math.max(0, Math.min(1, deliveryAnswer.noul))
+    ? clamp01(deliveryAnswer.noul)
     : undefined;
   const deliveryConfidence = deliveryProbability === undefined
     ? 0
-    : Math.abs(deliveryProbability - 0.5) * 2;
+    : clamp01(Math.abs(deliveryProbability - 0.5) * 2);
   const delivery = deliveryProbability === undefined
     ? 'unknown'
     : deliveryProbability >= minConfidence
@@ -428,11 +675,89 @@ function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDe
     routeConfidence >= minConfidence
     ? routeAnswer.choice
     : 'unknown';
+  const workflow = choiceDecision(
+    evaluation.answers?.workflow,
+    [
+      'st_delivery',
+      'st_inspection',
+      'file_read',
+      'file_edit',
+      'general_chat',
+      'team_candidate',
+    ] as const,
+    minConfidence,
+  );
+  const risk = choiceDecision(
+    evaluation.answers?.risk_level,
+    ['low', 'medium', 'high', 'critical'] as const,
+    minConfidence,
+  );
   return {
     delivery,
     deliveryConfidence,
     orchestration: route,
     orchestrationConfidence: routeConfidence,
+    workflow: workflow.value,
+    workflowConfidence: workflow.confidence,
+    toolNeeds: {
+      readFile: binaryDecision(evaluation.answers?.needs_read_file, minConfidence),
+      writeFile: binaryDecision(evaluation.answers?.needs_write_file, minConfidence),
+      validateStCode: binaryDecision(evaluation.answers?.needs_validate_st_code, minConfidence),
+      runCommand: binaryDecision(evaluation.answers?.needs_run_command, minConfidence),
+    },
+    riskLevel: risk.value,
+    riskConfidence: risk.confidence,
+    needsApproval: binaryDecision(evaluation.answers?.needs_approval, minConfidence),
+    evaluation,
+  };
+}
+
+function buildCompletionGateHint(
+  evaluation: JevEvaluation,
+  minConfidence: number,
+): CompletionGateDecisionHint {
+  if (evaluation.status !== 'ok') {
+    return {
+      looksComplete: { value: 'unknown', confidence: 0 },
+      missingDeliverable: { value: 'unknown', confidence: 0 },
+      nextAction: 'unknown',
+      nextActionConfidence: 0,
+      evaluation,
+    };
+  }
+  const action = choiceDecision(
+    evaluation.answers?.next_action,
+    ['pass', 'retry', 'revise', 'stop', 'escalate'] as const,
+    minConfidence,
+  );
+  return {
+    looksComplete: binaryDecision(evaluation.answers?.looks_complete, minConfidence),
+    missingDeliverable: binaryDecision(evaluation.answers?.missing_deliverable, minConfidence),
+    nextAction: action.value,
+    nextActionConfidence: action.confidence,
+    evaluation,
+  };
+}
+
+function buildDiagnosticRecoveryHint(
+  evaluation: JevEvaluation,
+  minConfidence: number,
+): DiagnosticRecoveryDecisionHint {
+  if (evaluation.status !== 'ok') {
+    return {
+      action: 'unknown',
+      actionConfidence: 0,
+      evaluation,
+    };
+  }
+  const action = choiceDecision(
+    evaluation.answers?.repair_action,
+    ['retry', 'revise', 'stop', 'escalate'] as const,
+    minConfidence,
+  );
+  return {
+    action: action.value,
+    actionConfidence: action.confidence,
     evaluation,
   };
 }
@@ -449,13 +774,13 @@ export class AgentDecisionService {
 
   constructor(private readonly log: DecisionLogger = () => {}) {}
 
-  async taskHint(
-    settings: JevDecisionSettings | undefined,
-    userText: string,
-    signal?: AbortSignal,
-  ): Promise<TaskDecisionHint> {
+  private providerFor(settings?: JevDecisionSettings): {
+    provider: JevDecisionProvider;
+    normalized: NormalizedJevSettings;
+    key: string;
+  } {
     const normalized = normalizeSettings(settings);
-    const providerKey = [
+    const key = [
       normalized.enabled,
       normalized.endpoint,
       normalized.model,
@@ -464,12 +789,21 @@ export class AgentDecisionService {
       normalized.minConfidence,
       secretFingerprint(normalized.apiKey),
     ].join('|');
-    let provider = this.providers.get(providerKey);
+    let provider = this.providers.get(key);
     if (!provider) {
       provider = new JevDecisionProvider(settings);
-      this.providers.set(providerKey, provider);
+      this.providers.set(key, provider);
     }
-    const cacheKey = `${providerKey}|${userText}`;
+    return { provider, normalized, key };
+  }
+
+  async taskHint(
+    settings: JevDecisionSettings | undefined,
+    userText: string,
+    signal?: AbortSignal,
+  ): Promise<TaskDecisionHint> {
+    const { provider, normalized, key } = this.providerFor(settings);
+    const cacheKey = `${key}|${userText}`;
     const cached = this.taskCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.promise;
     const promise = provider.evaluate({
@@ -486,6 +820,38 @@ export class AgentDecisionService {
       promise,
     });
     return promise;
+  }
+
+  async completionGateHint(
+    settings: JevDecisionSettings | undefined,
+    input: CompletionGateDecisionInput,
+    signal?: AbortSignal,
+  ): Promise<CompletionGateDecisionHint> {
+    const { provider, normalized } = this.providerFor(settings);
+    const evaluation = await provider.evaluate({
+      state: input as unknown as JevJsonValue,
+      questions: COMPLETION_GATE_QUESTIONS,
+      signal,
+    });
+    const hint = buildCompletionGateHint(evaluation, normalized.minConfidence);
+    this.logCompletionGateResult(hint);
+    return hint;
+  }
+
+  async diagnosticRecoveryHint(
+    settings: JevDecisionSettings | undefined,
+    input: DiagnosticRecoveryDecisionInput,
+    signal?: AbortSignal,
+  ): Promise<DiagnosticRecoveryDecisionHint> {
+    const { provider, normalized } = this.providerFor(settings);
+    const evaluation = await provider.evaluate({
+      state: input as unknown as JevJsonValue,
+      questions: DIAGNOSTIC_RECOVERY_QUESTIONS,
+      signal,
+    });
+    const hint = buildDiagnosticRecoveryHint(evaluation, normalized.minConfidence);
+    this.logDiagnosticRecoveryResult(hint);
+    return hint;
   }
 
   private logResult(hint: TaskDecisionHint): void {
@@ -508,8 +874,76 @@ export class AgentDecisionService {
     this.log(
       `[jev] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
       `${usage} delivery=${hint.delivery}(${hint.deliveryConfidence.toFixed(2)})` +
-      ` orchestration=${hint.orchestration}(${hint.orchestrationConfidence.toFixed(2)})`,
+      ` orchestration=${hint.orchestration}(${hint.orchestrationConfidence.toFixed(2)})` +
+      ` workflow=${hint.workflow}(${hint.workflowConfidence.toFixed(2)})` +
+      ` tools=${this.formatToolNeeds(hint.toolNeeds)}` +
+      ` risk=${hint.riskLevel}(${hint.riskConfidence.toFixed(2)})` +
+      ` approval=${this.formatBinary(hint.needsApproval)}`,
     );
+  }
+
+  private logCompletionGateResult(hint: CompletionGateDecisionHint): void {
+    const { evaluation } = hint;
+    if (evaluation.status === 'disabled') {
+      const reason = evaluation.reason ?? '未启用';
+      if (!this.loggedDisabled.has(`completion:${reason}`)) {
+        this.loggedDisabled.add(`completion:${reason}`);
+        this.log(`[jev:completion] disabled: ${reason}`);
+      }
+      return;
+    }
+    if (evaluation.status === 'failed') {
+      this.log(`[jev:completion] failed: ${evaluation.reason ?? '未知错误'}; fallback=rule_gate`);
+      return;
+    }
+    const usage = evaluation.usage
+      ? ` usage=${evaluation.usage.inputTokens}/${evaluation.usage.outputTokens}`
+      : '';
+    this.log(
+      `[jev:completion] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
+      `${usage} complete=${this.formatBinary(hint.looksComplete)}` +
+      ` missingDeliverable=${this.formatBinary(hint.missingDeliverable)}` +
+      ` next=${hint.nextAction}(${hint.nextActionConfidence.toFixed(2)})`,
+    );
+  }
+
+  private logDiagnosticRecoveryResult(hint: DiagnosticRecoveryDecisionHint): void {
+    const { evaluation } = hint;
+    if (evaluation.status === 'disabled') {
+      const reason = evaluation.reason ?? '未启用';
+      if (!this.loggedDisabled.has(`diagnostic:${reason}`)) {
+        this.loggedDisabled.add(`diagnostic:${reason}`);
+        this.log(`[jev:diagnostic] disabled: ${reason}`);
+      }
+      return;
+    }
+    if (evaluation.status === 'failed') {
+      this.log(`[jev:diagnostic] failed: ${evaluation.reason ?? '未知错误'}; fallback=existing_repair`);
+      return;
+    }
+    const usage = evaluation.usage
+      ? ` usage=${evaluation.usage.inputTokens}/${evaluation.usage.outputTokens}`
+      : '';
+    this.log(
+      `[jev:diagnostic] ok model=${evaluation.model ?? 'unknown'} elapsed=${evaluation.elapsedMs}ms` +
+      `${usage} action=${hint.action}(${hint.actionConfidence.toFixed(2)})`,
+    );
+  }
+
+  private formatToolNeeds(value: ToolNeedDecisionHint): string {
+    return [
+      `read_file:${this.formatBinary(value.readFile)}`,
+      `write_file:${this.formatBinary(value.writeFile)}`,
+      `validate_st_code:${this.formatBinary(value.validateStCode)}`,
+      `run_command:${this.formatBinary(value.runCommand)}`,
+    ].join(',');
+  }
+
+  private formatBinary(value: BinaryDecisionHint): string {
+    const probability = typeof value.probability === 'number'
+      ? value.probability.toFixed(2)
+      : value.confidence.toFixed(2);
+    return `${value.value}(${probability})`;
   }
 }
 

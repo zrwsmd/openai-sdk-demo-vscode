@@ -79,8 +79,39 @@ try {
 
 const originalFetch = globalThis.fetch;
 let sharedCalls = 0;
-globalThis.fetch = async () => {
+globalThis.fetch = async (_url, init) => {
   sharedCalls += 1;
+  const body = JSON.parse(init?.body ?? '{}');
+  if (body.questions?.looks_complete) {
+    return response({
+      model: 'jev-test',
+      answers: {
+        looks_complete: { type: 'noul', noul: 0.93 },
+        missing_deliverable: { type: 'noul', noul: 0.03 },
+        next_action: {
+          type: 'choice',
+          choice: 'pass',
+          probabilities: { pass: 0.9, retry: 0.03, revise: 0.03, stop: 0.02, escalate: 0.02 },
+          confidence: 0.9,
+        },
+      },
+      usage: { input_tokens: 21, output_tokens: 9 },
+    });
+  }
+  if (body.questions?.repair_action) {
+    return response({
+      model: 'jev-test',
+      answers: {
+        repair_action: {
+          type: 'choice',
+          choice: 'revise',
+          probabilities: { retry: 0.04, revise: 0.91, stop: 0.02, escalate: 0.03 },
+          confidence: 0.91,
+        },
+      },
+      usage: { input_tokens: 18, output_tokens: 5 },
+    });
+  }
   return response({
     model: 'jev-test',
     answers: {
@@ -90,6 +121,23 @@ globalThis.fetch = async () => {
         choice: 'single',
         probabilities: { single: 0.91, team: 0.09 },
         confidence: 0.86,
+      },
+      workflow: {
+        type: 'choice',
+        choice: 'file_read',
+        probabilities: { file_read: 0.92, file_edit: 0.03, general_chat: 0.05 },
+        confidence: 0.92,
+      },
+      needs_read_file: { type: 'noul', noul: 0.95 },
+      needs_write_file: { type: 'noul', noul: 0.02 },
+      needs_validate_st_code: { type: 'noul', noul: 0.01 },
+      needs_run_command: { type: 'noul', noul: 0.03 },
+      needs_approval: { type: 'noul', noul: 0.02 },
+      risk_level: {
+        type: 'choice',
+        choice: 'low',
+        probabilities: { low: 0.89, medium: 0.07, high: 0.03, critical: 0.01 },
+        confidence: 0.89,
       },
     },
     usage: { input_tokens: 13, output_tokens: 8 },
@@ -104,8 +152,40 @@ try {
   if (first.delivery !== 'not_required' || first.orchestration !== 'single') {
     throw new Error('Jev task hint did not apply confidence thresholds');
   }
+  if (
+    first.workflow !== 'file_read' ||
+    first.toolNeeds.readFile.value !== 'yes' ||
+    first.toolNeeds.writeFile.value !== 'no' ||
+    first.riskLevel !== 'low' ||
+    first.needsApproval.value !== 'no'
+  ) {
+    throw new Error('Jev workflow/tool/risk hint was not normalized');
+  }
   if (second.evaluation.usage?.inputTokens !== 13) {
     throw new Error('cached Jev task hint changed its result');
+  }
+  const completion = await service.completionGateHint(settings, {
+    userText: '读取 yy.txt',
+    finalMessage: '已读取 yy.txt。',
+    rulePassed: true,
+    deliveryRequired: false,
+    issueSummaries: [],
+    toolSummaries: ['read_file ok=true'],
+    artifactSummaries: [],
+  });
+  if (completion.nextAction !== 'pass' || completion.missingDeliverable.value !== 'no') {
+    throw new Error('Jev completion gate hint was not normalized');
+  }
+  const recovery = await service.diagnosticRecoveryHint(settings, {
+    userText: '生成 ST 代码',
+    failureReason: 'ST 校验未通过',
+    issues: ['validate_st_code: syntax error'],
+  });
+  if (recovery.action !== 'revise') {
+    throw new Error('Jev diagnostic recovery hint was not normalized');
+  }
+  if (sharedCalls !== 3) {
+    throw new Error(`expected one cached task call plus two advisory calls, got ${sharedCalls}`);
   }
 } finally {
   globalThis.fetch = originalFetch;

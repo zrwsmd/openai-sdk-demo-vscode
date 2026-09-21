@@ -2075,6 +2075,96 @@ export async function runAgent(
     ...toolResults.values(),
   ];
 
+  const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
+  const compactDecisionText = (value: unknown, maxLength = 800): string => {
+    const raw = typeof value === "string"
+      ? value
+      : JSON.stringify(value) ?? String(value);
+    const compact = raw.replace(/\s+/g, " ").trim();
+    return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+  };
+  const summarizeToolRecordForDecision = (
+    record: ReturnType<typeof workflowToolRecords>[number],
+  ): string => {
+    const diagnostics = Array.isArray(record.result.diagnostics)
+      ? record.result.diagnostics
+          .slice(0, 3)
+          .map((diagnostic) => {
+            const code = typeof diagnostic.code === "string" ? `${diagnostic.code}:` : "";
+            return `${diagnostic.severity}:${code}${diagnostic.message}`;
+          })
+          .join("；")
+      : "";
+    const error = typeof record.result.error === "string" && record.result.error.trim()
+      ? ` error=${record.result.error.trim()}`
+      : "";
+    const diagnosticText = diagnostics ? ` diagnostics=${diagnostics}` : "";
+    return compactDecisionText(
+      `${record.name} ok=${record.result.ok} risk=${record.result.risk} effect=${record.result.effect}${error}${diagnosticText}`,
+      500,
+    );
+  };
+  const reviewCompletionGateDecision = async (
+    finalMessage: string,
+    artifacts: Artifact[],
+    gate: CompletionGateResult,
+  ): Promise<void> => {
+    if (gate.passed && options.deliveryContract?.requiresDeliverable !== true) return;
+    try {
+      await decisionService.completionGateHint(
+        cfg.jev,
+        {
+          userText: compactDecisionText(userText, 1_200),
+          finalMessage: compactDecisionText(finalMessage, 1_200),
+          rulePassed: gate.passed,
+          deliveryRequired: options.deliveryContract?.requiresDeliverable === true,
+          issueSummaries: gate.passed
+            ? []
+            : gate.issues.slice(0, 6).map((issue) =>
+                compactDecisionText(`${issue.toolName}: ${issue.summary}`, 500),
+              ),
+          toolSummaries: workflowToolRecords()
+            .slice(-10)
+            .map(summarizeToolRecordForDecision),
+          artifactSummaries: [
+            ...artifacts,
+            ...deliveredArtifactsFromTools(),
+          ]
+            .slice(0, 8)
+            .map((artifact) =>
+              compactDecisionText(
+                `${artifact.kind}:${artifact.name}` +
+                  (artifact.uri ? ` uri=${artifact.uri}` : "") +
+                  (artifact.content ? ` contentBytes=${Buffer.byteLength(artifact.content, "utf8")}` : ""),
+                400,
+              ),
+            ),
+        },
+        options.signal,
+      );
+      if (!gate.passed) {
+        await decisionService.diagnosticRecoveryHint(
+          cfg.jev,
+          {
+            userText: compactDecisionText(userText, 1_200),
+            failureReason: compactDecisionText(gate.reason, 1_200),
+            issues: gate.issues.slice(0, 8).map((issue) =>
+              compactDecisionText(
+                `${issue.toolName}(${issue.targetKey}) risk=${issue.risk} effect=${issue.effect}: ${issue.summary}`,
+                700,
+              ),
+            ),
+            repairInstruction: compactDecisionText(gate.repairInstruction, 1_500),
+          },
+          options.signal,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      agentLog(`[jev] advisory skipped: ${message}`);
+    }
+  };
+
   const authoritativeWorkflowMessage = (): string | undefined =>
     deliveryWorkflow?.authoritativeMessage(workflowToolRecords());
 
@@ -2702,6 +2792,7 @@ export async function runAgent(
       if (!structuredMode) {
         assertPlanCompleted();
         const gate = runCompletionGate(output);
+        await reviewCompletionGateDecision(output, [], gate);
         if (!gate.passed) {
           continueAfterCompletionGateFailure(state, gate);
           continue;
@@ -2766,6 +2857,7 @@ export async function runAgent(
       );
       const deliveredArtifacts = deliveredArtifactsFromTools();
       const gate = runCompletionGate(message, structuredProjection.artifacts);
+      await reviewCompletionGateDecision(message, structuredProjection.artifacts, gate);
       if (!gate.passed) {
         continueAfterCompletionGateFailure(state, gate);
         continue;
