@@ -1,6 +1,6 @@
 import type { ToolResult } from "../../protocol/results";
 import { hashStContent } from "../stContentHash";
-import type { WorkflowStage } from "../deliveryWorkflow";
+import type { WorkflowStage } from "../workflow/types";
 import type {
   PipelineStagePlan,
   PipelineToolEventInput,

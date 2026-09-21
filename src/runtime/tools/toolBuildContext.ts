@@ -23,8 +23,8 @@ import type {
 import type { DeliveryContract } from "../deliveryContract";
 import type {
   DeliveryWorkflow,
-  StValidationState,
 } from "../deliveryWorkflow";
+import type { StValidationState } from "../workflows/stWorkspaceDeliveryWorkflow";
 import type { DiagnosticRepairPacket } from "../diagnosticCompression";
 
 export const TOOL_RISK_BY_NAME: Record<string, ToolRisk> = {

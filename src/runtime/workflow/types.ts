@@ -1,9 +1,65 @@
 import type { AgentInputItem } from "@openai/agents";
+import type { Artifact, ToolResult } from "../../protocol/results";
+import type { CompletionGateResult } from "../completionGate";
 import type { DeliveryContract } from "../deliveryContract";
-import type { DeliveryWorkflowDescriptor } from "../deliveryWorkflow";
 import type { PipelineStagePlan } from "../pipeline/stagePlan";
+import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
 
 export type WorkflowId = string;
+
+export type WorkflowToolRecord = {
+  name: string;
+  args: string;
+  result: ToolResult;
+  order?: number;
+};
+
+export type WorkflowStage = {
+  order: number;
+  id: string;
+  toolName?: string;
+  title: string;
+  description: string;
+  successEvidence: string;
+  onFailure: "retry" | "revise_draft" | "stop";
+};
+
+export type DeliveryWorkflowDescriptor = {
+  id: string;
+  title: string;
+  stages: Array<{
+    order: number;
+    id: string;
+    toolName?: string;
+    title: string;
+    description: string;
+    successEvidence: string;
+    onFailure: WorkflowStage["onFailure"];
+  }>;
+};
+
+export interface DeliveryWorkflow {
+  readonly id: string;
+  readonly title: string;
+  readonly stages: WorkflowStage[];
+  readonly pipelinePlan?: PipelineStagePlan;
+  readonly visibleToolNames?: readonly string[];
+  readonly parallelToolCalls: boolean;
+  readonly validationInputMode?: "inline_code" | "path_or_code";
+  readonly requiredActionTool?: string;
+  initialTool(options: { isResume: boolean }): string | undefined;
+  instructions(): string;
+  recordSuccessfulValidation?(content: string, hash: string): void;
+  canWriteContent?(content: string): boolean;
+  chooseRepairTool(
+    gate: Exclude<CompletionGateResult, { passed: true }>,
+    records: WorkflowToolRecord[],
+    availableToolNames: Set<string>,
+  ): string | undefined;
+  authoritativeMessage(records: WorkflowToolRecord[]): string | undefined;
+  hydrate(records: WorkflowToolRecord[]): void;
+  verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined;
+}
 
 export type WorkflowDecisionSource =
   | "jev"
@@ -44,6 +100,10 @@ export interface WorkflowDescriptor {
     source?: WorkflowDecisionSource;
   }): DeliveryContract | undefined;
   localMatch?(context: WorkflowDecisionContext): WorkflowLocalMatch;
+  createRuntime?(
+    contract: DeliveryContract | undefined,
+    state: DeliveryWorkflowRuntimeState,
+  ): DeliveryWorkflow | undefined;
 }
 
 export interface WorkflowSelectedDecision {

@@ -82,9 +82,7 @@ import {
 } from "./completionGate";
 import {
   createDeliveryContract,
-  createStCodeDeliveryContract,
   deliveryContractDecisionSchema,
-  inferDeliveryContractFromUserText,
   renderDeliveryContract,
   type DeliveryContract,
 } from "./deliveryContract";
@@ -92,6 +90,8 @@ import {
   createDeliveryWorkflow,
   createDeliveryWorkflowRuntimeState,
 } from "./deliveryWorkflow";
+import { getStValidationState } from "./workflows/stWorkspaceDeliveryWorkflow";
+import { inferStDeliveryContractFromUserText } from "./workflows/stDeliveryContract";
 import {
   buildTools,
   commandToolResult,
@@ -110,6 +110,7 @@ import type {
   WorkflowFallbackMode,
   WorkflowModelDecision,
 } from "./workflow/types";
+import { getWorkflowByRoute } from "./workflow/registry";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -1116,17 +1117,18 @@ export async function classifyDeliveryContract(
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
 ): Promise<DeliveryContract | undefined> {
-  const inferred = inferDeliveryContractFromUserText(userText);
+  const inferred = inferStDeliveryContractFromUserText(userText);
   if (inferred) return inferred;
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
   const hint = await decisionService.taskHint(cfg.jev, userText, signal);
-  if (hint.workflow === 'st_delivery') {
+  const workflow = getWorkflowByRoute(hint.workflow);
+  if (workflow) {
     agentLog(
-      `[delivery] Jev 高置信度识别 ST 交付流程(${hint.workflowConfidence.toFixed(2)})，启用运行时 ST 固定交付契约`,
+      `[delivery] Jev 高置信度识别 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})，启用运行时交付契约`,
     );
-    return createStCodeDeliveryContract({
-      reason: 'Jev 高置信度识别为 ST 代码交付，运行时按固定流水线校验并保存到当前工作区',
-      workspacePersistence: 'required',
+    return workflow.createDeliveryContract({
+      source: "jev",
+      reason: `Jev 高置信度识别为 ${workflow.title}，启用运行时 workflow`,
     });
   }
   if (hint.delivery === 'not_required') {
@@ -1608,7 +1610,7 @@ export async function runAgent(
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
   const workflowState = createDeliveryWorkflowRuntimeState();
-  const stValidationState = workflowState.stValidation;
+  const stValidationState = getStValidationState(workflowState);
   const deliveryWorkflow = createDeliveryWorkflow(
     options.deliveryContract,
     workflowState,

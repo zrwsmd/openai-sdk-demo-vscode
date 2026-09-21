@@ -1,8 +1,8 @@
+import type { DeliveryWorkflow } from "./deliveryWorkflow";
 import {
   createStValidationState,
-  type DeliveryWorkflow,
   type StValidationState,
-} from "./deliveryWorkflow";
+} from "./workflows/stWorkspaceDeliveryWorkflow";
 import type { DeliveryContract } from "./deliveryContract";
 import type { AgentConfig } from "./agentConfig";
 import {

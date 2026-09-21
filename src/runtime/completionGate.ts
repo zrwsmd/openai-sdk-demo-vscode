@@ -1,7 +1,7 @@
 import type { Artifact, ToolResult } from '../protocol/results';
 import type { RequiredAgentTool } from '../policy/actionPolicy';
 import type { DeliveryContract } from './deliveryContract';
-import { isStCodeDeliveryContract } from './deliveryContract';
+import { isStCodeDeliveryContract } from './workflows/stDeliveryContract';
 
 export interface CompletionGateToolRecord {
   name: string;
