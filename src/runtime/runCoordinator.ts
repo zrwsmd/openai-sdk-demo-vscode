@@ -19,6 +19,8 @@ import {
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
+import type { AgentConfig } from './agentConfig';
+import { AgentDecisionService } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import {
   toolOptionsFromSettings,
@@ -122,6 +124,8 @@ export interface RunCoordinatorDependencies {
   classifyDeliveryContract?: typeof classifyDeliveryContract;
   /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
   createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
+  /** Shared semantic decision service; omitted by embedders to use a local instance. */
+  decisionService?: AgentDecisionService;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
   routeTeamTask?: typeof routeTeamTask;
   planTeamTask?: typeof planTeamTask;
@@ -222,6 +226,7 @@ export class RunCoordinator {
   private readonly auditSink?: AuditSink;
   private readonly compactContext: ContextCompactor;
   private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
+  private readonly decisionService: AgentDecisionService;
   private busy = false;
   private transitioning = false;
   private controller?: AbortController;
@@ -257,6 +262,15 @@ export class RunCoordinator {
     this.auditSink = dependencies.audit;
     this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
     this.createStAnalyzer = dependencies.createStAnalyzer;
+    this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
+  }
+
+  private agentConfig(config: DurableRunConfig, apiKey: string): AgentConfig {
+    return {
+      ...config,
+      apiKey,
+      decisionService: this.decisionService,
+    };
   }
 
   async initialize(): Promise<void> {
@@ -363,7 +377,7 @@ export class RunCoordinator {
     const generation = this.beginTransition();
     try {
       if (await this.store.getActive()) return;
-      const error = validateConfig({ ...config, apiKey });
+      const error = validateConfig(this.agentConfig(config, apiKey));
       if (error) {
         this.emit({ type: 'error', message: error });
         return;
@@ -414,7 +428,7 @@ export class RunCoordinator {
         this.transitionController = deliveryController;
         try {
           run.deliveryContract = await this.classifyDeliveryContract(
-            { ...config, apiKey },
+            this.agentConfig(config, apiKey),
             userText,
             deliveryController.signal,
             sessionItems,
@@ -462,7 +476,7 @@ export class RunCoordinator {
           run.teamTask = config.orchestration === 'team'
             ? createForcedTeamTask(userText)
             : await routeTeam!(
-              { ...config, apiKey },
+              this.agentConfig(config, apiKey),
               userText,
               routingController.signal,
               sessionItems,
@@ -501,7 +515,7 @@ export class RunCoordinator {
         this.transitionController = planningController;
         try {
           run.plan = await this.planTask(
-            { ...config, apiKey },
+            this.agentConfig(config, apiKey),
             userText,
             planningController.signal,
             sessionItems,
@@ -834,7 +848,7 @@ export class RunCoordinator {
       this.transitionController = deliveryController;
       try {
         run.deliveryContract = await this.classifyDeliveryContract(
-          { ...run.config, apiKey },
+          this.agentConfig(run.config, apiKey),
           run.userText,
           deliveryController.signal,
           sessionItems,
@@ -864,7 +878,7 @@ export class RunCoordinator {
       try {
         run.teamTask = run.config.orchestration === 'team'
           ? createForcedTeamTask(run.userText)
-          : await this.routeTeamTask!({ ...run.config, apiKey }, run.userText, routingController.signal, sessionItems);
+          : await this.routeTeamTask!(this.agentConfig(run.config, apiKey), run.userText, routingController.signal, sessionItems);
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'routing', error, generation);
         return false;
@@ -881,7 +895,7 @@ export class RunCoordinator {
       const planningController = new AbortController();
       this.transitionController = planningController;
       try {
-        run.plan = await this.planTask({ ...run.config, apiKey }, run.userText, planningController.signal, sessionItems);
+        run.plan = await this.planTask(this.agentConfig(run.config, apiKey), run.userText, planningController.signal, sessionItems);
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'planning', error, generation);
         return false;
@@ -1171,8 +1185,7 @@ export class RunCoordinator {
       ): Promise<AgentRunResult> =>
         this.executeAgent(
           {
-            ...run.config,
-            apiKey,
+            ...this.agentConfig(run.config, apiKey),
             stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
             stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
             executeEffect: (toolName, input, invoke) =>
@@ -1648,8 +1661,7 @@ export class RunCoordinator {
         try {
           const result = await this.executeAgent(
             {
-              ...run.config,
-              apiKey,
+              ...this.agentConfig(run.config, apiKey),
               stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
               stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
               policyContext: safeNode ? { ...run.config.policyContext, dryRun: true } : run.config.policyContext,
@@ -1791,7 +1803,7 @@ export class RunCoordinator {
         run.teamTask = startTeamNode(run.teamTask, 'planner');
         await this.persistTeamRole(run, 'planner', 'started', generation);
         const report = await this.planTeamTask!(
-          { ...run.config, apiKey },
+          this.agentConfig(run.config, apiKey),
           run.teamTask,
           signal,
         );
@@ -1806,7 +1818,7 @@ export class RunCoordinator {
       run.teamTask = startTeamNode(run.teamTask, 'reviewer');
       await this.persistTeamRole(run, 'reviewer', 'started', generation);
       const report = await this.reviewTeamTask!(
-        { ...run.config, apiKey },
+        this.agentConfig(run.config, apiKey),
         run.teamTask,
         signal,
       );
@@ -1856,7 +1868,7 @@ export class RunCoordinator {
       run.teamTask = startTeamNode(run.teamTask, 'verifier');
       await this.persistTeamRole(run, 'verifier', 'started', generation);
       const report = await this.verifyTeamTask!(
-        { ...run.config, apiKey },
+        this.agentConfig(run.config, apiKey),
         run.teamTask,
         output,
         evidence,

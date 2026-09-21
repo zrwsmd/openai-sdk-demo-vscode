@@ -17,6 +17,7 @@ import { parseTeamTask, type TeamTask } from '../orchestration/teamTask';
 import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 import type { StAnalyzerSettings } from '../analysis/stAnalyzer';
 import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
+import type { JevDecisionSettings } from './decision/agentDecision';
 
 export type DurableRunStatus =
   | 'running'
@@ -43,6 +44,8 @@ export interface DurableRunConfig {
   orchestration?: IndustrialAgentMode;
   /** 纯数据 ST 校验设置,随 run 持久化,重试/续跑用同一套校验器配置。 */
   stAnalyzerSettings?: StAnalyzerSettings;
+  /** Internal Jev settings; apiKey is intentionally not persisted here. */
+  jev?: Omit<JevDecisionSettings, 'apiKey'>;
 }
 
 export interface DurableRunRecord {
@@ -209,6 +212,19 @@ function isStAnalyzerSettings(value: unknown): boolean {
   return true;
 }
 
+function isJevSettings(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') return false;
+  if (value.endpoint !== undefined && typeof value.endpoint !== 'string') return false;
+  if (value.model !== undefined && typeof value.model !== 'string') return false;
+  for (const key of ['timeoutMs', 'maxRetries', 'minConfidence'] as const) {
+    if (value[key] !== undefined && (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class JsonRunStore implements RunStore {
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -295,6 +311,7 @@ export class JsonRunStore implements RunStore {
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       (run.config.stAnalyzerSettings !== undefined && !isStAnalyzerSettings(run.config.stAnalyzerSettings)) ||
+      (run.config.jev !== undefined && !isJevSettings(run.config.jev)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||
       (run.resumeStage !== undefined && !['delivery', 'routing', 'planning', 'execution'].includes(run.resumeStage)) ||

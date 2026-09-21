@@ -99,6 +99,7 @@ import {
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
+import { AgentDecisionService } from "./decision/agentDecision";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -1083,6 +1084,23 @@ export async function classifyDeliveryContract(
 ): Promise<DeliveryContract | undefined> {
   const inferred = inferDeliveryContractFromUserText(userText);
   if (inferred) return inferred;
+  const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
+  const hint = await decisionService.taskHint(cfg.jev, userText, signal);
+  if (hint.delivery === 'not_required') {
+    agentLog(
+      `[delivery] Jev 高置信度判断无需交付物(${hint.deliveryConfidence.toFixed(2)})，跳过交付契约模型判定`,
+    );
+    return createDeliveryContract({
+      requiresDeliverable: false,
+      reason: 'Jev 判断本轮是问答、查询或只读操作，不要求交付物',
+      deliverables: [],
+    });
+  }
+  if (hint.delivery === 'required') {
+    agentLog(
+      `[delivery] Jev 判断需要交付物(${hint.deliveryConfidence.toFixed(2)})，继续使用完整交付契约判定`,
+    );
+  }
   const adapter = buildModelAdapter(cfg);
   const classifier = new Agent({
     name: "交付契约判定器",
@@ -1361,6 +1379,27 @@ export async function routeTeamTask(
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
 ): Promise<TeamTask | undefined> {
+  const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
+  const hint = await decisionService.taskHint(cfg.jev, userText, signal);
+  if (hint.orchestration === 'single') {
+    agentLog(
+      `[team] Jev 高置信度路由 single(${hint.orchestrationConfidence.toFixed(2)})，跳过 Team 路由模型`,
+    );
+    return undefined;
+  }
+  if (hint.orchestration === 'team') {
+    agentLog(
+      `[team] Jev 高置信度路由 team(${hint.orchestrationConfidence.toFixed(2)})，交给 Team Planner 细化`,
+    );
+    return createTeamTask({
+      route: 'team',
+      goal: userText,
+      reason: `Jev 判断该请求需要独立规划、审查、执行和验证(${hint.orchestrationConfidence.toFixed(2)})`,
+      planSummary: '由 Team Planner 根据用户目标生成可执行计划',
+      reviewFocus: ['任务范围、风险、审批约束和完成证据'],
+      verificationCriteria: ['最终结果满足用户目标并有可追溯的工具或交付证据'],
+    }, userText);
+  }
   const input: string | AgentInputItem[] = history.length
     ? [...history, { type: "message", role: "user", content: userText }]
     : userText;

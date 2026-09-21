@@ -17,6 +17,7 @@
     "test:batch": "npm run test:generate && node scripts/pipeline_stage_runtime_test.mjs && node scripts/task_plan_test.mjs && node scripts/team_task_test.mjs && node scripts/context_manager_test.mjs && node scripts/completion_gate_test.mjs && node scripts/chat_sessions_test.mjs && node scripts/run_store_test.mjs && node scripts/run_coordinator_test.mjs && node scripts/streaming_test.mjs && node scripts/workspace_tools_test.mjs && node scripts/sdk_foundation_test.mjs && node scripts/anthropic_test.mjs",
     "test:agent": "npm run test:generate && node scripts/agent_kernel_test.mjs && node scripts/agent_resume_test.mjs",
     "test:st": "npm run test:generate && node scripts/st_analyzer_test.mjs",
+    "test:jev": "npm run test:generate && node scripts/jev_decision_test.mjs",
     "vendor:st-analyzer": "node scripts/vendor_st_analyzer.mjs"
   },
   "keywords": [],
@@ -119,6 +120,36 @@
           "enum": ["auto", "single", "team"],
           "default": "auto",
           "description": "Agent 编排模式:single 保持单角色，team 启用规划/安全审查/受控执行三角色"
+        },
+        "plcAgent.jev.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用内置 Jev 决策层；不可用、超时或低置信度时自动回退现有逻辑"
+        },
+        "plcAgent.jev.endpoint": {
+          "type": "string",
+          "default": "https://api.typesafe.ai/v1/systemone",
+          "description": "Jev 服务端点；私有化部署可替换为内部代理地址"
+        },
+        "plcAgent.jev.model": {
+          "type": "string",
+          "default": "jev-latest",
+          "description": "Jev 决策模型别名"
+        },
+        "plcAgent.jev.timeoutMs": {
+          "type": "number",
+          "default": 3000,
+          "description": "单次 Jev 决策超时时间(毫秒)，超时立即走现有回退逻辑"
+        },
+        "plcAgent.jev.maxRetries": {
+          "type": "number",
+          "default": 1,
+          "description": "Jev 遇到 429/529 时的最大重试次数"
+        },
+        "plcAgent.jev.minConfidence": {
+          "type": "number",
+          "default": 0.78,
+          "description": "采用 Jev 路由判断的最低置信度；低于该值交给现有模型/规则"
         },
         "plcAgent.allowedCommands": {
           "type": "array",

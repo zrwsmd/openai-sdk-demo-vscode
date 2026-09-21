@@ -7,6 +7,7 @@ import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
 import { JsonAuditSink } from '../observability/audit';
 import { ChatSessionCatalog, titleFromUserText } from './chatSessions';
+import { AgentDecisionService } from '../runtime/decision/agentDecision';
 import {
   isAgentApiFormat,
   isAgentProvider,
@@ -51,6 +52,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly sessionCatalog: ChatSessionCatalog;
   private readonly storageRoot: string;
   private readonly log: vscode.OutputChannel;
+  private readonly decisionService: AgentDecisionService;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -61,6 +63,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
+    this.decisionService = new AgentDecisionService((line) => this.log.appendLine(line));
     this.context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('plcAgent.ui.showThinking')) {
         void this.sendSettingsToWebview();
@@ -148,6 +151,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (this.activeSessionId === sessionId) this.post(event);
       },
       log: (line) => this.log.appendLine(line),
+      decisionService: this.decisionService,
       planTask,
       classifyDeliveryContract,
       createStAnalyzer: createStAnalyzerFactory(this.context, (line) => this.log.appendLine(line)),
@@ -205,6 +209,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
     const showThinking = cfg.get<boolean>('ui.showThinking') ?? true;
+    const jev = {
+      enabled: cfg.get<boolean>('jev.enabled') ?? true,
+      apiKey: (process.env.TYPESAFE_API_KEY ?? '').trim(),
+      endpoint: (cfg.get<string>('jev.endpoint') ?? '').trim() || undefined,
+      model: (cfg.get<string>('jev.model') ?? '').trim() || undefined,
+      timeoutMs: cfg.get<number>('jev.timeoutMs') ?? undefined,
+      maxRetries: cfg.get<number>('jev.maxRetries') ?? undefined,
+      minConfidence: cfg.get<number>('jev.minConfidence') ?? undefined,
+    };
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -298,6 +311,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
+      jev,
       showThinking,
       savedInPlugin: !!storedProfile || useLegacyProfile || !!formatKeyValue,
     };
@@ -390,6 +404,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       policyContext: live.policyContext,
       orchestration: live.orchestration,
       stAnalyzerSettings: readStAnalyzerSettings(this.context),
+      jev: {
+        enabled: live.jev.enabled,
+        ...(live.jev.endpoint ? { endpoint: live.jev.endpoint } : {}),
+        ...(live.jev.model ? { model: live.jev.model } : {}),
+        ...(live.jev.timeoutMs === undefined ? {} : { timeoutMs: live.jev.timeoutMs }),
+        ...(live.jev.maxRetries === undefined ? {} : { maxRetries: live.jev.maxRetries }),
+        ...(live.jev.minConfidence === undefined ? {} : { minConfidence: live.jev.minConfidence }),
+      },
     };
     await this.sessionCatalog.touch(this.activeSessionId, titleFromUserText(text));
     await this.postSessions();
