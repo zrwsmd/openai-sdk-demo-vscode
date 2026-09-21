@@ -117,15 +117,18 @@ export function parseDeliveryContract(value: unknown): DeliveryContract {
   });
 }
 
-export function inferDeliveryContractFromUserText(userText: string): DeliveryContract | undefined {
-  const text = userText.trim();
-  if (!isStCodeGenerationRequest(text)) return undefined;
-  const workspacePersistence = wantsInlineOnly(text) ? 'not_required' : 'required';
+export function createStCodeDeliveryContract(options: {
+  reason?: string;
+  workspacePersistence?: 'required' | 'not_required' | 'optional';
+} = {}): DeliveryContract {
+  const workspacePersistence = options.workspacePersistence ?? 'required';
   return createDeliveryContract({
     requiresDeliverable: true,
-    reason: workspacePersistence === 'required'
-      ? '用户要求生成 ST 代码，运行时按固定流水线校验并保存到当前工作区'
-      : '用户要求生成 ST 代码但不强制保存文件',
+    reason: options.reason ?? (
+      workspacePersistence === 'required'
+        ? '用户要求生成 ST 代码，运行时按固定流水线校验并保存到当前工作区'
+        : '用户要求生成 ST 代码但不强制保存文件'
+    ),
     deliverables: [{
       kind: 'code',
       title: 'ST 程序',
@@ -138,6 +141,18 @@ export function inferDeliveryContractFromUserText(userText: string): DeliveryCon
       workspaceFileExtension: '.st',
       requiredVerificationTools: ['validate_st_code'],
     }],
+  })!;
+}
+
+export function inferDeliveryContractFromUserText(userText: string): DeliveryContract | undefined {
+  const text = userText.trim();
+  if (!isStCodeGenerationRequest(text)) return undefined;
+  const workspacePersistence = wantsInlineOnly(text) ? 'not_required' : 'required';
+  return createStCodeDeliveryContract({
+    reason: workspacePersistence === 'required'
+      ? '用户要求生成 ST 代码，运行时按固定流水线校验并保存到当前工作区'
+      : '用户要求生成 ST 代码但不强制保存文件',
+    workspacePersistence,
   });
 }
 

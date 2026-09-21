@@ -82,6 +82,7 @@ import {
 } from "./completionGate";
 import {
   createDeliveryContract,
+  createStCodeDeliveryContract,
   deliveryContractDecisionSchema,
   inferDeliveryContractFromUserText,
   renderDeliveryContract,
@@ -1090,6 +1091,15 @@ export async function classifyDeliveryContract(
   if (inferred) return inferred;
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
   const hint = await decisionService.taskHint(cfg.jev, userText, signal);
+  if (hint.workflow === 'st_delivery') {
+    agentLog(
+      `[delivery] Jev 高置信度识别 ST 交付流程(${hint.workflowConfidence.toFixed(2)})，启用运行时 ST 固定交付契约`,
+    );
+    return createStCodeDeliveryContract({
+      reason: 'Jev 高置信度识别为 ST 代码交付，运行时按固定流水线校验并保存到当前工作区',
+      workspacePersistence: 'required',
+    });
+  }
   if (hint.delivery === 'not_required') {
     agentLog(
       `[delivery] Jev 高置信度判断无需交付物(${hint.deliveryConfidence.toFixed(2)})，跳过交付契约模型判定`,

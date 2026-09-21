@@ -1,5 +1,7 @@
 import {
   AgentDecisionService,
+  classifyDeliveryContract,
+  isStWorkspaceDeliveryContract,
   JevDecisionProvider,
 } from './agent.testbundle.mjs';
 
@@ -186,6 +188,62 @@ try {
   }
   if (sharedCalls !== 3) {
     throw new Error(`expected one cached task call plus two advisory calls, got ${sharedCalls}`);
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+let stWorkflowFallbackCalls = 0;
+globalThis.fetch = async () => {
+  stWorkflowFallbackCalls += 1;
+  return response({
+    model: 'jev-test',
+    answers: {
+      delivery: { type: 'noul', noul: 0.52 },
+      orchestration: {
+        type: 'choice',
+        choice: 'single',
+        probabilities: { single: 0.45, team: 0.35 },
+        confidence: 0.2,
+      },
+      workflow: {
+        type: 'choice',
+        choice: 'st_delivery',
+        probabilities: { st_delivery: 0.93, general_chat: 0.04, file_read: 0.02, file_edit: 0.01 },
+        confidence: 0.93,
+      },
+      needs_read_file: { type: 'noul', noul: 0.11 },
+      needs_write_file: { type: 'noul', noul: 0.52 },
+      needs_validate_st_code: { type: 'noul', noul: 0.7 },
+      needs_run_command: { type: 'noul', noul: 0.05 },
+      needs_approval: { type: 'noul', noul: 0.48 },
+      risk_level: {
+        type: 'choice',
+        choice: 'medium',
+        probabilities: { low: 0.2, medium: 0.55, high: 0.18, critical: 0.07 },
+        confidence: 0.55,
+      },
+    },
+    usage: { input_tokens: 31, output_tokens: 12 },
+  });
+};
+try {
+  const contract = await classifyDeliveryContract(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
+    },
+    'PID 恒压供水：根据管网压力反馈调节变频器，压力低启动，压力高降频。',
+  );
+  if (stWorkflowFallbackCalls !== 1) {
+    throw new Error(`expected one Jev workflow fallback call, got ${stWorkflowFallbackCalls}`);
+  }
+  if (!isStWorkspaceDeliveryContract(contract)) {
+    throw new Error('high-confidence Jev st_delivery workflow should create the runtime ST delivery contract');
   }
 } finally {
   globalThis.fetch = originalFetch;
