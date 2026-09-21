@@ -26,6 +26,7 @@ export * from '../src/runtime/pipeline/stageRuntime';
 export * from '../src/runtime/pipeline/stWorkspaceDeliveryPlan';
 export * from '../src/runtime/diagnosticCompression';
 export * from '../src/runtime/decision/agentDecision';
+export * from '../src/runtime/decision/completionEvidence';
 export * from '../src/app/settingsProfiles';
 export * from '../src/analysis/stAnalyzer';
 export * from '../src/analysis/stDiagnosticCodes';

@@ -10,6 +10,25 @@ export type CompletionEvidenceRecord = {
   order?: number;
 };
 
+export type EvidenceFactValue = string | number | boolean;
+
+export type EvidenceFactScope =
+  | "tool"
+  | "file"
+  | "artifact"
+  | "workflow"
+  | "contract"
+  | "diagnostic"
+  | "domain";
+
+export interface EvidenceFact {
+  key: string;
+  value: EvidenceFactValue;
+  scope: EvidenceFactScope;
+  sourceTool?: string;
+  confidence?: number;
+}
+
 export interface CompletionEvidenceInput {
   records: CompletionEvidenceRecord[];
   gate: CompletionGateResult;
@@ -18,11 +37,35 @@ export interface CompletionEvidenceInput {
   deliveryContract?: DeliveryContract;
   deliveryWorkflow?: DeliveryWorkflow;
   authoritativeMessage?: string;
+  extractors?: readonly ToolEvidenceExtractor[];
 }
 
 export interface CompletionEvidenceSummary {
+  facts: EvidenceFact[];
   toolSummaries: string[];
   artifactSummaries: string[];
+}
+
+export interface ToolEvidenceExtractor {
+  id: string;
+  toolNames?: readonly string[];
+  extract(record: CompletionEvidenceRecord, context: ToolEvidenceContext): EvidenceFact[];
+}
+
+export interface ToolEvidenceContext {
+  records: readonly CompletionEvidenceRecord[];
+  input: CompletionEvidenceInput;
+  helpers: EvidenceHelpers;
+}
+
+export interface EvidenceHelpers {
+  args(record: CompletionEvidenceRecord): Record<string, unknown>;
+  data(result: ToolResult): Record<string, unknown>;
+  objectField(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined;
+  stringField(value: Record<string, unknown>, keys: readonly string[]): string | undefined;
+  numberField(value: Record<string, unknown>, keys: readonly string[]): number | undefined;
+  shortHash(value: unknown): string | undefined;
+  successfulStValidationHashes(): Set<string>;
 }
 
 export function compactCompletionDecisionText(value: unknown, maxLength = 800): string {
@@ -36,12 +79,309 @@ export function compactCompletionDecisionText(value: unknown, maxLength = 800): 
 export function buildCompletionEvidenceSummaries(
   input: CompletionEvidenceInput,
 ): CompletionEvidenceSummary {
-  const toolSummaries = [
-    ...input.records
-      .slice(-10)
-      .map((record) => summarizeToolRecordForDecision(record, input.records)),
-    ...workflowEvidenceSummariesForDecision(input),
+  const records = input.records.slice(-10);
+  const extractors = [
+    ...DEFAULT_TOOL_EVIDENCE_EXTRACTORS,
+    ...(input.extractors ?? []),
   ];
+  const context = createToolEvidenceContext(input);
+  const toolFacts = records.flatMap((record) =>
+    extractEvidenceFactsForRecord(record, context, extractors),
+  );
+  const workflowFacts = extractWorkflowEvidenceFacts(input);
+  const artifactFacts = extractArtifactEvidenceFacts([
+    ...input.artifacts,
+    ...input.deliveredArtifacts,
+  ]);
+  const facts = [...toolFacts, ...workflowFacts, ...artifactFacts];
+  const toolSummaries = [
+    ...records.map((record) =>
+      summarizeToolEvidence(
+        record,
+        extractEvidenceFactsForRecord(record, context, extractors),
+      ),
+    ),
+    summarizeFacts("WORKFLOW_EVIDENCE", workflowFacts, 900),
+  ].filter((summary): summary is string => Boolean(summary));
+  const artifactSummaries = buildArtifactSummaries(input, artifactFacts);
+  return { facts, toolSummaries, artifactSummaries };
+}
+
+function extractEvidenceFactsForRecord(
+  record: CompletionEvidenceRecord,
+  context: ToolEvidenceContext,
+  extractors: readonly ToolEvidenceExtractor[],
+): EvidenceFact[] {
+  const facts: EvidenceFact[] = [];
+  for (const extractor of extractors) {
+    if (extractor.toolNames && !extractor.toolNames.includes(record.name)) continue;
+    facts.push(...extractor.extract(record, context));
+  }
+  return facts;
+}
+
+function createToolEvidenceContext(input: CompletionEvidenceInput): ToolEvidenceContext {
+  return {
+    records: input.records,
+    input,
+    helpers: createEvidenceHelpers(input.records),
+  };
+}
+
+function createEvidenceHelpers(
+  records: readonly CompletionEvidenceRecord[],
+): EvidenceHelpers {
+  let stValidationHashes: Set<string> | undefined;
+  return {
+    args: (record) => recordArgsForDecision(record.args),
+    data: recordDataForDecision,
+    objectField: objectFieldForDecision,
+    stringField: stringFieldForDecision,
+    numberField: numberFieldForDecision,
+    shortHash: shortHashForDecision,
+    successfulStValidationHashes: () => {
+      stValidationHashes ??= successfulStValidationHashesForDecision(records);
+      return new Set(stValidationHashes);
+    },
+  };
+}
+
+const baseToolEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "tool.base",
+  extract: (record) => {
+    const facts: EvidenceFact[] = [
+      fact("tool.name", record.name, "tool", record.name),
+      fact("tool.ok", record.result.ok === true, "tool", record.name),
+      fact("tool.risk", String(record.result.risk ?? "unknown"), "tool", record.name),
+      fact("tool.effect", String(record.result.effect ?? "unknown"), "tool", record.name),
+    ];
+    if (typeof record.result.error === "string" && record.result.error.trim()) {
+      facts.push(fact("tool.error", record.result.error.trim(), "diagnostic", record.name));
+    }
+    const diagnosticCounts = countDiagnostics(record.result);
+    if (diagnosticCounts.error) {
+      facts.push(fact("diagnostics.errorCount", diagnosticCounts.error, "diagnostic", record.name));
+    }
+    if (diagnosticCounts.warning) {
+      facts.push(fact("diagnostics.warningCount", diagnosticCounts.warning, "diagnostic", record.name));
+    }
+    return facts;
+  },
+};
+
+const fileEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "file.generic",
+  toolNames: ["write_file", "export_st_program", "read_file", "search_files", "list_files", "run_command"],
+  extract: (record, context) => {
+    const { helpers } = context;
+    const data = helpers.data(record.result);
+    const args = helpers.args(record);
+    const file = helpers.stringField(data, ["file", "path", "relativePath", "uri"]) ??
+      helpers.stringField(args, ["path", "file", "uri"]);
+    const bytes = helpers.numberField(data, ["bytes", "totalBytes"]);
+    const contentHash = helpers.stringField(data, ["contentHash"]);
+    const facts: EvidenceFact[] = [];
+
+    if (record.name === "write_file") {
+      facts.push(fact("file.operation", "write", "file", record.name));
+      facts.push(fact("file.write.persisted", record.result.ok === true, "file", record.name));
+    } else if (record.name === "export_st_program") {
+      facts.push(fact("file.operation", "export", "file", record.name));
+      facts.push(fact("file.export.persisted", record.result.ok === true, "file", record.name));
+    } else if (record.name === "read_file") {
+      facts.push(fact("file.operation", "read", "file", record.name));
+      facts.push(fact("file.read.succeeded", record.result.ok === true, "file", record.name));
+      addNumberFact(facts, "file.totalLines", helpers.numberField(data, ["totalLines"]), "file", record.name);
+      addNumberFact(facts, "file.returnedLines", helpers.numberField(data, ["returnedLines"]), "file", record.name);
+    } else if (record.name === "search_files") {
+      facts.push(fact("file.operation", "search", "file", record.name));
+      facts.push(fact("file.search.succeeded", record.result.ok === true, "file", record.name));
+      addNumberFact(facts, "file.matchCount", helpers.numberField(data, ["matchCount", "count"]), "file", record.name);
+    } else if (record.name === "list_files") {
+      facts.push(fact("file.operation", "list", "file", record.name));
+      facts.push(fact("file.list.succeeded", record.result.ok === true, "file", record.name));
+      addNumberFact(facts, "file.entryCount", helpers.numberField(data, ["count", "entryCount"]), "file", record.name);
+    } else if (record.name === "run_command") {
+      facts.push(fact("process.operation", "run_command", "tool", record.name));
+      facts.push(fact("process.succeeded", record.result.ok === true, "tool", record.name));
+      const exitCode = data.exitCode;
+      if (typeof exitCode === "number") {
+        facts.push(fact("process.exitCode", exitCode, "tool", record.name));
+      }
+    }
+
+    if (file) facts.push(fact("file.path", file, "file", record.name));
+    if (bytes !== undefined) facts.push(fact("file.bytes", bytes, "file", record.name));
+    if (contentHash) {
+      facts.push(fact("file.contentHash", helpers.shortHash(contentHash) ?? contentHash, "file", record.name));
+    }
+    return facts;
+  },
+};
+
+const artifactToolEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "artifact.tool",
+  toolNames: ["deliver_artifact"],
+  extract: (record, context) => {
+    const { helpers } = context;
+    const data = helpers.data(record.result);
+    const artifact = helpers.objectField(data, "artifact") ?? data;
+    const kind = helpers.stringField(artifact, ["kind"]);
+    const name = helpers.stringField(artifact, ["name"]);
+    const content = helpers.stringField(artifact, ["content"]);
+    const facts: EvidenceFact[] = [
+      fact("artifact.delivered", record.result.ok === true, "artifact", record.name),
+    ];
+    if (kind) facts.push(fact("artifact.kind", kind, "artifact", record.name));
+    if (name) facts.push(fact("artifact.name", name, "artifact", record.name));
+    if (content) {
+      facts.push(fact("artifact.contentBytes", Buffer.byteLength(content, "utf8"), "artifact", record.name));
+    }
+    return facts;
+  },
+};
+
+const stValidationEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "st.validation",
+  toolNames: ["validate_st_code"],
+  extract: (record, context) => {
+    const { helpers } = context;
+    const data = helpers.data(record.result);
+    const target = helpers.objectField(data, "validationTarget");
+    const errorCount = helpers.numberField(data, ["errorCount"]);
+    const warningCount = helpers.numberField(data, ["warningCount"]);
+    const validatedHash = helpers.stringField(data, ["validatedContentHash"]) ??
+      validationTargetHashForDecision(data, helpers);
+    const facts: EvidenceFact[] = [
+      fact("st.validation.passed", errorCount === 0 && record.result.ok === true, "domain", record.name),
+    ];
+    addNumberFact(facts, "st.validation.errorCount", errorCount, "domain", record.name);
+    addNumberFact(facts, "st.validation.warningCount", warningCount, "domain", record.name);
+    if (target) {
+      addStringFact(facts, "st.validation.target", helpers.stringField(target, ["path"]), "domain", record.name);
+      const complete = target.complete;
+      if (typeof complete === "boolean") {
+        facts.push(fact("st.validation.completeInput", complete, "domain", record.name));
+      }
+      addNumberFact(facts, "st.validation.lines", helpers.numberField(target, ["totalLines"]), "domain", record.name);
+      addNumberFact(facts, "st.validation.bytes", helpers.numberField(target, ["totalBytes"]), "domain", record.name);
+    }
+    if (validatedHash) {
+      facts.push(fact("st.validation.hash", helpers.shortHash(validatedHash) ?? validatedHash, "domain", record.name));
+    }
+    return facts;
+  },
+};
+
+const stPersistenceEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "st.persistence",
+  toolNames: ["write_file", "export_st_program"],
+  extract: (record, context) => {
+    const { helpers } = context;
+    const data = helpers.data(record.result);
+    const contentHash = helpers.stringField(data, ["contentHash"]);
+    const preWriteHash = preWriteValidationHashForDecision(data, helpers);
+    const validationHashes = helpers.successfulStValidationHashes();
+    const validationHashMatch = !!contentHash &&
+      (contentHash === preWriteHash || validationHashes.has(contentHash));
+    const facts: EvidenceFact[] = [];
+    if (contentHash) {
+      facts.push(fact("st.persistence.validationHashMatch", validationHashMatch, "domain", record.name));
+    }
+    const preWrite = helpers.objectField(data, "preWriteValidation");
+    if (preWrite) {
+      const errorCount = helpers.numberField(preWrite, ["errorCount"]);
+      facts.push(fact("st.preWriteValidation.passed", errorCount === 0, "domain", record.name));
+      addNumberFact(facts, "st.preWriteValidation.errorCount", errorCount, "domain", record.name);
+      addNumberFact(
+        facts,
+        "st.preWriteValidation.warningCount",
+        helpers.numberField(preWrite, ["warningCount"]),
+        "domain",
+        record.name,
+      );
+      if (preWriteHash) {
+        facts.push(fact("st.preWriteValidation.hash", helpers.shortHash(preWriteHash) ?? preWriteHash, "domain", record.name));
+      }
+    }
+    return facts;
+  },
+};
+
+export const DEFAULT_TOOL_EVIDENCE_EXTRACTORS: readonly ToolEvidenceExtractor[] = [
+  baseToolEvidenceExtractor,
+  fileEvidenceExtractor,
+  artifactToolEvidenceExtractor,
+  stValidationEvidenceExtractor,
+  stPersistenceEvidenceExtractor,
+];
+
+function extractWorkflowEvidenceFacts(input: CompletionEvidenceInput): EvidenceFact[] {
+  const facts: EvidenceFact[] = [
+    fact("rule.completionGate.passed", input.gate.passed, "workflow"),
+    fact("delivery.required", input.deliveryContract?.requiresDeliverable === true, "contract"),
+  ];
+  if (input.authoritativeMessage) {
+    facts.push(fact(
+      "workflow.authoritativeMessage",
+      compactCompletionDecisionText(input.authoritativeMessage, 700),
+      "workflow",
+    ));
+  }
+  if (input.deliveryWorkflow) {
+    facts.push(fact("workflow.id", input.deliveryWorkflow.id, "workflow"));
+    facts.push(fact("workflow.title", input.deliveryWorkflow.title, "workflow"));
+    facts.push(fact(
+      "workflow.stages",
+      input.deliveryWorkflow.stages
+        .map((stage) => `${stage.order}:${stage.toolName ?? stage.id}`)
+        .join(">"),
+      "workflow",
+    ));
+  }
+  if (input.deliveryContract?.requiresDeliverable) {
+    const deliverables = input.deliveryContract.deliverables.filter((deliverable) => deliverable.required);
+    facts.push(fact("contract.requiredDeliverableCount", deliverables.length, "contract"));
+    deliverables.slice(0, 6).forEach((deliverable, index) => {
+      const label = [
+        deliverable.title || deliverable.kind,
+        `kind=${deliverable.kind}`,
+        deliverable.workspaceFileExtension ? `ext=${deliverable.workspaceFileExtension}` : undefined,
+        deliverable.requiredVerificationTools?.length
+          ? `verify=${deliverable.requiredVerificationTools.join(",")}`
+          : undefined,
+        deliverable.workspacePersistence
+          ? `persistence=${deliverable.workspacePersistence}`
+          : undefined,
+      ].filter(Boolean).join(" ");
+      facts.push(fact(`contract.requiredDeliverable.${index + 1}`, label, "contract"));
+    });
+  }
+  return facts;
+}
+
+function extractArtifactEvidenceFacts(artifacts: readonly Artifact[]): EvidenceFact[] {
+  return artifacts.slice(0, 8).flatMap((artifact, index) => {
+    const facts = [
+      fact(`artifact.${index + 1}.kind`, artifact.kind, "artifact"),
+      fact(`artifact.${index + 1}.name`, artifact.name, "artifact"),
+    ];
+    if (artifact.uri) facts.push(fact(`artifact.${index + 1}.uri`, artifact.uri, "artifact"));
+    if (artifact.content) {
+      facts.push(fact(
+        `artifact.${index + 1}.contentBytes`,
+        Buffer.byteLength(artifact.content, "utf8"),
+        "artifact",
+      ));
+    }
+    return facts;
+  });
+}
+
+function buildArtifactSummaries(
+  input: CompletionEvidenceInput,
+  facts: EvidenceFact[],
+): string[] {
   const artifactSummaries = [
     ...input.artifacts,
     ...input.deliveredArtifacts,
@@ -55,7 +395,79 @@ export function buildCompletionEvidenceSummaries(
         400,
       ),
     );
-  return { toolSummaries, artifactSummaries };
+  if (artifactSummaries.length) return artifactSummaries;
+  const factSummary = summarizeFacts("ARTIFACT_EVIDENCE", facts, 400);
+  return factSummary ? [factSummary] : [];
+}
+
+function summarizeToolEvidence(
+  record: CompletionEvidenceRecord,
+  facts: EvidenceFact[],
+): string {
+  return summarizeFacts(`TOOL_EVIDENCE ${record.name}`, facts, 650) ??
+    `TOOL_EVIDENCE ${record.name}`;
+}
+
+function summarizeFacts(
+  label: string,
+  facts: readonly EvidenceFact[],
+  maxLength: number,
+): string | undefined {
+  if (!facts.length) return undefined;
+  return compactCompletionDecisionText(
+    `${label} facts=[${facts.map(formatEvidenceFact).join(" ")}]`,
+    maxLength,
+  );
+}
+
+function formatEvidenceFact(factValue: EvidenceFact): string {
+  const confidence = typeof factValue.confidence === "number"
+    ? `@${factValue.confidence.toFixed(2)}`
+    : "";
+  return `${factValue.key}=${formatEvidenceValue(factValue.value)}${confidence}`;
+}
+
+function formatEvidenceValue(value: EvidenceFactValue): string {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  const compact = value.replace(/\s+/g, "_");
+  return compact.length > 160 ? `${compact.slice(0, 157)}...` : compact;
+}
+
+function fact(
+  key: string,
+  value: EvidenceFactValue,
+  scope: EvidenceFactScope,
+  sourceTool?: string,
+  confidence?: number,
+): EvidenceFact {
+  return {
+    key,
+    value,
+    scope,
+    ...(sourceTool ? { sourceTool } : {}),
+    ...(typeof confidence === "number" ? { confidence } : {}),
+  };
+}
+
+function addStringFact(
+  facts: EvidenceFact[],
+  key: string,
+  value: string | undefined,
+  scope: EvidenceFactScope,
+  sourceTool?: string,
+): void {
+  if (value) facts.push(fact(key, value, scope, sourceTool));
+}
+
+function addNumberFact(
+  facts: EvidenceFact[],
+  key: string,
+  value: number | undefined,
+  scope: EvidenceFactScope,
+  sourceTool?: string,
+): void {
+  if (value !== undefined) facts.push(fact(key, value, scope, sourceTool));
 }
 
 function recordDataForDecision(result: ToolResult): Record<string, unknown> {
@@ -87,7 +499,7 @@ function objectFieldForDecision(
 
 function stringFieldForDecision(
   value: Record<string, unknown>,
-  keys: string[],
+  keys: readonly string[],
 ): string | undefined {
   for (const key of keys) {
     const item = value[key];
@@ -98,7 +510,7 @@ function stringFieldForDecision(
 
 function numberFieldForDecision(
   value: Record<string, unknown>,
-  keys: string[],
+  keys: readonly string[],
 ): number | undefined {
   for (const key of keys) {
     const item = value[key];
@@ -113,26 +525,33 @@ function shortHashForDecision(value: unknown): string | undefined {
     : undefined;
 }
 
-function validationTargetHashForDecision(data: Record<string, unknown>): string | undefined {
-  const target = objectFieldForDecision(data, "validationTarget");
-  return target ? stringFieldForDecision(target, ["contentHash"]) : undefined;
+function validationTargetHashForDecision(
+  data: Record<string, unknown>,
+  helpers: Pick<EvidenceHelpers, "objectField" | "stringField">,
+): string | undefined {
+  const target = helpers.objectField(data, "validationTarget");
+  return target ? helpers.stringField(target, ["contentHash"]) : undefined;
 }
 
-function preWriteValidationHashForDecision(data: Record<string, unknown>): string | undefined {
-  const preWrite = objectFieldForDecision(data, "preWriteValidation");
+function preWriteValidationHashForDecision(
+  data: Record<string, unknown>,
+  helpers: Pick<EvidenceHelpers, "objectField" | "numberField" | "stringField">,
+): string | undefined {
+  const preWrite = helpers.objectField(data, "preWriteValidation");
   if (!preWrite) return undefined;
-  if (numberFieldForDecision(preWrite, ["errorCount"]) !== 0) return undefined;
-  return stringFieldForDecision(preWrite, ["validatedContentHash"]);
+  if (helpers.numberField(preWrite, ["errorCount"]) !== 0) return undefined;
+  return helpers.stringField(preWrite, ["validatedContentHash"]);
 }
 
 function successfulStValidationHashesForDecision(
-  records: CompletionEvidenceRecord[],
+  records: readonly CompletionEvidenceRecord[],
 ): Set<string> {
+  const helpers = createEvidenceHelpers([]);
   const hashes = new Set<string>();
   for (const record of records) {
     if (!record.result.ok) continue;
     const data = recordDataForDecision(record.result);
-    const preWriteHash = preWriteValidationHashForDecision(data);
+    const preWriteHash = preWriteValidationHashForDecision(data, helpers);
     if (preWriteHash) {
       hashes.add(preWriteHash);
       continue;
@@ -140,176 +559,20 @@ function successfulStValidationHashesForDecision(
     if (record.name !== "validate_st_code") continue;
     if (numberFieldForDecision(data, ["errorCount"]) !== 0) continue;
     const hash = stringFieldForDecision(data, ["validatedContentHash"]) ??
-      validationTargetHashForDecision(data);
+      validationTargetHashForDecision(data, helpers);
     if (hash) hashes.add(hash);
   }
   return hashes;
 }
 
-function summarizeToolRecordForDecision(
-  record: CompletionEvidenceRecord,
-  records: CompletionEvidenceRecord[],
-): string {
-  const data = recordDataForDecision(record.result);
-  const args = recordArgsForDecision(record.args);
-  const validationHashes = successfulStValidationHashesForDecision(records);
-  const dataParts: string[] = [];
-
-  if (record.name === "validate_st_code") {
-    const target = objectFieldForDecision(data, "validationTarget");
-    const errorCount = numberFieldForDecision(data, ["errorCount"]);
-    const warningCount = numberFieldForDecision(data, ["warningCount"]);
-    const validatedHash = stringFieldForDecision(data, ["validatedContentHash"]) ??
-      validationTargetHashForDecision(data);
-    dataParts.push(errorCount === 0 && record.result.ok
-      ? "ST_VALIDATION_PASSED"
-      : "ST_VALIDATION_NOT_PASSED");
-    if (errorCount !== undefined) dataParts.push(`errorCount=${errorCount}`);
-    if (warningCount !== undefined) dataParts.push(`warningCount=${warningCount}`);
-    if (target) {
-      const targetPath = stringFieldForDecision(target, ["path"]);
-      const complete = target.complete;
-      const lines = numberFieldForDecision(target, ["totalLines"]);
-      const bytes = numberFieldForDecision(target, ["totalBytes"]);
-      if (targetPath) dataParts.push(`target=${targetPath}`);
-      if (typeof complete === "boolean") dataParts.push(`complete=${complete}`);
-      if (lines !== undefined) dataParts.push(`lines=${lines}`);
-      if (bytes !== undefined) dataParts.push(`bytes=${bytes}`);
+function countDiagnostics(result: ToolResult): { error: number; warning: number } {
+  const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+  return diagnostics.reduce((counts, diagnostic) => {
+    if (diagnostic.severity === "error" || diagnostic.severity === "blocking") {
+      counts.error += 1;
+    } else if (diagnostic.severity === "warning") {
+      counts.warning += 1;
     }
-    if (validatedHash) dataParts.push(`validatedHash=${shortHashForDecision(validatedHash)}`);
-  } else if (record.name === "write_file") {
-    const file = stringFieldForDecision(data, ["file", "path", "relativePath"]) ??
-      stringFieldForDecision(args, ["path", "file"]);
-    const contentHash = stringFieldForDecision(data, ["contentHash"]);
-    const preWriteHash = preWriteValidationHashForDecision(data);
-    const previousValidationMatch = !!contentHash && validationHashes.has(contentHash);
-    const hashMatch = !!contentHash && (preWriteHash === contentHash || previousValidationMatch);
-    const bytes = numberFieldForDecision(data, ["bytes"]);
-    dataParts.push(record.result.ok ? "WRITE_FILE_PERSISTED" : "WRITE_FILE_NOT_PERSISTED");
-    if (file) dataParts.push(`file=${file}`);
-    if (bytes !== undefined) dataParts.push(`bytes=${bytes}`);
-    if (contentHash) dataParts.push(`contentHash=${shortHashForDecision(contentHash)}`);
-    if (preWriteHash) dataParts.push(`preWriteValidatedHash=${shortHashForDecision(preWriteHash)}`);
-    if (contentHash) dataParts.push(`validationHashMatch=${hashMatch}`);
-    const preWrite = objectFieldForDecision(data, "preWriteValidation");
-    if (preWrite) {
-      const errorCount = numberFieldForDecision(preWrite, ["errorCount"]);
-      const warningCount = numberFieldForDecision(preWrite, ["warningCount"]);
-      dataParts.push(
-        `preWriteValidation=${errorCount === 0 ? "passed" : "failed"}` +
-          (errorCount !== undefined ? `(errorCount=${errorCount}` : "") +
-          (warningCount !== undefined ? ` warningCount=${warningCount}` : "") +
-          (errorCount !== undefined ? ")" : ""),
-      );
-    }
-  } else if (record.name === "export_st_program") {
-    const file = stringFieldForDecision(data, ["file", "path"]) ??
-      stringFieldForDecision(args, ["path", "file"]);
-    const bytes = numberFieldForDecision(data, ["bytes"]);
-    const contentHash = stringFieldForDecision(data, ["contentHash"]);
-    dataParts.push(record.result.ok ? "ST_EXPORT_PERSISTED" : "ST_EXPORT_NOT_PERSISTED");
-    if (file) dataParts.push(`file=${file}`);
-    if (bytes !== undefined) dataParts.push(`bytes=${bytes}`);
-    if (contentHash) {
-      dataParts.push(`contentHash=${shortHashForDecision(contentHash)}`);
-      dataParts.push(`validationHashMatch=${validationHashes.has(contentHash)}`);
-    }
-  } else if (record.name === "read_file") {
-    const file = stringFieldForDecision(data, ["file", "path", "relativePath"]) ??
-      stringFieldForDecision(args, ["path", "file"]);
-    const totalLines = numberFieldForDecision(data, ["totalLines"]);
-    const returnedLines = numberFieldForDecision(data, ["returnedLines"]);
-    dataParts.push(record.result.ok ? "FILE_READ_SUCCEEDED" : "FILE_READ_FAILED");
-    if (file) dataParts.push(`file=${file}`);
-    if (totalLines !== undefined) dataParts.push(`totalLines=${totalLines}`);
-    if (returnedLines !== undefined) dataParts.push(`returnedLines=${returnedLines}`);
-  } else if (record.name === "deliver_artifact") {
-    const artifact = objectFieldForDecision(data, "artifact") ?? data;
-    const kind = stringFieldForDecision(artifact, ["kind"]);
-    const name = stringFieldForDecision(artifact, ["name"]);
-    const content = stringFieldForDecision(artifact, ["content"]);
-    dataParts.push(record.result.ok ? "ARTIFACT_DELIVERED" : "ARTIFACT_NOT_DELIVERED");
-    if (kind) dataParts.push(`kind=${kind}`);
-    if (name) dataParts.push(`name=${name}`);
-    if (content) dataParts.push(`contentBytes=${Buffer.byteLength(content, "utf8")}`);
-  }
-
-  const diagnostics = Array.isArray(record.result.diagnostics)
-    ? record.result.diagnostics
-        .slice(0, 3)
-        .map((diagnostic) => {
-          const code = typeof diagnostic.code === "string" ? `${diagnostic.code}:` : "";
-          return `${diagnostic.severity}:${code}${diagnostic.message}`;
-        })
-        .join("；")
-    : "";
-  const error = typeof record.result.error === "string" && record.result.error.trim()
-    ? ` error=${record.result.error.trim()}`
-    : "";
-  const diagnosticText = diagnostics ? ` diagnostics=${diagnostics}` : "";
-  return compactCompletionDecisionText(
-    `${record.name} ok=${record.result.ok} risk=${record.result.risk} effect=${record.result.effect}` +
-      (dataParts.length ? ` evidence=[${dataParts.join(" ")}]` : "") +
-      `${error}${diagnosticText}`,
-    500,
-  );
-}
-
-function workflowEvidenceSummariesForDecision(
-  input: CompletionEvidenceInput,
-): string[] {
-  const summaries = [
-    `RULE_COMPLETION_GATE passed=${input.gate.passed} deliveryRequired=${input.deliveryContract?.requiresDeliverable === true}`,
-  ];
-  if (input.authoritativeMessage) {
-    summaries.push(
-      `DELIVERY_WORKFLOW_AUTHORITATIVE ${compactCompletionDecisionText(input.authoritativeMessage, 700)}`,
-    );
-  }
-  if (input.deliveryWorkflow) {
-    summaries.push(
-      `DELIVERY_WORKFLOW id=${input.deliveryWorkflow.id} title=${input.deliveryWorkflow.title}` +
-        ` stages=${input.deliveryWorkflow.stages.map((stage) => `${stage.order}:${stage.toolName ?? stage.id}`).join(">")}`,
-    );
-  }
-  if (input.deliveryContract?.requiresDeliverable) {
-    summaries.push(
-      "DELIVERY_CONTRACT " +
-        input.deliveryContract.deliverables
-          .filter((deliverable) => deliverable.required)
-          .slice(0, 6)
-          .map((deliverable) =>
-            [
-              deliverable.title || deliverable.kind,
-              `kind=${deliverable.kind}`,
-              deliverable.workspaceFileExtension ? `ext=${deliverable.workspaceFileExtension}` : undefined,
-              deliverable.requiredVerificationTools?.length
-                ? `verify=${deliverable.requiredVerificationTools.join(",")}`
-                : undefined,
-              deliverable.workspacePersistence
-                ? `persistence=${deliverable.workspacePersistence}`
-                : undefined,
-            ].filter(Boolean).join(" "),
-          )
-          .join(" | "),
-    );
-  }
-  const artifactEvidence = [
-    ...input.artifacts,
-    ...input.deliveredArtifacts,
-  ];
-  if (artifactEvidence.length) {
-    summaries.push(
-      "ARTIFACT_EVIDENCE " +
-        artifactEvidence
-          .slice(0, 6)
-          .map((artifact) =>
-            `${artifact.kind}:${artifact.name}` +
-              (artifact.uri ? ` uri=${artifact.uri}` : "") +
-              (artifact.content ? ` contentBytes=${Buffer.byteLength(artifact.content, "utf8")}` : ""),
-          )
-          .join(" | "),
-    );
-  }
-  return summaries.map((summary) => compactCompletionDecisionText(summary, 900));
+    return counts;
+  }, { error: 0, warning: 0 });
 }
