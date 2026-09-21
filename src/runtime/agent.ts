@@ -105,6 +105,11 @@ import {
   buildCompletionEvidenceSummaries,
   compactCompletionDecisionText,
 } from "./decision/completionEvidence";
+import type {
+  WorkflowDescriptor,
+  WorkflowFallbackMode,
+  WorkflowModelDecision,
+} from "./workflow/types";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -149,6 +154,8 @@ export interface AgentRunOptions {
   teamTask?: TeamTask;
   /** Runtime delivery contract selected before execution. */
   deliveryContract?: DeliveryContract;
+  /** Optional tool allowlist selected by workflow fallback routing. */
+  allowedToolNames?: readonly string[];
   /** Persists validated step transitions outside the SDK session. */
   onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
@@ -1147,6 +1154,84 @@ export async function classifyDeliveryContract(
   return createDeliveryContract(result.finalOutput);
 }
 
+const workflowFallbackModeSchema = z.enum([
+  "general_chat",
+  "read_only",
+  "file_edit",
+  "needs_clarification",
+  "blocked_high_risk",
+]);
+
+const workflowClassifierOutputSchema = z.object({
+  kind: z.enum(["workflow", "fallback"]),
+  workflowId: z.string().optional(),
+  fallbackMode: workflowFallbackModeSchema.optional(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1),
+}).strict();
+
+export async function classifyWorkflowDecision(
+  cfg: AgentConfig,
+  userText: string,
+  signal: AbortSignal | undefined,
+  history: AgentInputItem[] = [],
+  workflows: readonly WorkflowDescriptor[] = [],
+): Promise<WorkflowModelDecision | undefined> {
+  if (!workflows.length) return undefined;
+  const adapter = buildModelAdapter(cfg);
+  const workflowList = workflows
+    .map((workflow) =>
+      `- ${workflow.id}: ${workflow.title}; ${workflow.description}; runtimeManaged=${workflow.runtimeManaged}`,
+    )
+    .join("\n");
+  const classifier = new Agent({
+    name: "Workflow 路由判定器",
+    model: adapter.model,
+    instructions:
+      "你只做 workflow 路由判定，不执行用户任务，不调用工具，不生成代码。" +
+      "你必须在已注册 workflow 和 fallback mode 之间选择一个。" +
+      "只有用户目标明确属于某个已注册 workflow 时才选择 workflow；不确定时选择 fallback。" +
+      "不要根据某个具体行业词硬猜 workflow，必须看用户是否在请求该 workflow 的交付或操作。" +
+      "fallbackMode 可选: general_chat 普通问答；read_only 只读文件/状态；file_edit 普通文件修改；" +
+      "needs_clarification 有交付倾向但交付类型不明确；blocked_high_risk 高风险副作用需先停止或审批。" +
+      "已注册 workflow:\n" +
+      workflowList +
+      "\n必须严格返回 schema，不要输出 markdown。",
+    outputType: workflowClassifierOutputSchema,
+  });
+  const tracingDisabled = !(adapter.provider === "openai" && adapter.apiFormat === "responses" && !cfg.baseUrl.trim());
+  const input: string | AgentInputItem[] = history.length
+    ? [...history, { type: "message", role: "user", content: userText }]
+    : userText;
+  const result = await new Runner({ tracingDisabled }).run(classifier, input, {
+    stream: false,
+    maxTurns: 1,
+    signal,
+  });
+  const parsed = workflowClassifierOutputSchema.parse(result.finalOutput);
+  if (parsed.confidence < 0.72) return undefined;
+  if (parsed.kind === "workflow") {
+    const workflowId = parsed.workflowId?.trim();
+    if (!workflowId || !workflows.some((workflow) => workflow.id === workflowId)) {
+      return undefined;
+    }
+    return {
+      kind: "workflow",
+      workflowId,
+      confidence: parsed.confidence,
+      reason: parsed.reason,
+    };
+  }
+  const mode = parsed.fallbackMode as WorkflowFallbackMode | undefined;
+  if (!mode) return undefined;
+  return {
+    kind: "fallback",
+    mode,
+    confidence: parsed.confidence,
+    reason: parsed.reason,
+  };
+}
+
 function isSimpleSingleTurnRequest(userText: string): boolean {
   const text = userText.trim();
   if (!text || text.length > 160) return false;
@@ -1637,7 +1722,11 @@ export async function runAgent(
     ),
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
-  ];
+  ].filter((item) => {
+    if (!options.allowedToolNames) return true;
+    const name = (item as unknown as { name?: unknown }).name;
+    return typeof name === "string" && options.allowedToolNames.includes(name);
+  });
   const availableToolNames = new Set(
     tools
       .map((item) => (item as unknown as { name?: unknown }).name)

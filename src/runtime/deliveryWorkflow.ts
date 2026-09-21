@@ -8,10 +8,8 @@ import {
 } from "./deliveryContract";
 import { hashStContent } from "./stContentHash";
 import type { PipelineStagePlan } from "./pipeline/stagePlan";
-import {
-  ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
-  ST_WORKSPACE_DELIVERY_STAGES,
-} from "./pipeline/stWorkspaceDeliveryPlan";
+import { ST_WORKSPACE_DELIVERY_STAGES } from "./pipeline/stWorkspaceDeliveryPlan";
+import { listWorkflows } from "./workflow/registry";
 
 export { hashStContent } from "./stContentHash";
 
@@ -104,6 +102,11 @@ export function createDeliveryWorkflow(
 export function describeDeliveryWorkflow(
   contract: DeliveryContract | undefined,
 ): DeliveryWorkflowDescriptor | undefined {
+  if (!contract) return undefined;
+  const matched = listWorkflows().find((workflow) =>
+    workflow.matchesDeliveryContract?.(contract) === true,
+  );
+  if (matched) return matched.describe();
   const workflow = createDeliveryWorkflow(
     contract,
     createDeliveryWorkflowRuntimeState(),
@@ -132,7 +135,9 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly title = "ST 代码交付";
 
   readonly stages = ST_WORKSPACE_DELIVERY_STAGES;
-  readonly pipelinePlan = ST_WORKSPACE_DELIVERY_PIPELINE_PLAN;
+  readonly pipelinePlan = listWorkflows()
+    .find((workflow) => workflow.id === "st_workspace_delivery")
+    ?.pipelinePlan;
 
   readonly visibleToolNames = ["validate_st_code", "write_file"] as const;
   readonly parallelToolCalls = false;

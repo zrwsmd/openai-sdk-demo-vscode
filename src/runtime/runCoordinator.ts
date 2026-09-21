@@ -16,6 +16,7 @@ import {
   type AgentRunResult,
   type TurnUsage,
 } from './agent';
+import { AgentOutputValidationError } from './output';
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
@@ -46,6 +47,11 @@ import {
   isStCodeDeliveryContract,
 } from './deliveryContract';
 import { describeDeliveryWorkflow } from './deliveryWorkflow';
+import {
+  WorkflowDecisionService,
+  type WorkflowModelClassifier,
+} from './workflow/decisionService';
+import type { WorkflowDecision } from './workflow/types';
 import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
@@ -112,6 +118,23 @@ function shouldUseRuntimeManagedStFlow(
   return orchestration !== 'team' && isStCodeDeliveryContract(contract);
 }
 
+function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): boolean {
+  return decision?.kind === 'fallback' &&
+    decision.source === 'model' &&
+    (decision.mode === 'general_chat' ||
+      decision.mode === 'read_only' ||
+      decision.mode === 'blocked_high_risk');
+}
+
+function shouldSuppressAutoPreparation(
+  decision: WorkflowDecision | undefined,
+  orchestration: DurableRunConfig['orchestration'],
+): boolean {
+  return orchestration !== 'team' &&
+    decision?.kind === 'fallback' &&
+    decision.source === 'model';
+}
+
 export interface RunCoordinatorDependencies {
   session: RecoverableSession;
   store: RunStore;
@@ -120,6 +143,8 @@ export interface RunCoordinatorDependencies {
   executeAgent?: typeof runAgent;
   /** Optional model planner. Tests and embedders can omit it to retain the single path. */
   planTask?: typeof planTask;
+  /** Optional workflow classifier. Hosts opt in to registry-routed workflows. */
+  classifyWorkflowDecision?: WorkflowModelClassifier;
   /** Optional deliverable classifier. Hosts opt in to runtime delivery contracts. */
   classifyDeliveryContract?: typeof classifyDeliveryContract;
   /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
@@ -218,6 +243,7 @@ export class RunCoordinator {
   private readonly writeLog: (line: string) => void;
   private readonly executeAgent: typeof runAgent;
   private readonly planTask?: typeof planTask;
+  private readonly classifyWorkflowDecision?: WorkflowModelClassifier;
   private readonly classifyDeliveryContract?: typeof classifyDeliveryContract;
   private readonly routeTeamTask?: typeof routeTeamTask;
   private readonly planTeamTask?: typeof planTeamTask;
@@ -227,6 +253,7 @@ export class RunCoordinator {
   private readonly compactContext: ContextCompactor;
   private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   private readonly decisionService: AgentDecisionService;
+  private readonly workflowDecisionService: WorkflowDecisionService;
   private busy = false;
   private transitioning = false;
   private controller?: AbortController;
@@ -254,6 +281,7 @@ export class RunCoordinator {
     this.writeLog = dependencies.log ?? (() => {});
     this.executeAgent = dependencies.executeAgent ?? runAgent;
     this.planTask = dependencies.planTask;
+    this.classifyWorkflowDecision = dependencies.classifyWorkflowDecision;
     this.classifyDeliveryContract = dependencies.classifyDeliveryContract;
     this.routeTeamTask = dependencies.routeTeamTask ?? routeTeamTask;
     this.planTeamTask = dependencies.planTeamTask ?? planTeamTask;
@@ -263,6 +291,7 @@ export class RunCoordinator {
     this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
     this.createStAnalyzer = dependencies.createStAnalyzer;
     this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
+    this.workflowDecisionService = new WorkflowDecisionService(this.writeLog, this.decisionService);
   }
 
   private agentConfig(config: DurableRunConfig, apiKey: string): AgentConfig {
@@ -421,7 +450,52 @@ export class RunCoordinator {
         this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
       }
       if (this.isClearing(generation)) return;
-      if (this.classifyDeliveryContract) {
+      let workflowDecision: WorkflowDecision | undefined;
+      run.resumeStage = 'workflow';
+      await this.store.update(run);
+      const workflowController = new AbortController();
+      this.transitionController = workflowController;
+      try {
+        workflowDecision = await this.workflowDecisionService.decide(
+          this.agentConfig(config, apiKey),
+          userText,
+          workflowController.signal,
+          sessionItems,
+          { modelClassifier: this.classifyWorkflowDecision },
+        );
+        if (workflowDecision.kind === 'workflow') {
+          run.deliveryContract = workflowDecision.deliveryContract ??
+            workflowDecision.workflow.createDeliveryContract({
+              source: workflowDecision.source,
+              reason: workflowDecision.reason,
+            });
+          run.toolAllowlist = undefined;
+        } else {
+          run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
+        }
+        if (!this.isClearing(generation) && !this.stopRequested) {
+          run.resumeStage = undefined;
+          await this.store.update(run);
+        }
+      } catch (error) {
+        if (this.isClearing(generation)) return;
+        if (this.stopRequested || isRetryableAgentError(error)) {
+          await this.pauseBeforeSdkTurn(run, 'workflow', error, generation);
+          return;
+        }
+        this.writeLog(`[workflow] workflow 判定失败，继续使用旧交付判定: ${this.formatError(error)}`);
+        run.resumeStage = undefined;
+        await this.store.update(run);
+      } finally {
+        if (this.transitionController === workflowController) this.transitionController = undefined;
+      }
+      if (this.stopRequested) {
+        this.stopRequested = false;
+        await this.pausePending(run, false);
+        return;
+      }
+      if (this.isClearing(generation)) return;
+      if (!run.deliveryContract && this.classifyDeliveryContract && !shouldSkipDeliveryClassifier(workflowDecision)) {
         run.resumeStage = 'delivery';
         await this.store.update(run);
         const deliveryController = new AbortController();
@@ -466,7 +540,11 @@ export class RunCoordinator {
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;
       const runtimeManagedStFlow = shouldUseRuntimeManagedStFlow(run.deliveryContract, config.orchestration);
-      if (!runtimeManagedStFlow && (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask))) {
+      const suppressAutoPreparation = shouldSuppressAutoPreparation(
+        workflowDecision,
+        config.orchestration,
+      );
+      if (!runtimeManagedStFlow && !suppressAutoPreparation && (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask))) {
         run.resumeStage = 'routing';
         await this.store.update(run);
         const routeTeam = this.routeTeamTask;
@@ -507,7 +585,7 @@ export class RunCoordinator {
           if (this.transitionController === routingController) this.transitionController = undefined;
         }
       }
-      if (!runtimeManagedStFlow && !run.teamTask && this.planTask && config.orchestration !== 'team') {
+      if (!runtimeManagedStFlow && !suppressAutoPreparation && !run.teamTask && this.planTask && config.orchestration !== 'team') {
         run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
         await this.store.update(run);
@@ -835,6 +913,43 @@ export class RunCoordinator {
     let stage = run.resumeStage;
     if (!stage || this.isRunInvalidated(generation)) return false;
     const sessionItems = await this.session.getItems();
+    let workflowDecision: WorkflowDecision | undefined;
+    if (stage === 'workflow') {
+      const workflowController = new AbortController();
+      this.transitionController = workflowController;
+      try {
+        workflowDecision = await this.workflowDecisionService.decide(
+          this.agentConfig(run.config, apiKey),
+          run.userText,
+          workflowController.signal,
+          sessionItems,
+          { modelClassifier: this.classifyWorkflowDecision },
+        );
+        if (workflowDecision.kind === 'workflow') {
+          run.deliveryContract = workflowDecision.deliveryContract ??
+            workflowDecision.workflow.createDeliveryContract({
+              source: workflowDecision.source,
+              reason: workflowDecision.reason,
+            });
+          run.toolAllowlist = undefined;
+        } else {
+          run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
+        }
+      } catch (error) {
+        await this.pauseBeforeSdkTurn(run, 'workflow', error, generation);
+        return false;
+      } finally {
+        if (this.transitionController === workflowController) this.transitionController = undefined;
+      }
+      if (this.stopRequested || this.isRunInvalidated(generation)) return false;
+      run.resumeStage = undefined;
+      await this.store.update(run);
+      stage = shouldUseRuntimeManagedStFlow(run.deliveryContract, run.config.orchestration)
+        ? undefined
+        : shouldSkipDeliveryClassifier(workflowDecision)
+          ? run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning'
+          : 'delivery';
+    }
     if (stage === 'delivery' && !this.classifyDeliveryContract) {
       run.deliveryContract = inferDeliveryContractFromUserText(run.userText) ?? run.deliveryContract;
       run.resumeStage = undefined;
@@ -872,7 +987,11 @@ export class RunCoordinator {
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
     }
     const runtimeManagedStFlow = shouldUseRuntimeManagedStFlow(run.deliveryContract, run.config.orchestration);
-    if (!runtimeManagedStFlow && stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
+    const suppressAutoPreparation = shouldSuppressAutoPreparation(
+      workflowDecision,
+      run.config.orchestration,
+    );
+    if (!runtimeManagedStFlow && !suppressAutoPreparation && stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
       const routingController = new AbortController();
       this.transitionController = routingController;
       try {
@@ -889,7 +1008,7 @@ export class RunCoordinator {
       run.resumeStage = undefined;
       await this.store.update(run);
     }
-    if (!runtimeManagedStFlow && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
+    if (!runtimeManagedStFlow && !suppressAutoPreparation && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
       run.resumeStage = 'planning';
       await this.store.update(run);
       const planningController = new AbortController();
@@ -1207,6 +1326,7 @@ export class RunCoordinator {
             taskPlan: run.plan,
             teamTask: run.teamTask,
             deliveryContract: run.deliveryContract,
+            allowedToolNames: run.toolAllowlist,
             signal: controller.signal,
             protocol: {
               runId: run.id,
@@ -2106,6 +2226,12 @@ export class RunCoordinator {
   private formatError(error: unknown): string {
     if (error instanceof MaxTurnsExceededError) {
       return `本轮模型往返超过 ${MAX_TURNS} 次上限，已自动停止。请重试或把需求拆细。`;
+    }
+    if (
+      error instanceof AgentOutputValidationError ||
+      (error instanceof Error && error.name === 'AgentOutputValidationError')
+    ) {
+      return '模型没有返回符合协议的最终结果，本轮未确认完成；已保留运行状态，可以重试。';
     }
     return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   }

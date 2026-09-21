@@ -3,6 +3,7 @@ import {
   classifyDeliveryContract,
   isStWorkspaceDeliveryContract,
   JevDecisionProvider,
+  WorkflowDecisionService,
 } from './agent.testbundle.mjs';
 
 function response(body, status = 200, headers = {}) {
@@ -247,6 +248,91 @@ try {
   }
 } finally {
   globalThis.fetch = originalFetch;
+}
+
+globalThis.fetch = async () => response({
+  model: 'jev-test',
+  answers: {
+    delivery: { type: 'noul', noul: 0.5 },
+    orchestration: {
+      type: 'choice',
+      choice: 'single',
+      probabilities: { single: 0.5, team: 0.5 },
+      confidence: 0,
+    },
+    workflow: {
+      type: 'choice',
+      choice: 'st_delivery',
+      probabilities: { st_delivery: 0.94, general_chat: 0.03, file_read: 0.02, file_edit: 0.01 },
+      confidence: 0.94,
+    },
+  },
+  usage: { input_tokens: 9, output_tokens: 4 },
+});
+try {
+  const workflowDecision = await new WorkflowDecisionService().decide(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
+    },
+    '给我生成一个 ST 语言 PLC 控制程序并保存文件',
+  );
+  if (workflowDecision.kind !== 'workflow' || workflowDecision.workflow.id !== 'st_workspace_delivery') {
+    throw new Error('Jev workflow decision did not route to registered ST workflow');
+  }
+  if (!isStWorkspaceDeliveryContract(workflowDecision.deliveryContract)) {
+    throw new Error('Jev workflow decision did not attach an ST delivery contract');
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+{
+  const workflowDecision = await new WorkflowDecisionService().decide(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { enabled: false },
+    },
+    '设计一个 PLC 控制程序，使用 ST 语言实现 3 台水泵自动/手动控制',
+  );
+  if (workflowDecision.kind !== 'workflow' || workflowDecision.source !== 'local') {
+    throw new Error('local workflow detector did not route explicit ST delivery request');
+  }
+}
+
+{
+  const workflowDecision = await new WorkflowDecisionService().decide(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { enabled: false },
+    },
+    '做一个新的控制逻辑文件',
+    undefined,
+    [],
+    {
+      modelClassifier: async (_cfg, _text, _signal, _history, workflows) => ({
+        kind: 'workflow',
+        workflowId: workflows[0].id,
+        confidence: 0.83,
+        reason: 'model selected registered workflow in test',
+      }),
+    },
+  );
+  if (workflowDecision.kind !== 'workflow' || workflowDecision.source !== 'model') {
+    throw new Error('model workflow classifier was not used after Jev/local miss');
+  }
 }
 
 let flakyCalls = 0;

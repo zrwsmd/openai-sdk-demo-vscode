@@ -89,12 +89,12 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }, undefined, {
     classifyDeliveryContract: async (_cfg, text, _signal, history) => {
       classifierCalls += 1;
-      if (text !== '生成一个 ST 程序') throw new Error('delivery classifier received wrong user text');
+      if (text !== '生成一份说明文档') throw new Error('delivery classifier received wrong user text');
       if (!Array.isArray(history)) throw new Error('delivery classifier did not receive session history');
       return contract;
     },
   });
-  await test.coordinator.start('生成一个 ST 程序', config, 'key');
+  await test.coordinator.start('生成一份说明文档', config, 'key');
   const completed = await test.store.getLast();
   if (
     classifierCalls !== 1 ||
@@ -140,7 +140,7 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   const workflow = startedEvent?.payload?.workflow;
   const deliverable = receivedContract?.deliverables?.[0];
   if (
-    classifierCalls !== 1 ||
+    classifierCalls !== 0 ||
     routeCalls !== 0 ||
     planCalls !== 0 ||
     receivedContract?.requiresDeliverable !== true ||
@@ -221,6 +221,47 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
       !planEvents.some((event) => event.payload.stage === 'plan.step.verification_failed') ||
       planEvents.filter((event) => String(event.payload.stage).startsWith('plan.step.')).length !== 5) {
     throw new Error('linear plan progress events are missing');
+  }
+}
+
+// A definitive model workflow fallback keeps auto mode on the single-agent
+// lane instead of escalating into generic Team/planner preparation.
+{
+  let routeCalls = 0;
+  let planCalls = 0;
+  let executorCalls = 0;
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    executorCalls += 1;
+    if (options.taskPlan !== undefined || options.teamTask !== undefined) {
+      throw new Error('workflow fallback executor should not receive plan/team task');
+    }
+    return { status: 'completed', output: 'chat fallback completed', usage, result: completedAgentResult('chat fallback completed') };
+  }, async () => {
+    planCalls += 1;
+    return undefined;
+  }, {
+    classifyWorkflowDecision: async () => ({
+      kind: 'fallback',
+      mode: 'general_chat',
+      confidence: 0.91,
+      reason: 'test classifier says this is a plain answer',
+    }),
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      return undefined;
+    },
+  });
+  await test.coordinator.start('普通问题', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    routeCalls !== 0 ||
+    planCalls !== 0 ||
+    executorCalls !== 1 ||
+    completed?.status !== 'completed' ||
+    !Array.isArray(completed.toolAllowlist) ||
+    completed.toolAllowlist.length !== 0
+  ) {
+    throw new Error('workflow fallback did not suppress auto team/planner preparation');
   }
 }
 
@@ -994,12 +1035,12 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
       calls.push('route');
       return createTeamTask({
         route: 'team',
-        goal: 'Generate simulated PLC ST code',
+        goal: 'Generate simulated PLC commissioning documentation',
         reason: 'Needs planning, review, execution and verification',
-        planSummary: 'Generate code with simulated variables',
+        planSummary: 'Generate commissioning documentation with simulated variables',
         reviewFocus: ['scope'],
-        verificationCriteria: ['ST code is present'],
-      }, 'Generate simulated PLC ST code');
+        verificationCriteria: ['documentation is present'],
+      }, 'Generate simulated PLC commissioning documentation');
     },
     planTeamTask: async (_cfg, task) => {
       plannerCalls += 1;
@@ -1033,7 +1074,7 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
       return { passed: true, summary: 'verified', evidence: ['revised workspace change completed'], gaps: [] };
     },
   });
-  await test.coordinator.start('Generate simulated PLC ST code', { ...config, orchestration: 'auto' }, 'key');
+  await test.coordinator.start('Generate simulated PLC commissioning documentation', { ...config, orchestration: 'auto' }, 'key');
   const completed = await test.store.getLast();
   if (
     calls.join(',') !== 'route,planner-1,reviewer-1,planner-2,reviewer-2,executor,verifier' ||

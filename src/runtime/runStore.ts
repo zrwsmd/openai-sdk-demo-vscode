@@ -28,7 +28,7 @@ export type DurableRunStatus =
   | 'refused'
   | 'failed';
 
-export type DurableRunResumeStage = 'delivery' | 'routing' | 'planning' | 'execution';
+export type DurableRunResumeStage = 'workflow' | 'delivery' | 'routing' | 'planning' | 'execution';
 
 export interface DurableRunConfig {
   baseUrl: string;
@@ -68,6 +68,8 @@ export interface DurableRunRecord {
   teamTask?: TeamTask;
   /** Runtime-visible contract for user-requested deliverables. */
   deliveryContract?: DeliveryContract;
+  /** Optional runtime tool allowlist selected by workflow fallback routing. */
+  toolAllowlist?: string[];
   approvals: ApprovalRequest[];
   /** Decisions collected for the current SDK approval checkpoint. */
   approvalDecisions?: Record<string, boolean>;
@@ -314,10 +316,12 @@ export class JsonRunStore implements RunStore {
       (run.config.jev !== undefined && !isJevSettings(run.config.jev)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||
-      (run.resumeStage !== undefined && !['delivery', 'routing', 'planning', 'execution'].includes(run.resumeStage)) ||
+      (run.resumeStage !== undefined && !['workflow', 'delivery', 'routing', 'planning', 'execution'].includes(run.resumeStage)) ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
+      (run.toolAllowlist !== undefined &&
+        (!Array.isArray(run.toolAllowlist) || run.toolAllowlist.some((name) => typeof name !== 'string'))) ||
       !Array.isArray(run.approvals) ||
       run.approvals.some(
         (approval) =>
