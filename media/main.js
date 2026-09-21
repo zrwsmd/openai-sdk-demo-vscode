@@ -38,9 +38,12 @@ const anonymousToolRuns = new Map();
 const workflowViews = new Map();
 const workflowApprovals = new Map();
 const thinkingViews = new Map();
+const thinkingInlineViews = new Map();
+const thinkingSegments = new Map();
 const activeThinkingSegments = new Map();
 const thinkingItemSegments = new Map();
 const thinkingSegmentCounters = new Map();
+const THINKING_INLINE_MAX_CHARS = 80;
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -163,11 +166,14 @@ function setShowThinking(value) {
   showThinking = value !== false;
   if (showThinking) return;
   for (const view of thinkingViews.values()) view.el.remove();
+  for (const view of thinkingInlineViews.values()) view.remove();
   clearThinkingState();
 }
 
 function clearThinkingState() {
   thinkingViews.clear();
+  thinkingInlineViews.clear();
+  thinkingSegments.clear();
   activeThinkingSegments.clear();
   thinkingItemSegments.clear();
   thinkingSegmentCounters.clear();
@@ -177,13 +183,71 @@ function resetThinkingTracking(runId) {
   if (!runId) return;
   activeThinkingSegments.delete(runId);
   thinkingSegmentCounters.delete(runId);
+  for (const key of [...thinkingSegments.keys()]) {
+    if (key.startsWith(`${runId}:`)) thinkingSegments.delete(key);
+  }
   for (const key of [...thinkingItemSegments.keys()]) {
     if (key.startsWith(`${runId}:`)) thinkingItemSegments.delete(key);
   }
 }
 
+function thinkingSegmentState(key, runId) {
+  const existing = thinkingSegments.get(key);
+  if (existing) return existing;
+  const state = {
+    key,
+    runId,
+    text: '',
+    view: null,
+    inlineView: null,
+    finalized: false,
+  };
+  thinkingSegments.set(key, state);
+  return state;
+}
+
+function isShortThinkingText(text) {
+  const normalized = String(text ?? '').trim();
+  return normalized.length > 0 &&
+    normalized.length <= THINKING_INLINE_MAX_CHARS &&
+    !normalized.includes('\n');
+}
+
+function ensureThinkingCard(state) {
+  if (!state.view) {
+    state.view = createThinkingView(state.key, state.runId);
+  }
+  if (!state.view.segments) state.view.segments = new Map();
+  state.view.segments.set(state.key, state.text);
+  state.view.body.textContent = [...state.view.segments.values()]
+    .filter((text) => String(text ?? '').trim())
+    .join('\n\n');
+  state.view.body.classList.remove('hidden');
+}
+
+function finalizeThinkingSegment(state) {
+  const text = state.text.trim();
+  if (!text) return;
+  if (!state.view && isShortThinkingText(text)) {
+    if (!state.inlineView) {
+      state.inlineView = addNote('thinking-inline', text);
+      thinkingInlineViews.set(state.key, state.inlineView);
+    }
+    return;
+  }
+  ensureThinkingCard(state);
+}
+
 function closeThinkingSegment(runId) {
   if (!runId) return;
+  const active = activeThinkingSegments.get(runId);
+  if (active) {
+    const state = thinkingSegments.get(active);
+    if (state) {
+      finalizeThinkingSegment(state);
+      state.finalized = true;
+    }
+  }
   activeThinkingSegments.delete(runId);
 }
 
@@ -198,31 +262,48 @@ function thinkingSegmentKey(event, payload) {
   const itemId = typeof payload.itemId === 'string' && payload.itemId.trim()
     ? payload.itemId.trim()
     : '';
-  if (itemId) {
-    const itemKey = `${runId}:item:${itemId}`;
+  const itemKey = itemId ? `${runId}:item:${itemId}` : '';
+  if (itemKey) {
     const existing = thinkingItemSegments.get(itemKey);
     if (existing) return existing;
-    const segmentKey = `${runId}:reasoning:${itemId}`;
-    thinkingItemSegments.set(itemKey, segmentKey);
-    return segmentKey;
   }
   const active = activeThinkingSegments.get(runId);
-  if (active) return active;
+  if (active) {
+    if (itemKey) thinkingItemSegments.set(itemKey, active);
+    return active;
+  }
   const segmentKey = nextThinkingSegmentKey(runId);
   activeThinkingSegments.set(runId, segmentKey);
+  if (itemKey) thinkingItemSegments.set(itemKey, segmentKey);
   return segmentKey;
 }
 
 function createThinkingView(key, runId) {
+  const previous = messagesEl.lastElementChild;
+  if (previous?.classList.contains('thinking-card')) {
+    const previousKey = previous.dataset.thinkingKey;
+    const previousView = previousKey ? thinkingViews.get(previousKey) : undefined;
+    if (previousView && previousView.runId === runId) {
+      thinkingViews.set(key, previousView);
+      return previousView;
+    }
+  }
   const details = document.createElement('details');
   details.className = 'thinking-card';
+  details.dataset.thinkingKey = key;
   const summary = document.createElement('summary');
   summary.textContent = 'Thinking >';
   const body = document.createElement('div');
   body.className = 'thinking-body hidden';
   details.append(summary, body);
   messagesEl.appendChild(details);
-  const view = { el: details, body, text: '', runId, key };
+  const view = {
+    el: details,
+    body,
+    runId,
+    key,
+    segments: new Map(),
+  };
   thinkingViews.set(key, view);
   scrollBottom();
   return view;
@@ -233,26 +314,25 @@ function addThinkingUpdate(event) {
   const payload = event.payload || {};
   const runId = event.runId || currentRunId || 'standalone';
   const key = thinkingSegmentKey(event, payload);
-  const view = thinkingViews.get(key) || createThinkingView(key, runId);
+  const state = thinkingSegmentState(key, runId);
+  if (state.finalized) return;
   const fullText = typeof payload.text === 'string' ? payload.text : '';
   const textDelta = typeof payload.textDelta === 'string' ? payload.textDelta : '';
   const summary = typeof payload.summary === 'string' ? payload.summary : '';
   if (fullText) {
-    view.text = fullText;
-    view.body.textContent = view.text;
-    view.body.classList.remove('hidden');
+    state.text = fullText;
   } else if (textDelta) {
-    view.text += textDelta;
-    view.body.textContent = view.text;
-    view.body.classList.remove('hidden');
+    state.text += textDelta;
   } else if (summary.trim()) {
-    view.text = payload.status === 'completed' ? summary : view.text + summary;
-    view.body.textContent = view.text;
-    view.body.classList.remove('hidden');
+    state.text = payload.status === 'completed' ? summary : state.text + summary;
   }
-  if (payload.status === 'completed' || payload.status === 'incomplete') {
-    closeThinkingSegment(runId);
+  if (state.text.length > THINKING_INLINE_MAX_CHARS || state.text.includes('\n')) {
+    ensureThinkingCard(state);
   }
+  // A reasoning item reaching "completed" is not a UI boundary. Providers
+  // can emit response/model lifecycle events and the next reasoning item
+  // around the same model turn. Keep one visible segment until a runtime
+  // boundary (tool, approval, run end) closes it.
   scrollBottom();
 }
 
@@ -1167,6 +1247,7 @@ function handleProtocolEvent(event) {
       break;
     }
     case 'run.completed': {
+      closeThinkingSegment(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'completed');
       const result = payload.result;
       if (result && typeof result === 'object') {
@@ -1187,18 +1268,17 @@ function handleProtocolEvent(event) {
           addNote('tool-note', `已生成 ${artifacts.length} 个产物${names ? `：${names}` : ''}`);
         }
       }
-      closeThinkingSegment(event.runId || currentRunId);
       break;
     }
     case 'run.failed':
       // The host error control message owns the detailed error bubble.
-      finishWorkflowView(event.runId, 'failed');
       closeThinkingSegment(event.runId || currentRunId);
+      finishWorkflowView(event.runId, 'failed');
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
-      finishWorkflowView(event.runId, 'cancelled');
       closeThinkingSegment(event.runId || currentRunId);
+      finishWorkflowView(event.runId, 'cancelled');
       break;
     case 'approval.requested':
       closeThinkingSegment(event.runId || currentRunId);
@@ -1229,9 +1309,9 @@ function handleProtocolEvent(event) {
       if (payload.workflow) createWorkflowStageView(event.runId, payload.workflow);
       break;
     case 'model.event':
-      if (payload.status === 'completed' || payload.status === 'incomplete' || payload.status === 'failed') {
-        closeThinkingSegment(event.runId || currentRunId);
-      }
+      // Model lifecycle events are observational. They can arrive before a
+      // provider's final reasoning summary, so they must not split or close
+      // the visible Thinking segment.
       break;
     case 'run.progress':
       if (payload.stage === 'diagnostics.report' && payload.report) {

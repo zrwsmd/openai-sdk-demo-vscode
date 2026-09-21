@@ -157,6 +157,13 @@ body { display: flex; flex-direction: column; }
 }
 .thinking-card summary::-webkit-details-marker { display: none; }
 .thinking-card summary::marker { content: ''; }
+.thinking-inline {
+  margin: 4px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 .thinking-body {
   margin-top: 5px;
   padding-left: 10px;
