@@ -324,15 +324,11 @@ export class RunCoordinator {
     const active = await this.store.getActive();
     if (this.isClearing(generation)) return;
     if (active?.status === 'running') {
-      if (active.resumeStage) {
-        active.status = 'paused';
-        active.canContinue = true;
-        active.result = createAgentResult({ status: 'cancelled', reason: 'user_paused', usage: active.usage });
-        await this.store.update(active);
-        this.emit({ type: 'runRecovered', message: '预处理阶段中断，已保存继续断点。', canContinue: true });
-        return;
-      }
       if (this.busy || this.transitioning) {
+        // The run may still be in preflight before execute() creates the
+        // protocol factory. Attach first so the UI always receives the
+        // durable run.started envelope exactly once for this run.
+        this.ensureProtocolFactory(active);
         await this.replayHistory(generation);
         if (this.isClearing(generation)) return;
         this.emit({
@@ -341,6 +337,14 @@ export class RunCoordinator {
           userText: active.userText,
           partialOutput: this.liveOutput,
         });
+        return;
+      }
+      if (active.resumeStage) {
+        active.status = 'paused';
+        active.canContinue = true;
+        active.result = createAgentResult({ status: 'cancelled', reason: 'user_paused', usage: active.usage });
+        await this.store.update(active);
+        this.emit({ type: 'runRecovered', message: '预处理阶段中断，已保存继续断点。', canContinue: true });
         return;
       }
       // A live AbortController cannot survive a host restart. Roll back the
@@ -1413,6 +1417,9 @@ export class RunCoordinator {
       run.result = result.result;
       run.usage = result.usage;
       run.approvals = result.approvals ?? [];
+      if (result.status === 'failed' && result.result.status === 'failed') {
+        run.error = result.result.error;
+      }
       run.approvalDecisions = result.status === 'awaiting_approval'
         ? run.approvalDecisions
         : undefined;
@@ -1428,12 +1435,12 @@ export class RunCoordinator {
       run.status = manuallyPaused ? 'paused' : verifyingTeam ? 'running' : result.status;
       run.canContinue = manuallyPaused;
       if (run.teamTask && manuallyPaused) run.teamTask = pauseTeamTask(run.teamTask);
-      if (run.teamTask && (result.status === 'refused' || result.status === 'cancelled') && !manuallyPaused) {
+      if (run.teamTask && (result.status === 'refused' || result.status === 'cancelled' || result.status === 'failed') && !manuallyPaused) {
         run.teamTask = failTeamTask(run.teamTask);
       }
       if (run.plan) {
         if (manuallyPaused) run.plan = pauseTaskPlan(run.plan);
-        else if (result.status === 'refused' || result.status === 'cancelled') run.plan = failTaskPlan(run.plan);
+        else if (result.status === 'refused' || result.status === 'cancelled' || result.status === 'failed') run.plan = failTaskPlan(run.plan);
       }
 
       // Session rollback must happen before the run becomes terminal. If the
@@ -1501,6 +1508,18 @@ export class RunCoordinator {
         this.emitProtocol(this.protocolFactory!.next({
           type: 'run.refused',
           payload: { reason },
+        }));
+      } else if (result.status === 'failed') {
+        const error = result.result.status === 'failed'
+          ? result.result.error
+          : run.error ?? run.output ?? '本轮未完成';
+        await this.audit('run_failed', run, { error, structured: true });
+        if (this.isRunInvalidated(runGeneration)) return;
+        this.writeLog(`[run:${run.id}] 失败: ${error} | tokens ${result.usage.inputTokens}/${result.usage.outputTokens}`);
+        this.emit({ type: 'error', message: error, canRetry: true });
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'run.failed',
+          payload: { error, recoverable: false },
         }));
       } else if (run.teamTask && result.status === 'completed') {
         const verification = await this.completeAndVerifyTeam(

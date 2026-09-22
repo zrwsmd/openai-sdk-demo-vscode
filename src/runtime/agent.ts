@@ -112,6 +112,10 @@ import type {
   WorkflowModelDecision,
 } from "./workflow/types";
 import { getWorkflowByRoute } from "./workflow/registry";
+import {
+  runFinalOutputFinalizer,
+  synthesizeStructuredFailure,
+} from "./finalOutputFinalizer";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
 export type { RequiredAgentTool } from "../policy/actionPolicy";
@@ -130,6 +134,7 @@ export type ApprovalRequest = ProtocolApprovalRequest;
 
 export type AgentRunStatus =
   | "completed"
+  | "failed"
   | "awaiting_approval"
   | "cancelled"
   | "refused";
@@ -1865,6 +1870,8 @@ export async function runAgent(
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = "";
   let structuredOutput: IndustrialAgentOutput | undefined;
+  let finalizerRequired = false;
+  let terminalFailureOutput: IndustrialAgentOutput | undefined;
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
@@ -2361,6 +2368,78 @@ export async function runAgent(
     };
   };
 
+  const toProtocolArtifacts = (
+    artifacts: readonly IndustrialAgentOutput["artifacts"][number][],
+  ): Artifact[] => artifacts.map((artifact) => ({
+    kind: artifact.kind,
+    name: artifact.name,
+    ...(artifact.uri === null ? {} : { uri: artifact.uri }),
+    ...(artifact.mimeType === null ? {} : { mimeType: artifact.mimeType }),
+    ...(artifact.content === null ? {} : { content: artifact.content }),
+  }));
+
+  const synthesizeStructuredFailureFromEvidence = (
+    gate?: CompletionGateResult,
+  ): IndustrialAgentOutput =>
+    synthesizeStructuredFailure({
+      gate,
+      records: workflowToolRecords(),
+      artifacts: toProtocolArtifacts(structuredOutput?.artifacts ?? []),
+      deliveredArtifacts: deliveredArtifactsFromTools(),
+    });
+
+  const finalizeStructuredOutputFromRuntime = async (): Promise<IndustrialAgentOutput | undefined> => {
+    const protocolArtifacts = toProtocolArtifacts(structuredOutput?.artifacts ?? []);
+    const gate = runCompletionGate(output, protocolArtifacts);
+    const evidence = buildCompletionEvidenceSummaries({
+      records: workflowToolRecords(),
+      gate,
+      artifacts: protocolArtifacts,
+      deliveredArtifacts: deliveredArtifactsFromTools(),
+      deliveryContract: options.deliveryContract,
+      deliveryWorkflow,
+      authoritativeMessage: authoritativeWorkflowMessage(),
+    });
+    const finalized = await runFinalOutputFinalizer({
+      model,
+      tracingDisabled,
+      userText,
+      currentMessage: output,
+      gate,
+      records: workflowToolRecords(),
+      evidence,
+      artifacts: protocolArtifacts,
+      deliveredArtifacts: deliveredArtifactsFromTools(),
+      signal: options.signal,
+      log: agentLog,
+    });
+    if (finalized.usage) {
+      usage.inputTokens += finalized.usage.inputTokens;
+      usage.outputTokens += finalized.usage.outputTokens;
+      usage.requests += finalized.usage.requests;
+    }
+    return finalized.output;
+  };
+
+  const failedAgentRunResult = (
+    failure: IndustrialAgentOutput,
+  ): AgentRunResult => {
+    const projected = projectAgentOutput(
+      industrialAgentOutputDefinition,
+      failure,
+    );
+    const error = failure.message.trim() || "本轮未完成";
+    const result = createAgentResult({
+      status: "failed",
+      error,
+      output: failure,
+      usage,
+      diagnostics: projected.diagnostics,
+      artifacts: projected.artifacts,
+    });
+    return { result, output: failure.message, usage, status: "failed" };
+  };
+
   const chooseCompletionRepairTool = (
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): string | undefined => {
@@ -2443,9 +2522,9 @@ export async function runAgent(
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): void => {
     if (completionGateRetries >= MAX_COMPLETION_GATE_RETRIES) {
-      throw new AgentActionVerificationError(
-        `运行时完成验收仍未通过: ${gate.reason}`,
-      );
+      terminalFailureOutput = synthesizeStructuredFailureFromEvidence(gate);
+      agentLog(`[completion_gate] 已达到最大修复次数，返回结构化失败结果: ${gate.reason}`);
+      return;
     }
     completionGateRetries += 1;
     runtimeCompletionRepairInstruction = gate.repairInstruction;
@@ -2615,6 +2694,7 @@ export async function runAgent(
         bailed = true;
       } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
         salvagedInvalidFinalOutput = true;
+        finalizerRequired = true;
       } else {
         throw e;
       }
@@ -2635,6 +2715,7 @@ export async function runAgent(
           bailed = true;
         } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
           salvagedInvalidFinalOutput = true;
+          finalizerRequired = true;
         } else {
           throw e;
         }
@@ -2657,6 +2738,7 @@ export async function runAgent(
         if (parsed.success) {
           structuredOutput = parsed.data as IndustrialAgentOutput;
         } else {
+          finalizerRequired = true;
           structuredOutput = coerceIndustrialAgentOutput(stream.finalOutput);
           if (!structuredOutput) {
             salvagedInvalidFinalOutput = true;
@@ -2685,6 +2767,7 @@ export async function runAgent(
       !structuredOutput &&
       output.trim()
     ) {
+      finalizerRequired = true;
       structuredOutput = coerceIndustrialAgentOutput(output) ?? {
         message: output,
         diagnostics: [],
@@ -2696,19 +2779,7 @@ export async function runAgent(
         "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
       );
     }
-    if (
-      structuredMode &&
-      salvagedInvalidFinalOutput &&
-      !structuredOutput
-    ) {
-      structuredOutput = synthesizeStructuredOutputFromEvidence();
-      if (structuredOutput) {
-        output = structuredOutput.message;
-        agentLog(
-          "[output] 最终输出不符合 schema，已根据工具账本合成完成结果",
-        );
-      }
-    }
+
     if (cancelled) return "cancelled";
     return bailed ? "empty-bailed" : "done";
   };
@@ -2987,24 +3058,35 @@ export async function runAgent(
           status: "completed",
         };
       }
+      const needsFinalizer = finalizerRequired || !structuredOutput;
+      if (needsFinalizer) {
+        const hadInvalidFinalOutput = finalizerRequired;
+        const finalized = await finalizeStructuredOutputFromRuntime();
+        finalizerRequired = false;
+        if (finalized) {
+          structuredOutput = finalized;
+          output = finalized.message;
+        } else if (hadInvalidFinalOutput) {
+          structuredOutput = undefined;
+        }
+      }
       if (!structuredOutput) {
         structuredOutput = synthesizeStructuredOutputFromEvidence();
-        if (!structuredOutput) {
-          const fallbackMessage = fallbackRequiredToolMessage();
-          if (requiredTool && hasAttemptedRequiredAction() && fallbackMessage) {
-            structuredOutput = {
-              message: fallbackMessage,
-              diagnostics: [],
-              artifacts: [],
-              data: null,
-            };
-          }
+        if (structuredOutput) output = structuredOutput.message;
+      }
+      if (!structuredOutput) {
+        const fallbackMessage = fallbackRequiredToolMessage();
+        if (requiredTool && hasAttemptedRequiredAction() && fallbackMessage) {
+          structuredOutput = {
+            message: fallbackMessage,
+            diagnostics: [],
+            artifacts: [],
+            data: null,
+          };
         }
-        if (!structuredOutput) {
-          throw new AgentOutputValidationError(
-            "Agent 未返回符合 Schema 的最终结构化结果",
-          );
-        }
+      }
+      if (!structuredOutput) {
+        return failedAgentRunResult(synthesizeStructuredFailureFromEvidence());
       }
       assertPlanCompleted();
       const authoritativeMessage = authoritativeWorkflowMessage();
@@ -3026,6 +3108,7 @@ export async function runAgent(
       await reviewCompletionGateDecision(message, structuredProjection.artifacts, gate);
       if (!gate.passed) {
         continueAfterCompletionGateFailure(state, gate);
+        if (terminalFailureOutput) return failedAgentRunResult(terminalFailureOutput);
         continue;
       }
       const verifiedArtifacts = await verifyRequiredActions();
