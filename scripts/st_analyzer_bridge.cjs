@@ -86,20 +86,23 @@ function declNamesOf(item) {
   return names;
 }
 
-// VAR_EXTERNAL 声明块的判定:沿引用解析结果的容器链找 definition 标记
-// (上游校验器用 input.definition === 'VAR_EXTERNAL' 区分,这里保持同一口径)。
+// VAR_EXTERNAL 声明块的判定:解析结果落在本文件时,只有来自 VAR_EXTERNAL 块的声明
+// 才算"引入全局变量"。用声明所在列表的 CST 文本判定(以 VAR_EXTERNAL 关键字开头),
+// 避免同名局部变量产生假边。
 function isVarExternalResolution(reference) {
   let node = reference && reference.ref;
   let depth = 0;
   while (node && typeof node === 'object' && depth < 8) {
     if (node.definition === 'VAR_EXTERNAL') return true;
+    const cst = node.$cstNode;
+    if (cst && typeof cst.text === 'string' && /^\s*VAR_EXTERNAL\b/i.test(cst.text)) return true;
     node = node.$container;
     depth += 1;
   }
   return false;
 }
 
-function buildGraphAnalysis(created, request) {
+function buildGraphAnalysis(shared, created, request) {
   const options = request.options || {};
   const maxEdges = options.maxEdges || 2000;
   const maxUnresolved = 50;
@@ -305,49 +308,72 @@ function buildImpactAnalysis(graphData, request) {
     return uri.toString();
   };
 
+  const action = typeof request.action === 'string' && request.action ? request.action : 'validate';
   let exitCode = 0;
   let payload = null;
   try {
     const targets = Array.isArray(request.targets) ? request.targets : [];
     const context = Array.isArray(request.context) ? request.context : [];
-    for (const item of context) addDocument(item);
-    const targetKeys = targets.map(addDocument);
 
-    // 校验由我们显式调用,build 阶段不再重复跑
-    await shared.workspace.DocumentBuilder.build(created.map((item) => item.document), { validation: false });
+    if (action === 'graph' || action === 'impact') {
+      // 图/影响面动作把 targets 与 context 合并成一个构建池(或由 files 显式给出)
+      const pool = Array.isArray(request.files) && request.files.length ? request.files : [...context, ...targets];
+      for (const item of pool) addDocument(item);
+      await shared.workspace.DocumentBuilder.build(created.map((item) => item.document), { validation: false });
+      const graph = buildGraphAnalysis(shared, created, request);
+      payload = {
+        protocolVersion: 1,
+        engine: engineInfo(),
+        graph,
+        contextLoaded: pool.length,
+        elapsedMs: Date.now() - startedAt,
+      };
+      if (action === 'impact') {
+        payload.impact = buildImpactAnalysis(graph, request);
+      }
+    } else if (action === 'validate') {
+      for (const item of context) addDocument(item);
+      const targetKeys = targets.map(addDocument);
 
-    const results = [];
-    for (let index = 0; index < targets.length; index += 1) {
-      const record = created.find((item) => item.key === targetKeys[index]);
-      const raw = await st.validation.DocumentValidator.validateDocument(record.document);
-      const mapped = raw.map((diagnostic) => ({
-        severity: SEVERITY_BY_LSP[diagnostic.severity] || 'error',
-        rawCode: diagnostic.code == null ? null : diagnostic.code,
-        message: String(diagnostic.message || '').replace(/\s+/g, ' ').slice(0, 500),
-        line: diagnostic.range.start.line + 1,
-        character: diagnostic.range.start.character + 1,
-        endLine: diagnostic.range.end.line + 1,
-        endCharacter: diagnostic.range.end.character + 1,
-        source: diagnostic.source,
-      }));
-      const limited = mapped.slice(0, maxDiagnostics);
-      results.push({
-        path: targets[index].path,
-        errorCount: limited.filter((item) => item.severity === 'error').length,
-        warningCount: limited.filter((item) => item.severity === 'warning').length,
-        infoCount: limited.filter((item) => item.severity === 'info').length,
-        truncated: mapped.length > limited.length,
-        diagnostics: limited,
-      });
+      // 校验由我们显式调用,build 阶段不再重复跑
+      await shared.workspace.DocumentBuilder.build(created.map((item) => item.document), { validation: false });
+
+      const results = [];
+      for (let index = 0; index < targets.length; index += 1) {
+        const record = created.find((item) => item.key === targetKeys[index]);
+        const raw = await st.validation.DocumentValidator.validateDocument(record.document);
+        const mapped = raw.map((diagnostic) => ({
+          severity: SEVERITY_BY_LSP[diagnostic.severity] || 'error',
+          rawCode: diagnostic.code == null ? null : diagnostic.code,
+          message: String(diagnostic.message || '').replace(/\s+/g, ' ').slice(0, 500),
+          line: diagnostic.range.start.line + 1,
+          character: diagnostic.range.start.character + 1,
+          endLine: diagnostic.range.end.line + 1,
+          endCharacter: diagnostic.range.end.character + 1,
+          source: diagnostic.source,
+        }));
+        const limited = mapped.slice(0, maxDiagnostics);
+        results.push({
+          path: targets[index].path,
+          errorCount: limited.filter((item) => item.severity === 'error').length,
+          warningCount: limited.filter((item) => item.severity === 'warning').length,
+          infoCount: limited.filter((item) => item.severity === 'info').length,
+          truncated: mapped.length > limited.length,
+          diagnostics: limited,
+        });
+      }
+
+      payload = {
+        protocolVersion: 1,
+        engine: engineInfo(),
+        results,
+        contextLoaded: context.length,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } else {
+      process.stderr.write('unsupported action: ' + action + '\n');
+      exitCode = 3;
     }
-
-    payload = {
-      protocolVersion: 1,
-      engine: engineInfo(),
-      results,
-      contextLoaded: context.length,
-      elapsedMs: Date.now() - startedAt,
-    };
   } catch (error) {
     process.stderr.write('validate failed: ' + ((error && error.stack) || error) + '\n');
     exitCode = 4;

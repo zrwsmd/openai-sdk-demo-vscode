@@ -16,6 +16,7 @@ import { createWorkspaceReadTools } from "./tools/workspaceReadTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createWriteFileTool } from "./tools/writeFileTool";
 import { createRunCommandTool } from "./tools/runCommandTool";
+import { createStGraphTools } from "./tools/dependencyTools";
 
 export {
   commandToolResult,
@@ -60,6 +61,7 @@ export function buildTools(
     validateStContentBeforeWrite,
   );
   const runCommandTool = createRunCommandTool(context);
+  const { stDependencyMap, stChangeImpact } = createStGraphTools(context);
 
   const allTools = [
     getIoTable,
@@ -71,6 +73,8 @@ export function buildTools(
     searchFilesTool,
     writeFileTool,
     runCommandTool,
+    stDependencyMap,
+    stChangeImpact,
   ];
   if (workflowToolNames) {
     return allTools.filter((item) => {
