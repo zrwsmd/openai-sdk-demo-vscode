@@ -921,12 +921,126 @@ function summarizeOutgoing(body: unknown): string {
   }
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeToolArguments(raw: unknown): {
+  value: string;
+  repaired: boolean;
+} {
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (isJsonRecord(parsed)) return { value: raw, repaired: false };
+    } catch {
+      // A provider may leave a partial argument string after a failed stream.
+    }
+  }
+  return { value: "{}", repaired: true };
+}
+
+/**
+ * Prevent malformed function-call history from poisoning the next
+ * OpenAI-compatible request. This is intentionally independent of tools and
+ * workflows: every function call must carry a JSON object on the wire.
+ */
+export function sanitizeChatCompletionRequestBody(body: unknown): {
+  body: unknown;
+  repaired: number;
+  toolNames: string[];
+} {
+  if (typeof body !== "string") {
+    return { body, repaired: 0, toolNames: [] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return { body, repaired: 0, toolNames: [] };
+  }
+  if (!isJsonRecord(parsed)) return { body, repaired: 0, toolNames: [] };
+
+  let repaired = 0;
+  const toolNames: string[] = [];
+  let next = parsed;
+
+  const messages = parsed.messages;
+  if (Array.isArray(messages)) {
+    let nextMessages: unknown[] | undefined;
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+      const message = messages[messageIndex];
+      if (!isJsonRecord(message) || !Array.isArray(message.tool_calls)) continue;
+
+      let nextCalls: unknown[] | undefined;
+      for (let callIndex = 0; callIndex < message.tool_calls.length; callIndex += 1) {
+        const call = message.tool_calls[callIndex];
+        if (!isJsonRecord(call) || !isJsonRecord(call.function)) continue;
+
+        const normalized = normalizeToolArguments(call.function.arguments);
+        if (!normalized.repaired) continue;
+        repaired += 1;
+        const name = typeof call.function.name === "string" && call.function.name
+          ? call.function.name
+          : "?";
+        toolNames.push(name);
+        nextCalls ??= message.tool_calls.slice();
+        nextCalls[callIndex] = {
+          ...call,
+          function: { ...call.function, arguments: normalized.value },
+        };
+      }
+
+      if (nextCalls) {
+        nextMessages ??= messages.slice();
+        nextMessages[messageIndex] = { ...message, tool_calls: nextCalls };
+      }
+    }
+    if (nextMessages) next = { ...next, messages: nextMessages };
+  }
+
+  // Also cover Responses-style function_call history when this shared fetch
+  // is used by an adapter that sends `input` instead of `messages`.
+  const input = parsed.input;
+  if (Array.isArray(input)) {
+    let nextInput: unknown[] | undefined;
+    for (let itemIndex = 0; itemIndex < input.length; itemIndex += 1) {
+      const item = input[itemIndex];
+      if (!isJsonRecord(item) || item.type !== "function_call") continue;
+      const normalized = normalizeToolArguments(item.arguments);
+      if (!normalized.repaired) continue;
+      repaired += 1;
+      const name = typeof item.name === "string" && item.name ? item.name : "?";
+      toolNames.push(name);
+      nextInput ??= input.slice();
+      nextInput[itemIndex] = { ...item, arguments: normalized.value };
+    }
+    if (nextInput) next = { ...next, input: nextInput };
+  }
+
+  return repaired === 0
+    ? { body, repaired: 0, toolNames: [] }
+    : { body: JSON.stringify(next), repaired, toolNames };
+}
+
 function makeLoggingFetch(): unknown {
   return async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const isChat = url.includes("/chat/completions");
-    if (isChat) agentLog(`[req] ${summarizeOutgoing(init?.body)}`);
-    const resp = await fetch(input as never, init as never);
+    const sanitized = sanitizeChatCompletionRequestBody(init?.body);
+    const requestInit = sanitized.repaired > 0
+      ? { ...(init ?? {}), body: sanitized.body as RequestInit["body"] }
+      : init;
+    if (sanitized.repaired > 0) {
+      agentLog(
+        `[req-sanitize] 已修复非法工具参数 count=${sanitized.repaired} tools=${sanitized.toolNames.join(",") || "?"}，已用 {} 继续请求`,
+      );
+    }
+    if (isChat) agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
+    const resp = await fetch(input as never, requestInit as never);
     if (!isChat || !resp.body) return resp;
     const [userSide, tap] = resp.body.tee(); // 原样透传给 SDK,旁路只做解析统计
     void (async () => {

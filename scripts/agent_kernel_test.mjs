@@ -14,11 +14,41 @@ import {
   MaxTurnsExceededError,
   MAX_TURNS,
   createDeliveryContract,
+  sanitizeChatCompletionRequestBody,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
 const diagLines = [];
 setAgentLogger((line) => diagLines.push(line));
+
+// [0] 出站请求边界:任意工具产生空参数、非法 JSON 或非对象参数时,
+// 下一次 OpenAI 兼容请求必须被修复,且已经合法的对象参数保持原样。
+{
+  const raw = JSON.stringify({
+    model: 'mock-model',
+    messages: [
+      {
+        role: 'assistant',
+        tool_calls: [
+          { id: 'call-empty', type: 'function', function: { name: 'arbitrary_tool', arguments: '' } },
+          { id: 'call-invalid', type: 'function', function: { name: 'another_tool', arguments: '{"x":' } },
+          { id: 'call-valid', type: 'function', function: { name: 'kept_tool', arguments: '{"x":1}' } },
+        ],
+      },
+    ],
+    input: [
+      { type: 'function_call', name: 'response_tool', arguments: '' },
+    ],
+  });
+  const sanitized = sanitizeChatCompletionRequestBody(raw);
+  const request = JSON.parse(sanitized.body);
+  const args = request.messages[0].tool_calls.map((call) => call.function.arguments);
+  if (sanitized.repaired !== 3 || args[0] !== '{}' || args[1] !== '{}' || args[2] !== '{"x":1}') {
+    throw new Error(`工具参数出站修复结果不正确: ${JSON.stringify({ repaired: sanitized.repaired, args })}`);
+  }
+  if (request.input[0].arguments !== '{}') throw new Error('Responses 风格 function_call 参数没有修复');
+  console.log('[0] 通用工具参数出站修复:通过 | 修复数 =', sanitized.repaired);
+}
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-test-'));
 const mockGatewayPort = process.env.MOCK_GATEWAY_PORT || '8790';
