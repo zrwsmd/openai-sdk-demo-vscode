@@ -872,9 +872,21 @@ export function setAgentLogger(fn: (line: string) => void): void {
   agentLog = fn;
 }
 
+function requestBodyText(body: unknown): string | undefined {
+  if (typeof body === "string") return body;
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+  if (ArrayBuffer.isView(body)) {
+    return new TextDecoder().decode(
+      new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength),
+    );
+  }
+  return undefined;
+}
+
 function summarizeOutgoing(body: unknown): string {
   try {
-    const j = (typeof body === "string" ? JSON.parse(body) : body) as {
+    const text = requestBodyText(body);
+    const j = (text !== undefined ? JSON.parse(text) : body) as {
       model?: string;
       stream?: boolean;
       messages?: {
@@ -952,13 +964,14 @@ export function sanitizeChatCompletionRequestBody(body: unknown): {
   repaired: number;
   toolNames: string[];
 } {
-  if (typeof body !== "string") {
+  const text = requestBodyText(body);
+  if (text === undefined) {
     return { body, repaired: 0, toolNames: [] };
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(body) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch {
     return { body, repaired: 0, toolNames: [] };
   }
@@ -1026,6 +1039,93 @@ export function sanitizeChatCompletionRequestBody(body: unknown): {
     : { body: JSON.stringify(next), repaired, toolNames };
 }
 
+function chatRequestUsesStream(body: unknown): boolean {
+  const text = requestBodyText(body);
+  if (text === undefined) return true;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return isJsonRecord(parsed) ? parsed.stream === true : true;
+  } catch {
+    return true;
+  }
+}
+
+type ToolArgumentLog = { id?: string; name?: string; args: string };
+
+function stringLength(value: unknown): number {
+  return typeof value === "string" ? value.length : 0;
+}
+
+function collectNonStreamReasoningChars(message: JsonRecord): number {
+  const providerFields = isJsonRecord(message.provider_specific_fields)
+    ? message.provider_specific_fields
+    : undefined;
+  const reasoning =
+    message.reasoning_content ??
+    message.reasoning ??
+    providerFields?.reasoning_content ??
+    providerFields?.reasoning;
+  return stringLength(reasoning);
+}
+
+export function summarizeNonStreamChatCompletionResponse(
+  status: number,
+  text: string,
+): { summary: string; toolArgs: ToolArgumentLog[]; emptyTail?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return {
+      summary: `[resp] HTTP ${status} 非流式响应无法解析`,
+      toolArgs: [],
+      emptyTail: text.slice(-500).replace(/\n/g, "⏎"),
+    };
+  }
+  if (!isJsonRecord(parsed)) {
+    return {
+      summary: `[resp] HTTP ${status} 非流式响应不是 JSON 对象`,
+      toolArgs: [],
+      emptyTail: text.slice(-500).replace(/\n/g, "⏎"),
+    };
+  }
+
+  const errorLine = parsed.error ? JSON.stringify(parsed.error).slice(0, 300) : "";
+  const choice = Array.isArray(parsed.choices) && isJsonRecord(parsed.choices[0])
+    ? parsed.choices[0]
+    : undefined;
+  const message = isJsonRecord(choice?.message) ? choice.message : undefined;
+  const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : "-";
+  const contentChars = message ? stringLength(message.content) : 0;
+  const reasoningChars = message ? collectNonStreamReasoningChars(message) : 0;
+  const rawToolCalls = message && Array.isArray(message.tool_calls)
+    ? message.tool_calls
+    : [];
+  const toolArgs: ToolArgumentLog[] = [];
+  for (const toolCall of rawToolCalls) {
+    if (!isJsonRecord(toolCall) || !isJsonRecord(toolCall.function)) continue;
+    const rawArgs = toolCall.function.arguments;
+    toolArgs.push({
+      id: typeof toolCall.id === "string" ? toolCall.id : undefined,
+      name: typeof toolCall.function.name === "string"
+        ? toolCall.function.name
+        : undefined,
+      args: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs ?? null),
+    });
+  }
+
+  const summary =
+    `[resp] HTTP ${status} 非流式 正文=${contentChars}字符 ` +
+    `推理=${reasoningChars}字符 工具调用=${rawToolCalls.length} finish=${finish}` +
+    `${errorLine ? " ERROR=" + errorLine : ""}`;
+  const emptyTail =
+
+    !errorLine && contentChars === 0 && reasoningChars === 0 && rawToolCalls.length === 0
+      ? text.slice(-500).replace(/\n/g, "⏎")
+      : undefined;
+  return { summary, toolArgs, emptyTail };
+}
+
 function makeLoggingFetch(): unknown {
   return async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1042,6 +1142,9 @@ function makeLoggingFetch(): unknown {
     if (isChat) agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
     const resp = await fetch(input as never, requestInit as never);
     if (!isChat || !resp.body) return resp;
+    const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+    const requestUsesStream = contentType.includes("text/event-stream")
+      || (!contentType.includes("application/json") && chatRequestUsesStream(requestInit?.body));
     const [userSide, tap] = resp.body.tee(); // 原样透传给 SDK,旁路只做解析统计
     void (async () => {
       let text = "";
@@ -1054,6 +1157,24 @@ function makeLoggingFetch(): unknown {
         }
       } catch (e) {
         agentLog(`[resp] 旁路读取异常: ${e}`);
+        return;
+      }
+      const trimmed = text.trim();
+      const looksLikeJsonObject = trimmed.startsWith("{");
+      const looksLikeSse = trimmed.startsWith("data:") || trimmed.includes("\ndata:") || contentType.includes("text/event-stream");
+      if (!requestUsesStream || (looksLikeJsonObject && !looksLikeSse)) {
+        const nonStream = summarizeNonStreamChatCompletionResponse(resp.status, text);
+        agentLog(nonStream.summary);
+        for (const [idx, call] of nonStream.toolArgs.entries()) {
+          const snippet =
+            call.args.length > 500 ? call.args.slice(0, 500) + "…" : call.args;
+          agentLog(
+            `[toolargs] #${idx} name=${call.name ?? "?"} id=${call.id ?? "-"} args=${JSON.stringify(snippet)}`,
+          );
+        }
+        if (nonStream.emptyTail) {
+          agentLog(`[resp] 非流式空完成原文(尾部): ${nonStream.emptyTail}`);
+        }
         return;
       }
       let contentChars = 0;
@@ -1130,7 +1251,7 @@ function makeLoggingFetch(): unknown {
       }
       if (contentChars === 0 && reasoningChars === 0 && toolCallDeltas === 0) {
         agentLog(
-          `[resp] 空完成原文(尾部): ${text.slice(-500).replace(/\n/g, "⏎")}`,
+            `[resp] 流式空完成原文(尾部): ${text.slice(-500).replace(/\n/g, "⏎")}`,
         );
       }
     })();

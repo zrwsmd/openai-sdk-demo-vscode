@@ -82,6 +82,22 @@ async function streamStructuredText(res, model, text) {
   }));
 }
 
+function sendNonStreamCompletion(res, model, content) {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    id: 'chatcmpl-mock-nonstream',
+    object: 'chat.completion',
+    created: 1,
+    model,
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content },
+      finish_reason: 'stop',
+    }],
+    usage: { prompt_tokens: 90, completion_tokens: 40, total_tokens: 130 },
+  }));
+}
+
 function endWithToolCall(res, model) {
   sse(res, toolCallChunk(model));
   sse(res, chunk(model, {}, 'tool_calls'));
@@ -343,6 +359,30 @@ const server = http.createServer((req, res) => {
           code: 'unsupported_parallel_tool_calls',
         },
       }));
+      return;
+    }
+
+    if (req_body.stream !== true) {
+      const finalizerContent = serializedMessages.includes("schema\u5d29\u5199\u5165")
+        ? JSON.stringify({
+            message: '已写入 schema崩写入.txt。',
+            diagnostics: [],
+            artifacts: [{
+              kind: 'file',
+              name: 'schema崩写入.txt',
+              uri: null,
+              mimeType: 'text/plain',
+              content: 'hello',
+            }],
+            data: null,
+          })
+        : JSON.stringify({
+            message: '已完成运行时结构化收尾。',
+            diagnostics: [],
+            artifacts: [],
+            data: null,
+          });
+      sendNonStreamCompletion(res, model, finalizerContent);
       return;
     }
 

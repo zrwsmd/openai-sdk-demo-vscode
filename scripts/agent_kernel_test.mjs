@@ -15,6 +15,7 @@ import {
   MAX_TURNS,
   createDeliveryContract,
   sanitizeChatCompletionRequestBody,
+  summarizeNonStreamChatCompletionResponse,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
@@ -48,6 +49,40 @@ setAgentLogger((line) => diagLines.push(line));
   }
   if (request.input[0].arguments !== '{}') throw new Error('Responses 风格 function_call 参数没有修复');
   console.log('[0] 通用工具参数出站修复:通过 | 修复数 =', sanitized.repaired);
+}
+
+{
+  const raw = JSON.stringify({
+    stream: false,
+    messages: [{
+      role: 'assistant',
+      tool_calls: [{ id: 'call-bytes', type: 'function', function: { name: 'byte_tool', arguments: '' } }],
+    }],
+  });
+  const sanitized = sanitizeChatCompletionRequestBody(new TextEncoder().encode(raw));
+  const request = JSON.parse(sanitized.body);
+  if (sanitized.repaired !== 1 || request.messages[0].tool_calls[0].function.arguments !== '{}') {
+    throw new Error('字节请求体的工具参数没有被修复');
+  }
+  console.log('[0c] 字节请求体工具参数修复:通过');
+}
+
+// [0b] 非流式 Chat Completions 响应是普通 JSON,不能按 SSE 误判成空完成。
+{
+  const summary = summarizeNonStreamChatCompletionResponse(200, JSON.stringify({
+    choices: [{
+      finish_reason: 'stop',
+      message: { role: 'assistant', content: '{"message":"ok","diagnostics":[],"artifacts":[],"data":null}' },
+    }],
+  }));
+  if (!summary.summary.includes('非流式') || summary.summary.includes('空完成') || summary.emptyTail) {
+    throw new Error(`非流式正常响应被误判: ${JSON.stringify(summary)}`);
+  }
+  const empty = summarizeNonStreamChatCompletionResponse(200, JSON.stringify({
+    choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '' } }],
+  }));
+  if (!empty.emptyTail) throw new Error('真正空的非流式响应没有保留原文尾部');
+  console.log('[0b] 非流式响应诊断:通过 |', summary.summary);
 }
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-test-'));
@@ -848,12 +883,30 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 
 // [9b] 工具已成功但最终 assistant 输出 schema 崩溃时，运行时必须按工具账本合成完成结果。
 {
+  const diagnosticsStart = diagLines.length;
   const r = await runTestTurn('写入 schema崩写入.txt', async () => true);
   const written = await fs.readFile(path.join(dir, 'schema崩写入.txt'), 'utf8');
   const toolCalls = r.events.filter((e) => e.type === 'tool.started').map((e) => e.payload.toolName);
+  const diagnosticsDeadline = Date.now() + 1_000;
+  while (
+    Date.now() < diagnosticsDeadline &&
+    !diagLines.slice(diagnosticsStart).some((line) => line.includes('[resp]') && line.includes('非流式'))
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const turnDiagnostics = diagLines.slice(diagnosticsStart);
+  const finalizerLines = turnDiagnostics.filter((line) => line.includes('[resp]') && line.includes('非流式'));
   console.log('[9b] 写入后 schema 崩兜底:工具链 =', toolCalls.join(','), '| 内容 =', written, '| 输出 =', r.output);
   if (toolCalls.join(',') !== 'write_file' || written !== 'hello' || !r.output.includes('schema崩写入.txt')) {
     throw new Error('最终 schema 崩溃后没有按成功 write_file 工具账本完成');
+  }
+  if (
+    !finalizerLines.length ||
+    turnDiagnostics.some((line) =>
+      line.includes('流式空完成原文') || line.includes('非流式空完成原文'),
+    )
+  ) {
+    throw new Error('非流式最终收尾仍被诊断器误判为空完成');
   }
 }
 
