@@ -6,10 +6,16 @@
  */
 import {
   parseStAnalyzerResponse,
+  parseStGraphResponse,
+  parseStImpactResponse,
   ST_ANALYZER_PROTOCOL_VERSION,
   StAnalyzerUnavailableError,
   type StAnalyzer,
   type StAnalyzerLaunch,
+  type StGraphRequest,
+  type StGraphResult,
+  type StImpactRequest,
+  type StImpactResult,
   type StValidationRequest,
   type StValidationResult,
 } from './stAnalyzer';
@@ -34,18 +40,67 @@ export class SpawnStAnalyzer implements StAnalyzer {
     context?: { signal?: AbortSignal },
   ): Promise<StValidationResult> {
     const startedAt = this.now();
+    const raw = await this.runAction('validate', {
+      workspaceRoot: request.workspaceRoot,
+      targets: request.targets,
+      context: request.context ?? [],
+      options: {
+        maxDiagnostics: request.options?.maxDiagnostics ?? this.cfg.maxDiagnostics ?? 200,
+      },
+    }, context);
+    const parsed = parseStAnalyzerResponse(raw);
+    return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
+  }
+
+  async dependencyGraph(
+    request: StGraphRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StGraphResult> {
+    const startedAt = this.now();
+    const raw = await this.runAction('graph', {
+      workspaceRoot: request.workspaceRoot,
+      files: request.files,
+      options: request.options ?? {},
+    }, context);
+    const parsed = parseStGraphResponse(raw);
+    return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
+  }
+
+  async changeImpact(
+    request: StImpactRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StImpactResult> {
+    const startedAt = this.now();
+    const raw = await this.runAction('impact', {
+      workspaceRoot: request.workspaceRoot,
+      files: request.files,
+      options: {
+        ...(request.options ?? {}),
+        impactTarget: request.target,
+        ...(request.symbols ? { symbols: request.symbols } : {}),
+        ...(request.granularity ? { granularity: request.granularity } : {}),
+      },
+    }, context);
+    const parsed = parseStImpactResponse(raw);
+    return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
+  }
+
+  /**
+   * 执行一次桥动作(validate/graph/impact 共用)。
+   * 按候选链依次尝试;不可用错误换下一个候选;取消原样上抛。
+   */
+  private async runAction(
+    action: string,
+    payload: Record<string, unknown>,
+    context?: { signal?: AbortSignal },
+  ): Promise<string> {
     if (!this.cfg.launches.length) {
       throw new StAnalyzerUnavailableError('st_analyzer_not_configured', 'no launch candidate');
     }
-
     let lastError: StAnalyzerUnavailableError | undefined;
     for (const launch of this.cfg.launches) {
       try {
-        const result = await this.verifyWith(launch, request, context);
-        return {
-          ...result,
-          elapsedMs: result.elapsedMs || this.now() - startedAt,
-        };
+        return await this.runActionOn(launch, action, payload, context);
       } catch (error) {
         // 用户取消不是"换个候选再试"的场景,直接向上抛,由运行层判定 cancelled
         if (context?.signal?.aborted) throw error;
@@ -62,25 +117,20 @@ export class SpawnStAnalyzer implements StAnalyzer {
     throw lastError ?? new StAnalyzerUnavailableError('st_analyzer_unavailable', 'all candidates failed');
   }
 
-  private async verifyWith(
+  private async runActionOn(
     launch: StAnalyzerLaunch,
-    request: StValidationRequest,
+    action: string,
+    payload: Record<string, unknown>,
     context?: { signal?: AbortSignal },
-  ): Promise<StValidationResult> {
-    const payload = {
-      protocolVersion: ST_ANALYZER_PROTOCOL_VERSION,
-      workspaceRoot: request.workspaceRoot,
-      targets: request.targets,
-      context: request.context ?? [],
-      options: {
-        maxDiagnostics: request.options?.maxDiagnostics ?? this.cfg.maxDiagnostics ?? 200,
-      },
-    };
-
+  ): Promise<string> {
     const run = await this.cfg.runner.run(launch.exe, launch.args, {
       cwd: launch.cwd,
       ...(launch.env ? { env: launch.env } : {}),
-      stdin: JSON.stringify(payload),
+      stdin: JSON.stringify({
+        protocolVersion: ST_ANALYZER_PROTOCOL_VERSION,
+        action,
+        ...payload,
+      }),
       timeoutMs: this.cfg.timeoutMs ?? 20_000,
       ...(context?.signal ? { signal: context.signal } : {}),
       stdoutMode: 'last-json-line',
@@ -104,14 +154,7 @@ export class SpawnStAnalyzer implements StAnalyzer {
         `exit=${String(run.code)} ${firstLine(run.stderr)}`.trim(),
       );
     }
-
-    const parsed = parseStAnalyzerResponse(run.stdout);
-    return {
-      engine: parsed.engine,
-      results: parsed.results,
-      contextLoaded: parsed.contextLoaded,
-      elapsedMs: parsed.elapsedMs,
-    };
+    return run.stdout;
   }
 
   private now(): number {

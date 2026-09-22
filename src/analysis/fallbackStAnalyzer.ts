@@ -8,6 +8,10 @@ import {
   StAnalyzerUnavailableError,
   type StAnalyzer,
   type StDiagnostic,
+  type StGraphResult,
+  type StGraphRequest,
+  type StImpactRequest,
+  type StImpactResult,
   type StTarget,
   type StValidationRequest,
   type StValidationResult,
@@ -62,6 +66,33 @@ export class FallbackStAnalyzer implements StAnalyzer {
       elapsedMs: Date.now() - startedAt,
     };
   }
+
+  /**
+   * 依赖图/影响面在降级下给不出可靠结果:返回空图会让模型误以为"没有依赖",
+   * 所以如实标注 unsupported,由工具层据此告知改用文本搜索。
+   */
+  async dependencyGraph(request: StGraphRequest): Promise<StGraphResult> {
+    return {
+      engine: { id: 'fallback', fallbackReason: this.reason },
+      files: request.files.map((file) => file.path),
+      edges: [],
+      cycles: [],
+      unresolved: [],
+      externalCount: 0,
+      elapsedMs: 0,
+    };
+  }
+
+  async changeImpact(request: StImpactRequest): Promise<StImpactResult> {
+    return {
+      engine: { id: 'fallback', fallbackReason: this.reason },
+      target: request.target,
+      granularity: request.granularity === 'symbol' ? 'symbol' : 'file',
+      directDependents: [],
+      allDependents: [],
+      elapsedMs: 0,
+    };
+  }
 }
 
 /**
@@ -95,6 +126,50 @@ export class ResilientStAnalyzer implements StAnalyzer {
         };
       }
       throw error; // 取消/未知错误照常向上抛,不伪装成校验结论
+    }
+  }
+
+  async dependencyGraph(
+    request: StGraphRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StGraphResult> {
+    try {
+      return await this.primary.dependencyGraph(request, context);
+    } catch (error) {
+      if (error instanceof StAnalyzerUnavailableError) {
+        const result = await this.fallback.dependencyGraph(request, context);
+        return {
+          ...result,
+          engine: {
+            ...result.engine,
+            fallbackReason: error.code,
+            ...(error.detail ? { detail: error.detail } : {}),
+          },
+        };
+      }
+      throw error;
+    }
+  }
+
+  async changeImpact(
+    request: StImpactRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StImpactResult> {
+    try {
+      return await this.primary.changeImpact(request, context);
+    } catch (error) {
+      if (error instanceof StAnalyzerUnavailableError) {
+        const result = await this.fallback.changeImpact(request, context);
+        return {
+          ...result,
+          engine: {
+            ...result.engine,
+            fallbackReason: error.code,
+            ...(error.detail ? { detail: error.detail } : {}),
+          },
+        };
+      }
+      throw error;
     }
   }
 }

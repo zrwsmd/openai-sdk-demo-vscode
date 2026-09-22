@@ -75,6 +75,8 @@ export interface StImpactRequest extends StGraphRequest {
   target: string;
   /** 符号级影响时提供:只关心目标文件中的哪些符号 */
   symbols?: string[];
+  /** 影响面粒度,缺省为 file(保守,宁可多报) */
+  granularity?: 'file' | 'symbol';
 }
 
 /** 唯一的端口。宿主注入,内核消费。 */
