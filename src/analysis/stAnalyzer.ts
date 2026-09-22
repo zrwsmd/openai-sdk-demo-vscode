@@ -63,6 +63,20 @@ export interface StValidationResult {
   elapsedMs: number;
 }
 
+export interface StGraphRequest {
+  workspaceRoot: string;
+  /** 参与构建的全部 .st 文件(含目标与其依赖) */
+  files: StTarget[];
+  options?: StGraphAnalysisOptions;
+}
+
+export interface StImpactRequest extends StGraphRequest {
+  /** 被变更的文件(必须出现在 files 中) */
+  target: string;
+  /** 符号级影响时提供:只关心目标文件中的哪些符号 */
+  symbols?: string[];
+}
+
 /** 唯一的端口。宿主注入,内核消费。 */
 export interface StAnalyzer {
   readonly id: string;
@@ -70,6 +84,16 @@ export interface StAnalyzer {
     request: StValidationRequest,
     context?: { signal?: AbortSignal },
   ): Promise<StValidationResult>;
+  /** 工作区文件级依赖图(跨文件符号引用的语义聚合)。 */
+  dependencyGraph(
+    request: StGraphRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StGraphResult>;
+  /** 变更影响面:改动 target 文件(可选:其中特定符号)会波及哪些文件。 */
+  changeImpact(
+    request: StImpactRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StImpactResult>;
 }
 
 /**
@@ -256,6 +280,158 @@ export function parseStAnalyzerResponse(raw: string): StValidationResult {
     },
     results,
     contextLoaded: asNumber(parsed.contextLoaded),
+    elapsedMs: asNumber(parsed.elapsedMs),
+  };
+}
+
+// ---------- 依赖图 / 变更影响面(桥协议 v1 的 action 扩展) ----------
+
+/** 依赖图的一条边。from/to 是参与构建的文件路径(与请求中的 path 一致)。 */
+export interface StGraphEdge {
+  from: string;
+  to: string;
+  /** 被引用符号名(来自 AST 交叉引用,非文本匹配) */
+  symbols: string[];
+  /** 边的种类:reference=直接跨文件引用 / global=GVL 全局变量依赖 */
+  kinds: string[];
+}
+
+export interface StGraphResult {
+  engine: StAnalyzerEngineInfo;
+  files: string[];
+  edges: StGraphEdge[];
+  /** 互相可达的文件组(循环依赖),不影响构图 */
+  cycles: string[][];
+  /** 未解析引用(符号在任何文件里都找不到声明) */
+  unresolved: Array<{ file: string; symbol: string; count: number }>;
+  /** 外部库符号引用计数(来自 data.json 等,不产生文件边) */
+  externalCount: number;
+  elapsedMs: number;
+}
+
+export interface StImpactResult {
+  engine: StAnalyzerEngineInfo;
+  target: string;
+  granularity: 'file' | 'symbol';
+  directDependents: string[];
+  allDependents: string[];
+  /** 符号级时的细分:符号 -> 受影响文件 */
+  bySymbol?: Record<string, string[]>;
+  elapsedMs: number;
+}
+
+export interface StGraphAnalysisOptions {
+  /** 影响面目标文件(与 files 中的 path 一致) */
+  impactTarget?: string;
+  /** 符号级影响时提供 */
+  symbols?: string[];
+  granularity?: 'file' | 'symbol';
+  maxDependents?: number;
+  maxEdges?: number;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function parseGraphEdges(value: unknown): StGraphEdge[] {
+  const raw = Array.isArray(value) ? value : [];
+  return raw
+    .map((entry) => {
+      const record = (entry ?? {}) as Record<string, unknown>;
+      return {
+        from: asString(record.from),
+        to: asString(record.to),
+        symbols: asStringArray(record.symbols),
+        kinds: asStringArray(record.kinds),
+      };
+    })
+    .filter((edge) => edge.from && edge.to);
+}
+
+function parseStEngine(value: unknown): StAnalyzerEngineInfo {
+  const engineWire = (value ?? {}) as Record<string, unknown>;
+  const bundleMtime = asString(engineWire.bundleMtime);
+  const sourceCommit = asString(engineWire.sourceCommit);
+  const detail = [bundleMtime ? `bundle=${bundleMtime}` : '', sourceCommit ? `commit=${sourceCommit}` : '']
+    .filter(Boolean)
+    .join(' ');
+  return {
+    id: asString(engineWire.id, 'st-analyze'),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+function parseBridgeEnvelope(raw: string): Record<string, unknown> {
+  const text = raw.trim();
+  if (!text) {
+    throw new StAnalyzerUnavailableError('st_analyzer_protocol_error', 'empty stdout');
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch (error) {
+    throw new StAnalyzerUnavailableError(
+      'st_analyzer_protocol_error',
+      `invalid json: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new StAnalyzerUnavailableError('st_analyzer_protocol_error', 'response is not an object');
+  }
+  if (parsed.protocolVersion !== ST_ANALYZER_PROTOCOL_VERSION) {
+    throw new StAnalyzerUnavailableError(
+      'st_analyzer_protocol_error',
+      `protocolVersion=${String(parsed.protocolVersion)}`,
+    );
+  }
+  return parsed;
+}
+
+/** 解析 action=graph 的响应。结构异常归为协议错误(可降级),绝不返回假的空图。 */
+export function parseStGraphResponse(raw: string): StGraphResult {
+  const parsed = parseBridgeEnvelope(raw);
+  const graph = (parsed.graph ?? {}) as Record<string, unknown>;
+  const unresolvedRaw = Array.isArray(graph.unresolved) ? graph.unresolved : [];
+  return {
+    engine: parseStEngine(parsed.engine),
+    files: asStringArray(graph.files),
+    edges: parseGraphEdges(graph.edges),
+    cycles: (Array.isArray(graph.cycles) ? graph.cycles : [])
+      .map((group) => asStringArray(group))
+      .filter((group) => group.length > 0),
+    unresolved: unresolvedRaw.map((entry) => {
+      const record = (entry ?? {}) as Record<string, unknown>;
+      return { file: asString(record.file), symbol: asString(record.symbol), count: asNumber(record.count) };
+    }),
+    externalCount: asNumber(graph.externalCount),
+    elapsedMs: asNumber(parsed.elapsedMs),
+  };
+}
+
+/** 解析 action=impact 的响应。 */
+export function parseStImpactResponse(raw: string): StImpactResult {
+  const parsed = parseBridgeEnvelope(raw);
+  const impact = (parsed.impact ?? {}) as Record<string, unknown>;
+  const bySymbolRaw = (impact.bySymbol && typeof impact.bySymbol === 'object' && !Array.isArray(impact.bySymbol))
+    ? (impact.bySymbol as Record<string, unknown>)
+    : undefined;
+  const granularity = impact.granularity === 'symbol' ? 'symbol' : 'file';
+  return {
+    engine: parseStEngine(parsed.engine),
+    target: asString(impact.target),
+    granularity,
+    directDependents: asStringArray(impact.directDependents),
+    allDependents: asStringArray(impact.allDependents),
+    ...(bySymbolRaw
+      ? {
+          bySymbol: Object.fromEntries(
+            Object.entries(bySymbolRaw).map(([symbol, files]) => [symbol, asStringArray(files)]),
+          ),
+        }
+      : {}),
     elapsedMs: asNumber(parsed.elapsedMs),
   };
 }
