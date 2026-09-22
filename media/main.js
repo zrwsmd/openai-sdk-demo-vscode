@@ -208,9 +208,7 @@ function thinkingSegmentState(key, runId) {
 
 function isShortThinkingText(text) {
   const normalized = String(text ?? '').trim();
-  return normalized.length > 0 &&
-    normalized.length <= THINKING_INLINE_MAX_CHARS &&
-    !normalized.includes('\n');
+  return normalized.length > 0 && normalized.length <= THINKING_INLINE_MAX_CHARS;
 }
 
 function ensureThinkingCard(state) {
@@ -225,15 +223,63 @@ function ensureThinkingCard(state) {
   state.view.body.classList.remove('hidden');
 }
 
+function detachThinkingCard(state) {
+  const view = state.view;
+  if (!view) return;
+  view.segments?.delete(state.key);
+  const remaining = [...(view.segments?.values() ?? [])]
+    .map((text) => String(text ?? '').trim())
+    .filter(Boolean);
+  if (!remaining.length) {
+    for (const [key, mapped] of [...thinkingViews.entries()]) {
+      if (mapped === view) thinkingViews.delete(key);
+    }
+    if (view.el.isConnected) view.el.remove();
+  } else {
+    view.body.textContent = remaining.join('\n\n');
+  }
+  state.view = null;
+}
+
+function renderInlineThinking(state, text) {
+  if (state.inlineView) {
+    state.inlineView.textContent = text;
+  } else {
+    const el = document.createElement('div');
+    el.className = 'thinking-inline';
+    el.textContent = text;
+    const view = state.view;
+    const shared = Boolean(
+      view?.segments && [...view.segments.keys()].some((key) => key !== state.key),
+    );
+    if (view?.el?.parentNode && !shared) {
+      view.el.replaceWith(el);
+    } else if (view?.el?.parentNode) {
+      view.el.after(el);
+    } else {
+      messagesEl.appendChild(el);
+    }
+    state.inlineView = el;
+    thinkingInlineViews.set(state.key, el);
+  }
+  detachThinkingCard(state);
+  scrollBottom();
+}
+
 function finalizeThinkingSegment(state) {
   const text = state.text.trim();
-  if (!text) return;
-  if (!state.view && isShortThinkingText(text)) {
-    if (!state.inlineView) {
-      state.inlineView = addNote('thinking-inline', text);
-      thinkingInlineViews.set(state.key, state.inlineView);
-    }
+  if (!text) {
+    detachThinkingCard(state);
     return;
+  }
+  if (isShortThinkingText(text)) {
+    renderInlineThinking(state, text);
+    return;
+  }
+  if (state.inlineView) {
+    state.inlineView.remove();
+    thinkingInlineViews.delete(state.key);
+    state.inlineView = null;
   }
   ensureThinkingCard(state);
 }
@@ -326,9 +372,18 @@ function addThinkingUpdate(event) {
   } else if (summary.trim()) {
     state.text = payload.status === 'completed' ? summary : state.text + summary;
   }
-  if (state.text.length > THINKING_INLINE_MAX_CHARS || state.text.includes('\n')) {
-    ensureThinkingCard(state);
+  const liveText = String(state.text ?? '').trim();
+  if (!liveText) return;
+  if (isShortThinkingText(liveText)) {
+    renderInlineThinking(state, liveText);
+    return;
   }
+  if (state.inlineView) {
+    state.inlineView.remove();
+    thinkingInlineViews.delete(state.key);
+    state.inlineView = null;
+  }
+  ensureThinkingCard(state);
   // A reasoning item reaching "completed" is not a UI boundary. Providers
   // can emit response/model lifecycle events and the next reasoning item
   // around the same model turn. Keep one visible segment until a runtime
