@@ -33,6 +33,7 @@ export * from '../src/runtime/workflow/registry';
 export * from '../src/runtime/workflow/decisionService';
 export * from '../src/runtime/workflows/stDeliveryContract';
 export * from '../src/runtime/workflows/stWorkspaceDeliveryWorkflow';
+export * from '../src/runtime/workflows/stInspectionWorkflow';
 export * from '../src/app/settingsProfiles';
 export * from '../src/analysis/stAnalyzer';
 export * from '../src/analysis/stDiagnosticCodes';

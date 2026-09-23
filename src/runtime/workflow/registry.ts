@@ -1,8 +1,10 @@
 import { ST_WORKSPACE_DELIVERY_WORKFLOW } from "../workflows/stWorkspaceDeliveryWorkflow";
+import { ST_INSPECTION_WORKFLOW } from "../workflows/stInspectionWorkflow";
 import type { WorkflowDescriptor } from "./types";
 
 const WORKFLOWS: readonly WorkflowDescriptor[] = [
   ST_WORKSPACE_DELIVERY_WORKFLOW,
+  ST_INSPECTION_WORKFLOW,
 ];
 
 export function listWorkflows(): readonly WorkflowDescriptor[] {

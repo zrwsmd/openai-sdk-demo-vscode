@@ -18,6 +18,7 @@ import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 import type { StAnalyzerSettings } from '../analysis/stAnalyzer';
 import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
 import type { JevDecisionSettings } from './decision/agentDecision';
+import type { WorkflowId } from './workflow/types';
 
 export type DurableRunStatus =
   | 'running'
@@ -68,6 +69,8 @@ export interface DurableRunRecord {
   teamTask?: TeamTask;
   /** Runtime-visible contract for user-requested deliverables. */
   deliveryContract?: DeliveryContract;
+  /** Registered workflow selected before SDK execution. */
+  workflowId?: WorkflowId;
   /** Optional runtime tool allowlist selected by workflow fallback routing. */
   toolAllowlist?: string[];
   approvals: ApprovalRequest[];
@@ -161,6 +164,7 @@ export interface RunStore {
     plan?: TaskPlan,
     teamTask?: TeamTask,
     deliveryContract?: DeliveryContract,
+    workflowId?: WorkflowId,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -320,6 +324,7 @@ export class JsonRunStore implements RunStore {
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
+      (run.workflowId !== undefined && typeof run.workflowId !== 'string') ||
       (run.toolAllowlist !== undefined &&
         (!Array.isArray(run.toolAllowlist) || run.toolAllowlist.some((name) => typeof name !== 'string'))) ||
       !Array.isArray(run.approvals) ||
@@ -445,6 +450,7 @@ export class JsonRunStore implements RunStore {
     plan?: TaskPlan,
     teamTask?: TeamTask,
     deliveryContract?: DeliveryContract,
+    workflowId?: WorkflowId,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -460,6 +466,7 @@ export class JsonRunStore implements RunStore {
       plan,
       teamTask,
       deliveryContract,
+      workflowId,
       output: '',
       events: [],
       usage: { ...EMPTY_USAGE },

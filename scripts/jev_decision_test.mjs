@@ -3,6 +3,7 @@ import {
   classifyDeliveryContract,
   isStWorkspaceDeliveryContract,
   JevDecisionProvider,
+  ST_INSPECTION_WORKFLOW,
   WorkflowDecisionService,
 } from './agent.testbundle.mjs';
 
@@ -286,6 +287,78 @@ try {
   }
   if (!isStWorkspaceDeliveryContract(workflowDecision.deliveryContract)) {
     throw new Error('Jev workflow decision did not attach an ST delivery contract');
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+globalThis.fetch = async () => response({
+  model: 'jev-test',
+  answers: {
+    delivery: { type: 'noul', noul: 0.08 },
+    orchestration: {
+      type: 'choice',
+      choice: 'single',
+      probabilities: { single: 0.95, team: 0.05 },
+      confidence: 0.95,
+    },
+    workflow: {
+      type: 'choice',
+      choice: 'st_inspection',
+      probabilities: {
+        st_inspection: 0.96,
+        st_delivery: 0.01,
+        file_read: 0.02,
+        general_chat: 0.01,
+      },
+      confidence: 0.96,
+    },
+    needs_read_file: { type: 'noul', noul: 0.97 },
+    needs_write_file: { type: 'noul', noul: 0.02 },
+    needs_validate_st_code: { type: 'noul', noul: 0.01 },
+    needs_run_command: { type: 'noul', noul: 0.04 },
+    needs_approval: { type: 'noul', noul: 0.02 },
+    risk_level: {
+      type: 'choice',
+      choice: 'low',
+      probabilities: { low: 0.96, medium: 0.03, high: 0.01, critical: 0 },
+      confidence: 0.96,
+    },
+  },
+  usage: { input_tokens: 17, output_tokens: 8 },
+});
+try {
+  const workflowDecision = await new WorkflowDecisionService().decide(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
+    },
+    '分析一下当前工作区里这些 st 文件之间的依赖关系',
+  );
+  if (
+    workflowDecision.kind !== 'workflow' ||
+    workflowDecision.source !== 'jev' ||
+    workflowDecision.workflow.id !== 'st_inspection' ||
+    workflowDecision.deliveryContract !== undefined
+  ) {
+    throw new Error('Jev ST inspection request did not stay on the registered read-only workflow');
+  }
+  const runtime = ST_INSPECTION_WORKFLOW.createRuntime?.(undefined, {
+    slots: new Map(),
+  });
+  const tools = runtime?.visibleToolNames ?? [];
+  if (
+    tools.length !== 2 ||
+    !tools.includes('st_dependency_map') ||
+    !tools.includes('st_change_impact') ||
+    tools.includes('validate_st_code') ||
+    tools.includes('write_file')
+  ) {
+    throw new Error('ST inspection workflow exposed the wrong tool set');
   }
 } finally {
   globalThis.fetch = originalFetch;

@@ -87,7 +87,7 @@ import {
   type DeliveryContract,
 } from "./deliveryContract";
 import {
-  createDeliveryWorkflow,
+  createWorkflowRuntime,
   createDeliveryWorkflowRuntimeState,
 } from "./deliveryWorkflow";
 import { getStValidationState } from "./workflows/stWorkspaceDeliveryWorkflow";
@@ -161,6 +161,8 @@ export interface AgentRunOptions {
   teamTask?: TeamTask;
   /** Runtime delivery contract selected before execution. */
   deliveryContract?: DeliveryContract;
+  /** Registered workflow selected before execution. */
+  workflowId?: string;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
   /** Persists validated step transitions outside the SDK session. */
@@ -1852,7 +1854,8 @@ export async function runAgent(
   const model = modelAdapter.model;
   const workflowState = createDeliveryWorkflowRuntimeState();
   const stValidationState = getStValidationState(workflowState);
-  const deliveryWorkflow = createDeliveryWorkflow(
+  const deliveryWorkflow = createWorkflowRuntime(
+    options.workflowId,
     options.deliveryContract,
     workflowState,
   );
@@ -2049,6 +2052,10 @@ export async function runAgent(
         ? "\n本轮至少有一个交付物只能用 final_artifact 验收。优先调用 deliver_artifact 提交完整内容；也可以同时把内容放入最终 JSON 的 artifacts 数组。无论采用哪种方式，交付内容必须完整，不能只放摘要、计划或口头承诺。"
         : "")
     : "";
+  const workflowInstructions =
+    deliveryWorkflow && !options.deliveryContract?.requiresDeliverable
+      ? "\n\n当前 workflow 运行约束：" + deliveryWorkflow.instructions()
+      : "";
   let runtimeCompletionRepairInstruction = "";
   const buildAgent = (forcedTool?: string) => {
     const modelSettings = {
@@ -2060,9 +2067,10 @@ export async function runAgent(
     const instructions = runtimeCompletionRepairInstruction
       ? executionInstructions +
         deliveryInstructions +
+        workflowInstructions +
         "\n\n运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
         runtimeCompletionRepairInstruction
-      : executionInstructions + deliveryInstructions;
+      : executionInstructions + deliveryInstructions + workflowInstructions;
     // The legacy native handoff team remains available for direct callers.
     // Coordinated V3 runs always provide teamTask and use this controlled
     // executor, so their durable graph remains the source of truth.

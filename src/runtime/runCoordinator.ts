@@ -43,8 +43,8 @@ import {
   type TaskPlanProgress,
 } from './taskPlan';
 import {
-  describeDeliveryWorkflow,
-  isRuntimeManagedDeliveryWorkflow,
+  describeWorkflow,
+  isRuntimeManagedWorkflow,
 } from './deliveryWorkflow';
 import { inferStDeliveryContractFromUserText } from './workflows/stDeliveryContract';
 import {
@@ -112,13 +112,15 @@ function isTeamPreparationSchemaError(error: unknown): boolean {
 }
 
 function shouldUseRuntimeManagedWorkflow(
+  workflowId: DurableRunRecord['workflowId'],
   contract: DurableRunRecord['deliveryContract'],
   orchestration: DurableRunConfig['orchestration'],
 ): boolean {
-  return orchestration !== 'team' && isRuntimeManagedDeliveryWorkflow(contract);
+  return orchestration !== 'team' && isRuntimeManagedWorkflow(workflowId, contract);
 }
 
 function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): boolean {
+  if (decision?.kind === 'workflow' && decision.workflow.runtimeManaged) return true;
   return decision?.kind === 'fallback' &&
     decision.source === 'model' &&
     (decision.mode === 'general_chat' ||
@@ -468,6 +470,7 @@ export class RunCoordinator {
           { modelClassifier: this.classifyWorkflowDecision },
         );
         if (workflowDecision.kind === 'workflow') {
+          run.workflowId = workflowDecision.workflow.id;
           run.deliveryContract = workflowDecision.deliveryContract ??
             workflowDecision.workflow.createDeliveryContract({
               source: workflowDecision.source,
@@ -475,6 +478,8 @@ export class RunCoordinator {
             });
           run.toolAllowlist = undefined;
         } else {
+          run.workflowId = undefined;
+          run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
         }
         if (!this.isClearing(generation) && !this.stopRequested) {
@@ -543,7 +548,11 @@ export class RunCoordinator {
       if (this.isClearing(generation)) return;
       await this.audit('run_started', run, { model: config.model });
       if (this.isClearing(generation)) return;
-      const runtimeManagedWorkflow = shouldUseRuntimeManagedWorkflow(run.deliveryContract, config.orchestration);
+      const runtimeManagedWorkflow = shouldUseRuntimeManagedWorkflow(
+        run.workflowId,
+        run.deliveryContract,
+        config.orchestration,
+      );
       const suppressAutoPreparation = shouldSuppressAutoPreparation(
         workflowDecision,
         config.orchestration,
@@ -840,6 +849,7 @@ export class RunCoordinator {
           restartTaskPlan(previous.plan),
           continueTeamTask(previous.teamTask),
           previous.deliveryContract,
+          previous.workflowId,
         );
       run.resumeStage = previous.resumeStage;
       await this.store.update(run);
@@ -930,6 +940,7 @@ export class RunCoordinator {
           { modelClassifier: this.classifyWorkflowDecision },
         );
         if (workflowDecision.kind === 'workflow') {
+          run.workflowId = workflowDecision.workflow.id;
           run.deliveryContract = workflowDecision.deliveryContract ??
             workflowDecision.workflow.createDeliveryContract({
               source: workflowDecision.source,
@@ -937,6 +948,8 @@ export class RunCoordinator {
             });
           run.toolAllowlist = undefined;
         } else {
+          run.workflowId = undefined;
+          run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
         }
       } catch (error) {
@@ -948,7 +961,11 @@ export class RunCoordinator {
       if (this.stopRequested || this.isRunInvalidated(generation)) return false;
       run.resumeStage = undefined;
       await this.store.update(run);
-      stage = shouldUseRuntimeManagedWorkflow(run.deliveryContract, run.config.orchestration)
+      stage = shouldUseRuntimeManagedWorkflow(
+        run.workflowId,
+        run.deliveryContract,
+        run.config.orchestration,
+      )
         ? undefined
         : shouldSkipDeliveryClassifier(workflowDecision)
           ? run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning'
@@ -958,7 +975,11 @@ export class RunCoordinator {
       run.deliveryContract = inferStDeliveryContractFromUserText(run.userText) ?? run.deliveryContract;
       run.resumeStage = undefined;
       await this.store.update(run);
-      stage = shouldUseRuntimeManagedWorkflow(run.deliveryContract, run.config.orchestration)
+      stage = shouldUseRuntimeManagedWorkflow(
+        run.workflowId,
+        run.deliveryContract,
+        run.config.orchestration,
+      )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
     }
@@ -986,11 +1007,19 @@ export class RunCoordinator {
       if (this.stopRequested || this.isRunInvalidated(generation)) return false;
       run.resumeStage = undefined;
       await this.store.update(run);
-      stage = shouldUseRuntimeManagedWorkflow(run.deliveryContract, run.config.orchestration)
+      stage = shouldUseRuntimeManagedWorkflow(
+        run.workflowId,
+        run.deliveryContract,
+        run.config.orchestration,
+      )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
     }
-    const runtimeManagedWorkflow = shouldUseRuntimeManagedWorkflow(run.deliveryContract, run.config.orchestration);
+    const runtimeManagedWorkflow = shouldUseRuntimeManagedWorkflow(
+      run.workflowId,
+      run.deliveryContract,
+      run.config.orchestration,
+    );
     const suppressAutoPreparation = shouldSuppressAutoPreparation(
       workflowDecision,
       run.config.orchestration,
@@ -1140,6 +1169,7 @@ export class RunCoordinator {
         restartTaskPlan(previous.plan),
         restartTeamTask(previous.teamTask),
         previous.deliveryContract,
+        previous.workflowId,
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
@@ -1329,6 +1359,7 @@ export class RunCoordinator {
             ...agentOptions,
             taskPlan: run.plan,
             teamTask: run.teamTask,
+            workflowId: run.workflowId,
             deliveryContract: run.deliveryContract,
             allowedToolNames: run.toolAllowlist,
             signal: controller.signal,
@@ -2189,7 +2220,7 @@ export class RunCoordinator {
     this.protocolFactory = new AgentEventFactory(run.id, run.operationId);
     this.protocolRunId = run.id;
     this.protocolRun = run;
-    const workflow = describeDeliveryWorkflow(run.deliveryContract);
+    const workflow = describeWorkflow(run.workflowId, run.deliveryContract);
     this.emitProtocol(this.protocolFactory.next({
       type: 'run.started',
       payload: {
