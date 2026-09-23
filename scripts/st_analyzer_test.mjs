@@ -491,6 +491,85 @@ await test('[14] 持久化守卫', async () => {
   }
 });
 
+// graph / impact 的共享夹具。六个文件,刻意覆盖四类情况:
+//   [reference]  FB / 类型被实例化
+//   [global]     VAR_EXTERNAL 引用 VAR_GLOBAL(补出来的边,不是普通引用)
+//   成员访问     Motor.Fault 这类,会产生 reference 边并把成员名带进 symbols
+//   池外引用     TON 属标准库,不计边,只计 externalCount
+// 依赖链 Top -> MidFB -> MotorFB 是区分 directDependents 与 allDependents 的关键。
+const GRAPH_WS = 'F:\\st-graph-fixture-ws\\';
+const GRAPH_FILES = [
+  {
+    path: GRAPH_WS + 'GVL.st',
+    text: ['VAR_GLOBAL', '  gStart : BOOL;', '  gCount : INT;', 'END_VAR', ''].join('\n'),
+  },
+  {
+    path: GRAPH_WS + 'Types.st',
+    text: ['TYPE', '  RunMode : (MANUAL, AUTO);', 'END_TYPE', ''].join('\n'),
+  },
+  {
+    path: GRAPH_WS + 'MotorFB.st',
+    text: [
+      'FUNCTION_BLOCK MotorFB',
+      'VAR_INPUT',
+      '  Running : BOOL;',
+      '  Fault : BOOL;',
+      'END_VAR',
+      'END_FUNCTION_BLOCK',
+      '',
+    ].join('\n'),
+  },
+  {
+    path: GRAPH_WS + 'PumpFB.st',
+    text: [
+      'FUNCTION_BLOCK PumpA',
+      'VAR_INPUT',
+      '  Stop : BOOL;',
+      '  Start : BOOL;',
+      'END_VAR',
+      'END_FUNCTION_BLOCK',
+      '',
+    ].join('\n'),
+  },
+  {
+    path: GRAPH_WS + 'MidFB.st',
+    text: [
+      'FUNCTION_BLOCK MidFB',
+      'VAR',
+      '  Motor : MotorFB;',
+      'END_VAR',
+      'VAR_EXTERNAL',
+      '  gStart : BOOL;',
+      'END_VAR',
+      '  Motor(Running := gStart);',
+      '  IF Motor.Fault THEN',
+      '    Motor.Running := FALSE;',
+      '  END_IF;',
+      'END_FUNCTION_BLOCK',
+      '',
+    ].join('\n'),
+  },
+  {
+    path: GRAPH_WS + 'Top.st',
+    text: [
+      'PROGRAM Top',
+      'VAR',
+      '  Pump : PumpA;',
+      '  Mid : MidFB;',
+      '  mode : RunMode;',
+      '  t : TON;',
+      'END_VAR',
+      '  Mid();',
+      '  Pump(Stop := FALSE);',
+      '  mode := RunMode#MANUAL;',
+      '  t(IN := TRUE, PT := T#5S);',
+      '  notDefined := TRUE;',
+      'END_PROGRAM',
+      '',
+    ].join('\n'),
+  },
+];
+
 // [15] 真实端到端:vendor 产物存在才跑(先 npm run vendor:st-analyzer)
 const vendorDir = path.join(process.cwd(), 'vendor', 'st-analyzer');
 const bridgePath = path.join(vendorDir, 'bridge.cjs');
@@ -502,6 +581,13 @@ const hasVendor = await fs
 if (!hasVendor) {
   console.log('  skip  [15] 真实端到端(vendor/st-analyzer 不存在,先跑 npm run vendor:st-analyzer)');
 } else {
+  const createRealAnalyzer = () =>
+    new SpawnStAnalyzer({
+      launches: [{ exe: process.execPath, args: [bridgePath], cwd: vendorDir }],
+      runner: new NodeProcessRunner(),
+      timeoutMs: 20000,
+    });
+
   await test('[15] 真实端到端:产物可用', async () => {
     const real = new SpawnStAnalyzer({
       launches: [{ exe: process.execPath, args: [bridgePath], cwd: vendorDir }],
@@ -600,6 +686,145 @@ if (!hasVendor) {
     const missing = await real.findSymbolReferences({ workspaceRoot, files, symbol: 'NotHere' });
     assert.equal(missing.declarationCount, 0);
     assert.deepEqual(missing.declarations, []);
+  });
+
+  await test('[17] 真实端到端:依赖图(action=graph)', async () => {
+    const real = createRealAnalyzer();
+    const graph = await real.dependencyGraph({ workspaceRoot: GRAPH_WS, files: GRAPH_FILES });
+
+    assert.equal(graph.engine.id, 'st-analyze');
+    // files 的顺序就是请求里的顺序,这一处是确定的
+    assert.deepEqual(graph.files.map((file) => path.basename(file)), [
+      'GVL.st',
+      'Types.st',
+      'MotorFB.st',
+      'PumpFB.st',
+      'MidFB.st',
+      'Top.st',
+    ]);
+
+    // 边的数组顺序是 Map 插入序,不承诺稳定 -> 用集合比较
+    const byKey = new Map(
+      graph.edges.map((edge) => [
+        path.basename(edge.from) + ' -> ' + path.basename(edge.to),
+        edge,
+      ]),
+    );
+    assert.deepEqual(
+      [...byKey.keys()].sort(),
+      [
+        'MidFB.st -> GVL.st',
+        'MidFB.st -> MotorFB.st',
+        'Top.st -> MidFB.st',
+        'Top.st -> PumpFB.st',
+        'Top.st -> Types.st',
+      ],
+      '边集合应与夹具里的引用关系一一对应',
+    );
+
+    // kinds / symbols 也是 Set 展开,顺序不承诺稳定 -> 先排序再比
+    const expectEdge = (key, kinds, symbols) => {
+      const edge = byKey.get(key);
+      assert.ok(edge, '缺少边 ' + key);
+      assert.deepEqual([...edge.kinds].sort(), kinds, key + ' 的 kinds 不符');
+      assert.deepEqual([...edge.symbols].sort(), symbols, key + ' 的 symbols 不符');
+    };
+    expectEdge('MidFB.st -> MotorFB.st', ['reference'], ['Fault', 'MotorFB', 'Running']);
+    expectEdge('MidFB.st -> GVL.st', ['global'], ['gStart']);
+    expectEdge('Top.st -> PumpFB.st', ['reference'], ['PumpA']);
+    expectEdge('Top.st -> MidFB.st', ['reference'], ['MidFB']);
+    expectEdge('Top.st -> Types.st', ['reference'], ['RunMode']);
+
+    assert.deepEqual(graph.cycles, [], '夹具里没有环');
+    // 注:桥层还返回 unresolvedCount,但端口层 StGraphResult 未保留该字段,
+    // 这里用 unresolved 数组表达同一件事
+    assert.equal(graph.unresolved.length, 1, 'Top.st 里那个未声明变量应被记为未解析');
+    assert.equal(graph.unresolved[0].symbol, 'notDefined');
+    assert.equal(path.basename(graph.unresolved[0].file), 'Top.st');
+    // TON 属标准库,不在分析池内 -> 只计外部引用,不产生边
+    assert.equal(graph.externalCount, 1);
+
+    // 空池:返回空图,不抛错
+    const emptyGraph = await real.dependencyGraph({ workspaceRoot: GRAPH_WS, files: [] });
+    assert.equal(emptyGraph.files.length, 0);
+    assert.equal(emptyGraph.edges.length, 0);
+
+    // 未知 action 属协议错(退出码 3),不能被当成"空结果"吞掉
+    const unknownAction = await new NodeProcessRunner().run(process.execPath, [bridgePath], {
+      stdin: JSON.stringify({ protocolVersion: 1, action: 'nope', workspaceRoot: GRAPH_WS, files: [] }),
+      stdoutMode: 'last-json-line',
+      timeoutMs: 20000,
+    });
+    assert.equal(unknownAction.code, 3, '未知 action 应以退出码 3 拒绝');
+
+    // 同一文件重复传入:要么明确失败,要么与单次结果一致;不允许静默给出不同的图
+    const duplicated = await real
+      .dependencyGraph({ workspaceRoot: GRAPH_WS, files: [...GRAPH_FILES, ...GRAPH_FILES] })
+      .then((value) => ({ ok: true, value }))
+      .catch((error) => ({ ok: false, error }));
+    if (duplicated.ok) {
+      assert.equal(duplicated.value.edges.length, graph.edges.length, '重复输入不应改变边数');
+    } else {
+      assert.ok(
+        duplicated.error instanceof StAnalyzerUnavailableError,
+        '重复输入若失败,必须是可识别的不可用错误',
+      );
+    }
+  });
+
+  await test('[18] 真实端到端:变更影响面(action=impact)', async () => {
+    const real = createRealAnalyzer();
+    const names = (list) => list.map((file) => path.basename(file)).sort();
+    const impactOn = (target, symbols) =>
+      real.changeImpact({
+        workspaceRoot: GRAPH_WS,
+        files: GRAPH_FILES,
+        target: GRAPH_WS + target,
+        ...(symbols ? { symbols } : {}),
+      });
+
+    // 依赖链 Top -> MidFB -> MotorFB:改叶子时直接依赖与传递闭包必须分开
+    const motor = await impactOn('MotorFB.st');
+    assert.equal(motor.granularity, 'file');
+    assert.deepEqual(names(motor.directDependents), ['MidFB.st']);
+    assert.deepEqual(names(motor.allDependents), ['MidFB.st', 'Top.st']);
+    // 口径:allDependents 指"被波及的别人",不含目标自身
+    assert.ok(!names(motor.allDependents).includes('MotorFB.st'), 'allDependents 不应含目标自身');
+
+    // 改中间节点:只剩上层
+    const mid = await impactOn('MidFB.st');
+    assert.deepEqual(names(mid.directDependents), ['Top.st']);
+    assert.deepEqual(names(mid.allDependents), ['Top.st']);
+
+    // 改全局变量所在文件:与改叶子同形
+    const gvl = await impactOn('GVL.st');
+    assert.deepEqual(names(gvl.directDependents), ['MidFB.st']);
+    assert.deepEqual(names(gvl.allDependents), ['MidFB.st', 'Top.st']);
+
+    // 符号级:granularity 变 symbol,且 directDependents 被重写为"引用了该符号的文件"
+    const symbol = await impactOn('GVL.st', ['gStart']);
+    assert.equal(symbol.granularity, 'symbol');
+    assert.deepEqual(names(symbol.directDependents), ['MidFB.st']);
+    assert.deepEqual(names(symbol.allDependents), ['MidFB.st', 'Top.st']);
+    assert.deepEqual(Object.keys(symbol.bySymbol), ['gStart']);
+    assert.deepEqual(names(symbol.bySymbol.gStart), ['MidFB.st']);
+
+    // 成员访问产生的符号同样可查
+    const member = await impactOn('MotorFB.st', ['Running']);
+    assert.equal(member.granularity, 'symbol');
+    assert.deepEqual(names(member.directDependents), ['MidFB.st']);
+    assert.deepEqual(names(member.bySymbol.Running), ['MidFB.st']);
+
+    // 没有任何引用的符号:如实报空,不编造
+    const unused = await impactOn('GVL.st', ['gCount']);
+    assert.deepEqual(unused.directDependents, []);
+    assert.deepEqual(unused.allDependents, []);
+    assert.deepEqual(unused.bySymbol, {});
+
+    // 目标不在分析池内:空结果,不抛错
+    const outside = await impactOn('NotInPool.st');
+    assert.deepEqual(outside.directDependents, []);
+    assert.deepEqual(outside.allDependents, []);
   });
 }
 
