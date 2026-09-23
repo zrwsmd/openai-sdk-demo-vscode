@@ -2,7 +2,7 @@
  * 把 st-analyze 的构建产物 vendor 进插件(开发机/打包时运行,不进入运行时)。
  *
  * 用法:
- *   ST_ANALYZER_SRC=<.../src/plc/langium-server> node scripts/vendor_st_analyzer.mjs
+ *   ST_ANALYZER_SRC=<.../src/plc/server> node scripts/vendor_st_analyzer.mjs
  *
  * 设计要点:
  *  - 本文件是唯一允许接触开发机路径的地方,而且不写死默认值,只认参数/环境变量;
@@ -55,7 +55,7 @@ if (!source) {
     (await exists(path.join(OUT_DIR, 'main.cjs'))) && (await exists(path.join(OUT_DIR, 'data.json')));
   console.warn(
     '[vendor:st-analyzer] 未提供 ST_ANALYZER_SRC,跳过 vendoring。' +
-      '需要更新产物时请设置 ST_ANALYZER_SRC 指向 st-analyze 的 langium-server 目录。',
+      '需要更新产物时请设置 ST_ANALYZER_SRC 指向 st-analyze 的 server 目录。',
   );
   if (alreadyVendored) {
     console.warn('[vendor:st-analyzer] 复用现有 vendor/st-analyzer 目录。');
@@ -71,7 +71,7 @@ for (const required of [bundleSource, dataSource, BRIDGE_SOURCE]) {
   if (!(await exists(required))) {
     console.error(`[vendor:st-analyzer] 缺少文件: ${required}`);
     if (required !== BRIDGE_SOURCE) {
-      console.error('[vendor:st-analyzer] 请先在 st-analyze 的 langium-server 目录执行构建(node esbuild.mjs)。');
+      console.error('[vendor:st-analyzer] 请先在 st-analyze 的 server 目录执行构建(node esbuild.mjs)。');
     }
     process.exit(1);
   }
