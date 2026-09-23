@@ -4,7 +4,6 @@ import {
   getResumableAgentState,
   isRetryableAgentError,
   planTask,
-  classifyDeliveryContract,
   routeTeamTask,
   planTeamTask,
   reviewTeamTask,
@@ -21,6 +20,7 @@ import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
 import type { AgentConfig } from './agentConfig';
+import type { DeliveryContract } from './deliveryContract';
 import { AgentDecisionService } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import {
@@ -46,12 +46,15 @@ import {
   describeWorkflow,
   isRuntimeManagedWorkflow,
 } from './deliveryWorkflow';
-import { inferStDeliveryContractFromUserText } from './workflows/stDeliveryContract';
 import {
   WorkflowDecisionService,
   type WorkflowModelClassifier,
 } from './workflow/decisionService';
-import type { WorkflowDecision } from './workflow/types';
+import {
+  createWorkflowContract,
+  type WorkflowDecisionSignals,
+  type WorkflowDecision,
+} from './workflow/types';
 import {
   getDefaultWorkflowRegistry,
   type WorkflowRegistry,
@@ -143,6 +146,14 @@ function shouldSuppressAutoPreparation(
     decision.source === 'model';
 }
 
+export type DeliveryContractClassifier = (
+  cfg: AgentConfig,
+  userText: string,
+  signal?: AbortSignal,
+  history?: AgentInputItem[],
+  decisionSignals?: WorkflowDecisionSignals,
+) => Promise<DeliveryContract | undefined>;
+
 export interface RunCoordinatorDependencies {
   session: RecoverableSession;
   store: RunStore;
@@ -154,7 +165,7 @@ export interface RunCoordinatorDependencies {
   /** Optional workflow classifier. Hosts opt in to registry-routed workflows. */
   classifyWorkflowDecision?: WorkflowModelClassifier;
   /** Optional deliverable classifier. Hosts opt in to runtime delivery contracts. */
-  classifyDeliveryContract?: typeof classifyDeliveryContract;
+  classifyDeliveryContract?: DeliveryContractClassifier;
   /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
   createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   /** Shared semantic decision service; omitted by embedders to use a local instance. */
@@ -254,7 +265,7 @@ export class RunCoordinator {
   private readonly executeAgent: typeof runAgent;
   private readonly planTask?: typeof planTask;
   private readonly classifyWorkflowDecision?: WorkflowModelClassifier;
-  private readonly classifyDeliveryContract?: typeof classifyDeliveryContract;
+  private readonly classifyDeliveryContract?: DeliveryContractClassifier;
   private readonly routeTeamTask?: typeof routeTeamTask;
   private readonly planTeamTask?: typeof planTeamTask;
   private readonly reviewTeamTask?: typeof reviewTeamTask;
@@ -486,7 +497,7 @@ export class RunCoordinator {
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
           run.deliveryContract = workflowDecision.deliveryContract ??
-            workflowDecision.workflow.createDeliveryContract({
+            createWorkflowContract(workflowDecision.workflow, {
               source: workflowDecision.source,
               reason: workflowDecision.reason,
             });
@@ -506,7 +517,7 @@ export class RunCoordinator {
           await this.pauseBeforeSdkTurn(run, 'workflow', error, generation);
           return;
         }
-        this.writeLog(`[workflow] workflow 判定失败，继续使用旧交付判定: ${this.formatError(error)}`);
+        this.writeLog(`[workflow] workflow 判定失败，继续尝试通用交付契约判定: ${this.formatError(error)}`);
         run.resumeStage = undefined;
         await this.store.update(run);
       } finally {
@@ -529,6 +540,7 @@ export class RunCoordinator {
             userText,
             deliveryController.signal,
             sessionItems,
+            workflowDecision?.signals,
           );
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
@@ -540,14 +552,8 @@ export class RunCoordinator {
             await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
             return;
           }
-          const inferred = inferStDeliveryContractFromUserText(userText);
-          if (inferred) {
-            this.writeLog(`[delivery] 交付契约判定失败，已启用本地推断的运行时交付契约: ${this.formatError(error)}`);
-            run.deliveryContract = inferred;
-          } else {
-            this.writeLog(`[delivery] 交付契约判定失败，继续执行但不启用交付契约: ${this.formatError(error)}`);
-            run.deliveryContract = undefined;
-          }
+          this.writeLog(`[delivery] 通用交付契约判定失败，继续执行但不启用交付契约: ${this.formatError(error)}`);
+          run.deliveryContract = undefined;
           run.resumeStage = undefined;
           await this.store.update(run);
         } finally {
@@ -957,7 +963,7 @@ export class RunCoordinator {
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
           run.deliveryContract = workflowDecision.deliveryContract ??
-            workflowDecision.workflow.createDeliveryContract({
+            createWorkflowContract(workflowDecision.workflow, {
               source: workflowDecision.source,
               reason: workflowDecision.reason,
             });
@@ -988,7 +994,6 @@ export class RunCoordinator {
           : 'delivery';
     }
     if (stage === 'delivery' && !this.classifyDeliveryContract) {
-      run.deliveryContract = inferStDeliveryContractFromUserText(run.userText) ?? run.deliveryContract;
       run.resumeStage = undefined;
       await this.store.update(run);
       stage = shouldUseRuntimeManagedWorkflow(
@@ -1009,15 +1014,11 @@ export class RunCoordinator {
           run.userText,
           deliveryController.signal,
           sessionItems,
+          workflowDecision?.signals,
         );
       } catch (error) {
-        const inferred = inferStDeliveryContractFromUserText(run.userText);
-        if (!inferred) {
-          await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
-          return false;
-        }
-        this.writeLog(`[delivery] 恢复交付契约判定失败，已启用本地推断的运行时交付契约: ${this.formatError(error)}`);
-        run.deliveryContract = inferred;
+        await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
+        return false;
       } finally {
         if (this.transitionController === deliveryController) this.transitionController = undefined;
       }

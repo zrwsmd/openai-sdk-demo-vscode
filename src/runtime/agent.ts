@@ -91,7 +91,6 @@ import {
   createDeliveryWorkflowRuntimeState,
 } from "./deliveryWorkflow";
 import { getStValidationState } from "./workflows/stWorkspaceDeliveryWorkflow";
-import { inferStDeliveryContractFromUserText } from "./workflows/stDeliveryContract";
 import {
   buildTools,
   commandToolResult,
@@ -110,12 +109,9 @@ import type {
   WorkflowDescriptor,
   WorkflowFallbackMode,
   WorkflowModelDecision,
+  WorkflowDecisionSignals,
 } from "./workflow/types";
-import {
-  getDefaultWorkflowRegistry,
-  getWorkflowByRoute,
-  type WorkflowRegistry,
-} from "./workflow/registry";
+import type { WorkflowRegistry } from "./workflow/registry";
 import {
   runFinalOutputFinalizer,
   synthesizeStructuredFailure,
@@ -1365,21 +1361,10 @@ export async function classifyDeliveryContract(
   userText: string,
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
+  decisionSignals?: WorkflowDecisionSignals,
 ): Promise<DeliveryContract | undefined> {
-  const inferred = inferStDeliveryContractFromUserText(userText);
-  if (inferred) return inferred;
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
-  const hint = await decisionService.taskHint(cfg.jev, userText, signal);
-  const workflow = getWorkflowByRoute(hint.workflow, getDefaultWorkflowRegistry());
-  if (workflow) {
-    agentLog(
-      `[delivery] Jev 高置信度识别 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})，启用运行时交付契约`,
-    );
-    return workflow.createDeliveryContract({
-      source: "jev",
-      reason: `Jev 高置信度识别为 ${workflow.title}，启用运行时 workflow`,
-    });
-  }
+  const hint = decisionSignals ?? await decisionService.taskHint(cfg.jev, userText, signal);
   if (hint.delivery === 'not_required') {
     agentLog(
       `[delivery] Jev 高置信度判断无需交付物(${hint.deliveryConfidence.toFixed(2)})，跳过交付契约模型判定`,
@@ -1410,8 +1395,6 @@ export async function classifyDeliveryContract(
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
-      "如果交付物是 ST 代码，必须设置 workspaceFileExtension=.st，并在 requiredVerificationTools 中包含 validate_st_code；这是运行时强制验证依据，不是可选建议。" +
-      "若用户没有指定文件名，交付说明里要求模型在当前工作区根目录选择一个清晰的 .st 文件名。" +
       "必须严格返回 schema,不要输出 markdown。",
     outputType: deliveryContractDecisionSchema,
   });

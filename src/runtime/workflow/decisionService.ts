@@ -8,8 +8,10 @@ import {
   getDefaultWorkflowRegistry,
   type WorkflowRegistry,
 } from "./registry";
+import { createWorkflowContract } from "./types";
 import type {
   WorkflowDecision,
+  WorkflowDecisionSignals,
   WorkflowDescriptor,
   WorkflowFallbackMode,
   WorkflowModelDecision,
@@ -42,7 +44,7 @@ export class WorkflowDecisionService {
     const jevDecision = this.workflowFromJevHint(jevHint);
     if (jevDecision) return jevDecision;
 
-    const localDecision = this.workflowFromLocalDetectors(userText, history, workflows);
+    const localDecision = this.workflowFromLocalDetectors(userText, history, workflows, jevHint);
     if (localDecision) return localDecision;
 
     const modelDecision = await this.workflowFromModelClassifier(
@@ -52,6 +54,7 @@ export class WorkflowDecisionService {
       history,
       workflows,
       options.modelClassifier,
+      jevHint,
     );
     if (modelDecision) return modelDecision;
 
@@ -61,7 +64,7 @@ export class WorkflowDecisionService {
   private workflowFromJevHint(hint: TaskDecisionHint): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow);
     if (!workflow) return undefined;
-    const contract = (workflow.createContract ?? workflow.createDeliveryContract)?.({
+    const contract = createWorkflowContract(workflow, {
       source: "jev",
       reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
     });
@@ -74,6 +77,7 @@ export class WorkflowDecisionService {
       source: "jev",
       confidence: hint.workflowConfidence,
       reason: `Jev 高置信度识别为 ${workflow.title}`,
+      signals: signalsFromHint(hint),
       ...(contract ? { deliveryContract: contract } : {}),
     };
   }
@@ -82,11 +86,12 @@ export class WorkflowDecisionService {
     userText: string,
     history: AgentInputItem[],
     workflows: readonly WorkflowDescriptor[],
+    hint: TaskDecisionHint,
   ): WorkflowDecision | undefined {
     for (const workflow of workflows) {
       const match = workflow.localMatch?.({ userText, history });
       if (!match?.matched) continue;
-      const contract = workflow.createDeliveryContract({
+      const contract = createWorkflowContract(workflow, {
         source: "local",
         reason: match.reason,
       });
@@ -99,6 +104,7 @@ export class WorkflowDecisionService {
         source: "local",
         confidence: match.confidence,
         reason: match.reason,
+        signals: signalsFromHint(hint),
         ...(contract ? { deliveryContract: contract } : {}),
       };
     }
@@ -112,6 +118,7 @@ export class WorkflowDecisionService {
     history: AgentInputItem[],
     workflows: readonly WorkflowDescriptor[],
     classifier: WorkflowModelClassifier | undefined,
+    hint: TaskDecisionHint,
   ): Promise<WorkflowDecision | undefined> {
     if (!classifier) return undefined;
     let decision: WorkflowModelDecision | undefined;
@@ -126,7 +133,7 @@ export class WorkflowDecisionService {
     if (decision.kind === "workflow") {
       const workflow = this.registry.get(decision.workflowId);
       if (!workflow) return undefined;
-      const contract = (workflow.createContract ?? workflow.createDeliveryContract)?.({
+      const contract = createWorkflowContract(workflow, {
         source: "model",
         reason: decision.reason,
       });
@@ -139,6 +146,7 @@ export class WorkflowDecisionService {
         source: "model",
         confidence: decision.confidence,
         reason: decision.reason,
+        signals: signalsFromHint(hint),
         ...(contract ? { deliveryContract: contract } : {}),
       };
     }
@@ -151,6 +159,7 @@ export class WorkflowDecisionService {
       source: "model",
       confidence: decision.confidence,
       reason: decision.reason,
+      signals: signalsFromHint(hint),
       allowedTools: decision.allowedTools ?? allowedToolsForFallback(decision.mode),
     };
   }
@@ -165,9 +174,21 @@ export class WorkflowDecisionService {
       source: "fallback",
       confidence: 0,
       reason,
+      signals: signalsFromHint(hint),
       allowedTools: allowedToolsForFallback(mode),
     };
   }
+}
+
+function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {
+  return {
+    delivery: hint.delivery,
+    deliveryConfidence: hint.deliveryConfidence,
+    orchestration: hint.orchestration,
+    orchestrationConfidence: hint.orchestrationConfidence,
+    riskLevel: hint.riskLevel,
+    riskConfidence: hint.riskConfidence,
+  };
 }
 
 function fallbackModeFromHint(hint: TaskDecisionHint): WorkflowFallbackMode {

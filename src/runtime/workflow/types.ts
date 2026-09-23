@@ -111,6 +111,15 @@ export interface WorkflowLocalMatch {
   reason: string;
 }
 
+export interface WorkflowDecisionSignals {
+  delivery: "required" | "not_required" | "unknown";
+  deliveryConfidence: number;
+  orchestration: "single" | "team" | "unknown";
+  orchestrationConfidence: number;
+  riskLevel: "low" | "medium" | "high" | "critical" | "unknown";
+  riskConfidence: number;
+}
+
 export interface WorkflowDescriptor {
   id: WorkflowId;
   title: string;
@@ -140,12 +149,23 @@ export interface WorkflowDescriptor {
   ): WorkflowRuntime | undefined;
 }
 
+export function createWorkflowContract(
+  workflow: WorkflowDescriptor,
+  options: {
+    reason?: string;
+    source?: WorkflowDecisionSource;
+  } = {},
+): WorkflowContract | undefined {
+  return (workflow.createContract ?? workflow.createDeliveryContract)?.(options);
+}
+
 export interface WorkflowSelectedDecision {
   kind: "workflow";
   workflow: WorkflowDescriptor;
   source: WorkflowDecisionSource;
   confidence: number;
   reason: string;
+  signals: WorkflowDecisionSignals;
   deliveryContract?: DeliveryContract;
 }
 
@@ -155,6 +175,7 @@ export interface WorkflowFallbackDecision {
   source: WorkflowDecisionSource;
   confidence: number;
   reason: string;
+  signals: WorkflowDecisionSignals;
   allowedTools?: readonly string[];
 }
 

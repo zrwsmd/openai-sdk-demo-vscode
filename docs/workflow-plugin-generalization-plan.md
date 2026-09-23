@@ -34,7 +34,7 @@
 - [x] 0. 建立基线与边界检查
 - [x] 1. 抽出真正通用的 Workflow 核心接口
 - [x] 2. 把 Registry 改成注入式，移除公共层对 ST 插件的直接依赖
-- [ ] 3. 把 Jev、规则、模型判定统一到通用 Workflow 决策链
+- [x] 3. 把 Jev、规则、模型判定统一到通用 Workflow 决策链
 - [ ] 4. 重构工具注册机制，公共层只认识通用 Tool Provider
 - [ ] 5. 让 `write_file` 变成真正通用的文件工具
 - [ ] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
@@ -173,3 +173,19 @@ node scripts/run_coordinator_test.mjs
   相互隔离。
 - 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
   `npm run test:batch`、`npm run test:st`、`npm run test:jev` 均通过。
+
+### 3. 通用 Workflow 决策链
+
+- `WorkflowDecisionService` 统一执行 Jev -> Registry 本地匹配 -> 模型分类 ->
+  通用 fallback。
+- 新增通用 `createWorkflowContract`，Workflow 选中后不再由 Coordinator 直接调用
+  某个旧领域契约方法。
+- `RunCoordinator` 改为依赖通用 `DeliveryContractClassifier` 类型，不再直接导入
+  ST 文本推断函数。
+- `classifyDeliveryContract` 只处理通用交付契约；ST 路由和 ST 契约创建由注册的
+  ST Workflow 自己完成。
+- `WorkflowDecision` 携带通用 Jev 信号，后续交付契约判定复用同一轮结果，避免同一
+  请求重复调用 Jev 和重复计费。
+- 保留暂停、恢复、普通 fallback、Team 路由和既有 ST Workflow 行为。
+- 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:batch`、
+  `npm run test:st`、`npm run test:jev` 均通过。

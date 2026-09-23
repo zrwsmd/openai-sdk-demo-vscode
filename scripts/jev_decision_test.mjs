@@ -195,13 +195,13 @@ try {
   globalThis.fetch = originalFetch;
 }
 
-let stWorkflowFallbackCalls = 0;
+let deliveryClassifierCalls = 0;
 globalThis.fetch = async () => {
-  stWorkflowFallbackCalls += 1;
+  deliveryClassifierCalls += 1;
   return response({
     model: 'jev-test',
     answers: {
-      delivery: { type: 'noul', noul: 0.52 },
+      delivery: { type: 'noul', noul: 0.04 },
       orchestration: {
         type: 'choice',
         choice: 'single',
@@ -239,13 +239,13 @@ try {
       workspaceRoot: '',
       jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
     },
-    'PID 恒压供水：根据管网压力反馈调节变频器，压力低启动，压力高降频。',
+    '法国的首都是哪里？',
   );
-  if (stWorkflowFallbackCalls !== 1) {
-    throw new Error(`expected one Jev workflow fallback call, got ${stWorkflowFallbackCalls}`);
+  if (deliveryClassifierCalls !== 1) {
+    throw new Error(`expected one generic delivery hint call, got ${deliveryClassifierCalls}`);
   }
-  if (!isStWorkspaceDeliveryContract(contract)) {
-    throw new Error('high-confidence Jev st_delivery workflow should create the runtime ST delivery contract');
+  if (contract?.requiresDeliverable !== false) {
+    throw new Error('generic delivery classifier should honor Jev not-required result');
   }
 } finally {
   globalThis.fetch = originalFetch;
