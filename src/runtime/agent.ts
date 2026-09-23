@@ -24,7 +24,7 @@ import OpenAI from "openai";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { EffectRecoveryRequiredError } from "./errors";
-import { toolResult } from "../tools/toolContract";
+import { toolResult, type ToolRisk } from "../tools/toolContract";
 import { DefaultActionPolicy } from "../policy/actionPolicy";
 import type { RequiredAgentTool } from "../policy/actionPolicy";
 import {
@@ -90,13 +90,12 @@ import {
   createWorkflowRuntime,
   createDeliveryWorkflowRuntimeState,
 } from "./deliveryWorkflow";
-import { getStValidationState } from "./workflows/stWorkspaceDeliveryWorkflow";
 import {
-  buildTools,
   commandToolResult,
-  TOOL_RISK_BY_NAME,
+  getDefaultToolRegistry,
   type DiagnosticSideReporter,
   type RuntimeToolCallGuard,
+  type ToolRegistry,
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
@@ -165,6 +164,8 @@ export interface AgentRunOptions {
   workflowId?: string;
   /** Registry used to resolve the selected workflow. */
   workflowRegistry?: WorkflowRegistry;
+  /** Registry used to assemble core and plugin-provided tools. */
+  toolRegistry?: ToolRegistry;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
   /** Persists validated step transitions outside the SDK session. */
@@ -227,68 +228,6 @@ function sessionOutputText(value: unknown): string | undefined {
     if ("content" in record) return sessionOutputText(record.content);
   }
   return undefined;
-}
-
-async function loadValidatedStContent(
-  session: Session,
-  userText: string,
-): Promise<Set<string>> {
-  const validated = new Set<string>();
-  const calls = new Map<string, { name: string }>();
-  let items: AgentInputItem[] = [];
-  try {
-    items = await session.getItems();
-  } catch {
-    return validated;
-  }
-  const startIndex = [...items]
-    .map((item, index) => ({ item, index }))
-    .reverse()
-    .find(({ item }) => {
-      const value = item as { type?: string; role?: string; content?: unknown };
-      return value.type === "message" &&
-        value.role === "user" &&
-        typeof value.content === "string" &&
-        value.content === userText;
-    })?.index ?? 0;
-  for (const raw of items.slice(startIndex)) {
-    const item = raw as {
-      type?: string;
-      callId?: string;
-      name?: string;
-      output?: unknown;
-    };
-    if (item.type === "function_call" && item.callId && item.name) {
-      calls.set(item.callId, { name: item.name });
-      continue;
-    }
-    if (
-      item.type !== "function_call_result" &&
-      item.type !== "function_call_output"
-    ) {
-      continue;
-    }
-    const call = item.callId ? calls.get(item.callId) : undefined;
-    if (call?.name !== "validate_st_code") continue;
-    const text = sessionOutputText(item.output);
-    if (!text) continue;
-    try {
-      const result = JSON.parse(text) as {
-        ok?: unknown;
-        data?: { errorCount?: unknown; validatedContentHash?: unknown };
-      };
-      if (
-        result.ok === true &&
-        result.data?.errorCount === 0 &&
-        typeof result.data.validatedContentHash === "string"
-      ) {
-        validated.add(result.data.validatedContentHash);
-      }
-    } catch {
-      // Ignore non-protocol historical tool output.
-    }
-  }
-  return validated;
 }
 
 async function loadHistoricalToolResults(
@@ -1842,7 +1781,12 @@ export async function runAgent(
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
   const workflowState = createDeliveryWorkflowRuntimeState();
-  const stValidationState = getStValidationState(workflowState);
+  const toolRegistry = options.toolRegistry ?? getDefaultToolRegistry();
+  const registeredToolRisks = toolRegistry.riskMap();
+  const toolRisk = (name: string): ToolRisk =>
+    name === "deliver_artifact" || name === "report_plan_progress"
+      ? "plan"
+      : registeredToolRisks[name] ?? "execute";
   const deliveryWorkflow = createWorkflowRuntime(
     options.workflowId,
     options.deliveryContract,
@@ -1985,15 +1929,22 @@ export async function runAgent(
       }),
     );
   };
+  const workflowToolNames = deliveryWorkflow?.visibleToolNames
+    ? new Set(deliveryWorkflow.visibleToolNames)
+    : undefined;
+  const registeredTools = toolRegistry.createTools({
+    cfg,
+    workflowContract: options.deliveryContract,
+    workflow: deliveryWorkflow,
+    diagnosticReporter: reportDiagnostics,
+    runtimeToolGuard,
+  }).filter((item) => {
+    if (!workflowToolNames) return true;
+    const name = toolNameOf(item);
+    return typeof name === "string" && workflowToolNames.has(name);
+  });
   const tools = [
-    ...buildTools(
-      cfg,
-      options.deliveryContract,
-      deliveryWorkflow,
-      stValidationState,
-      reportDiagnostics,
-      runtimeToolGuard,
-    ),
+    ...registeredTools,
     ...(planProgressTool ? [planProgressTool] : []),
     ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
   ].filter((item) => {
@@ -2164,7 +2115,7 @@ export async function runAgent(
         },
       ],
       effect: "none",
-      risk: TOOL_RISK_BY_NAME[name] ?? "execute",
+      risk: toolRisk(name),
       metadata: {
         synthetic: true,
         source: "sdk_tool_completed",
@@ -2808,7 +2759,7 @@ export async function runAgent(
     return typeof value === "string" && value.length > 0 ? value : undefined;
   };
   const shouldDedupeEffectTool = (toolName: string): boolean => {
-    const risk = TOOL_RISK_BY_NAME[toolName];
+    const risk = toolRisk(toolName);
     return risk === "write" || risk === "execute";
   };
   const protocolToolDuplicateKey = (
@@ -3122,9 +3073,6 @@ export async function runAgent(
     ? await loadHistoricalToolResults(session, userText)
     : [];
   if (options.initialState) {
-    for (const hash of await loadValidatedStContent(session, userText)) {
-      stValidationState.hashes.add(hash);
-    }
     deliveryWorkflow?.hydrate(historicalToolResults);
     refreshDeliveryWorkflowCompletion();
   }

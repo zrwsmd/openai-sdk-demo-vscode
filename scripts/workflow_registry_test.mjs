@@ -3,7 +3,11 @@ import {
   ST_INSPECTION_WORKFLOW,
   ST_WORKSPACE_DELIVERY_WORKFLOW,
   WorkflowRegistry,
+  ToolRegistry,
+  createCoreToolProvider,
+  createStToolProvider,
   createAppWorkflowRegistry,
+  createAppToolRegistry,
 } from './agent.testbundle.mjs';
 
 const generic = {
@@ -35,4 +39,33 @@ assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFL
 assert.equal(registry.get('st_workspace_delivery'), undefined);
 assert.equal(registry.get('st_inspection'), undefined);
 
-console.log('workflow registry tests passed');
+const toolConfig = {
+  baseUrl: 'http://localhost/v1',
+  apiKey: 'test',
+  model: 'test',
+  exportDir: process.cwd(),
+  workspaceRoot: process.cwd(),
+};
+const coreTools = new ToolRegistry([createCoreToolProvider()]);
+const coreToolNames = coreTools
+  .createTools({ cfg: toolConfig })
+  .map((tool) => tool.name);
+assert(coreToolNames.includes('write_file'));
+assert(!coreToolNames.includes('validate_st_code'));
+assert(!coreToolNames.includes('st_dependency_map'));
+assert.equal(coreTools.getRisk('write_file'), 'write');
+assert.equal(coreTools.getRisk('validate_st_code'), undefined);
+
+const appTools = createAppToolRegistry();
+const allTools = appTools.createTools({ cfg: toolConfig });
+const allToolNames = allTools.map((tool) => tool.name);
+assert(allToolNames.includes('validate_st_code'));
+assert(allToolNames.includes('st_dependency_map'));
+assert.equal(appTools.getRisk('validate_st_code'), 'plan');
+assert.equal(appTools.getRisk('export_st_program'), 'write');
+assert.throws(
+  () => new ToolRegistry([createCoreToolProvider(), createStToolProvider(), createStToolProvider()]),
+  /already registered/,
+);
+
+console.log('workflow and tool registry tests passed');

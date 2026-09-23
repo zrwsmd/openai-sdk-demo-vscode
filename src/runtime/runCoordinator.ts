@@ -60,6 +60,10 @@ import {
   type WorkflowRegistry,
 } from './workflow/registry';
 import {
+  getDefaultToolRegistry,
+  type ToolRegistry,
+} from './toolRegistry';
+import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
   completeTeamNode,
@@ -172,6 +176,8 @@ export interface RunCoordinatorDependencies {
   decisionService?: AgentDecisionService;
   /** Workflow plugins supplied by the host composition root. */
   workflowRegistry?: WorkflowRegistry;
+  /** Tool providers supplied by the host composition root. */
+  toolRegistry?: ToolRegistry;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
   routeTeamTask?: typeof routeTeamTask;
   planTeamTask?: typeof planTeamTask;
@@ -275,6 +281,7 @@ export class RunCoordinator {
   private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   private readonly decisionService: AgentDecisionService;
   private readonly workflowRegistry: WorkflowRegistry;
+  private readonly toolRegistry: ToolRegistry;
   private readonly workflowDecisionService: WorkflowDecisionService;
   private busy = false;
   private transitioning = false;
@@ -314,6 +321,7 @@ export class RunCoordinator {
     this.createStAnalyzer = dependencies.createStAnalyzer;
     this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
     this.workflowRegistry = dependencies.workflowRegistry ?? getDefaultWorkflowRegistry();
+    this.toolRegistry = dependencies.toolRegistry ?? getDefaultToolRegistry();
     this.workflowDecisionService = new WorkflowDecisionService(
       this.writeLog,
       this.decisionService,
@@ -1382,6 +1390,7 @@ export class RunCoordinator {
             workflowId: run.workflowId,
             deliveryContract: run.deliveryContract,
             workflowRegistry: this.workflowRegistry,
+            toolRegistry: this.toolRegistry,
             allowedToolNames: run.toolAllowlist,
             signal: controller.signal,
             protocol: {
@@ -1869,6 +1878,7 @@ export class RunCoordinator {
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
               workflowRegistry: this.workflowRegistry,
+              toolRegistry: this.toolRegistry,
               signal: nodeController.signal,
               protocol: {
                 runId: run.id,

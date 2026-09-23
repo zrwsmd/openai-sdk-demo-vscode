@@ -32,11 +32,9 @@ export interface ToolPolicy {
 const RISK_BY_TOOL: Record<string, ToolRisk> = {
   get_io_table: 'read',
   read_plc_variables: 'read',
-  validate_st_code: 'plan',
   list_files: 'read',
   read_file: 'read',
   search_files: 'read',
-  export_st_program: 'write',
   write_file: 'write',
   run_command: 'execute',
   write_plc_variables: 'execute',
@@ -49,8 +47,12 @@ function stringInput(input: unknown, key: string): string {
 }
 
 export class DefaultToolPolicy implements ToolPolicy {
+  constructor(
+    private readonly registeredRisks: Readonly<Record<string, ToolRisk>> = {},
+  ) {}
+
   evaluate(toolName: string, input: unknown, context: ToolPolicyContext): ToolPolicyDecision {
-    const risk = RISK_BY_TOOL[toolName] ?? 'execute';
+    const risk = this.registeredRisks[toolName] ?? RISK_BY_TOOL[toolName] ?? 'execute';
     const requiresApproval = risk === 'write' || risk === 'execute';
     if (context.dryRun && requiresApproval) {
       return { allowed: false, requiresApproval, risk, reason: '当前处于干运行模式，不允许执行副作用工具。' };

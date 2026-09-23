@@ -35,8 +35,8 @@
 - [x] 1. 抽出真正通用的 Workflow 核心接口
 - [x] 2. 把 Registry 改成注入式，移除公共层对 ST 插件的直接依赖
 - [x] 3. 把 Jev、规则、模型判定统一到通用 Workflow 决策链
-- [ ] 4. 重构工具注册机制，公共层只认识通用 Tool Provider
-- [ ] 5. 让 `write_file` 变成真正通用的文件工具
+- [x] 4. 重构工具注册机制，公共层只认识通用 Tool Provider
+- [x] 5. 让 `write_file` 变成真正通用的文件工具
 - [ ] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
 - [ ] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
 - [ ] 8. 迁移 ST 功能为正式插件
@@ -189,3 +189,30 @@ node scripts/run_coordinator_test.mjs
 - 保留暂停、恢复、普通 fallback、Team 路由和既有 ST Workflow 行为。
 - 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:batch`、
   `npm run test:st`、`npm run test:jev` 均通过。
+
+### 4. 通用 Tool Provider Registry
+
+- `ToolRegistry` 支持 Provider 注册、枚举、工具创建和工具风险查询；公共 Registry
+  默认只装配通用 Core Provider，不直接导入领域 Provider。
+- 新增 `src/runtime/tools/coreToolProvider.ts`，承载现有 PLC 查询、工作区读写和命令
+  工具；新增 `src/runtime/workflows/stToolProvider.ts`，承载 ST 校验、导出、依赖图、
+  影响面和符号引用工具。
+- 新增 `src/app/toolRegistry.ts` 作为宿主装配层，将 Core 与 ST Provider 注册到同一
+  Registry，并由 `ChatViewProvider` 注入 Coordinator；Agent 与 Team worker 均使用注入的
+  Registry。
+- Provider 统一声明工具风险，重复 Provider、重复工具名和冲突风险会被拒绝；通用
+  Registry 测试确认只装载 Core 时不会出现 ST 工具，宿主 Registry 则包含 ST 工具。
+- ST 分析器与 ST 校验状态迁入 ST Provider 上下文；`ToolBuildContext` 不再持有 ST
+  分析器、缓存或校验状态。未改 `src/analysis/*` 或 `st-analyze` 桥。
+
+### 5. 通用 `write_file` 与前置副作用钩子
+
+- `write_file` 只处理工作区路径解析、通用前置钩子、审批保护、写入、内容哈希和通用
+  回执，不再判断文件扩展名或 ST 校验状态。
+- Tool Provider 可为指定工具注册多个异步 `beforeEffect` 钩子；钩子可阻止副作用并
+  返回通用错误、诊断和元数据，也可在成功写入回执中附加领域证据。
+- ST Provider 将原有 ST 预写校验、内容哈希一致性检查和校验摘要迁入 `write_file`
+  的前置钩子，交付校验和审批行为由既有 ST/Agent 回归测试覆盖。
+- 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
+  `npm run test:batch`、`npm run test:agent`、`npm run test:st`、`npm run test:jev`
+  均通过；Agent 测试使用本地 mock gateway。

@@ -14,6 +14,7 @@ import { JsonAuditSink } from '../observability/audit';
 import { ChatSessionCatalog, titleFromUserText } from './chatSessions';
 import { AgentDecisionService } from '../runtime/decision/agentDecision';
 import { createAppWorkflowRegistry } from './workflowRegistry';
+import { createAppToolRegistry } from './toolRegistry';
 import {
   isAgentApiFormat,
   isAgentProvider,
@@ -60,6 +61,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly log: vscode.OutputChannel;
   private readonly decisionService: AgentDecisionService;
   private readonly workflowRegistry = createAppWorkflowRegistry();
+  private readonly toolRegistry = createAppToolRegistry();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -160,6 +162,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       log: (line) => this.log.appendLine(line),
       decisionService: this.decisionService,
       workflowRegistry: this.workflowRegistry,
+      toolRegistry: this.toolRegistry,
       planTask,
       classifyWorkflowDecision,
       classifyDeliveryContract,

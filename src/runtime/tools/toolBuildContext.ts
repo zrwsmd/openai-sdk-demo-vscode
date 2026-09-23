@@ -14,62 +14,45 @@ import type { AgentConfig } from "../agentConfig";
 import type { AuditEvent } from "../../observability/audit";
 import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/workspaceScope";
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
-import { FallbackStAnalyzer } from "../../analysis/fallbackStAnalyzer";
-import type {
-  StAnalyzer,
-  StAnalyzerToolOptions,
-  StDiagnostic,
-} from "../../analysis/stAnalyzer";
-import type { DeliveryContract } from "../deliveryContract";
-import type {
-  DeliveryWorkflow,
-} from "../deliveryWorkflow";
-import type { StValidationState } from "../workflows/stWorkspaceDeliveryWorkflow";
-import type { DiagnosticRepairPacket } from "../diagnosticCompression";
-
-export const TOOL_RISK_BY_NAME: Record<string, ToolRisk> = {
-  get_io_table: "read",
-  read_plc_variables: "read",
-  validate_st_code: "plan",
-  st_dependency_map: "plan",
-  st_change_impact: "plan",
-  st_symbol_references: "plan",
-  deliver_artifact: "plan",
-  list_files: "read",
-  read_file: "read",
-  search_files: "read",
-  export_st_program: "write",
-  write_file: "write",
-  run_command: "execute",
-};
+import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
+import type { Diagnostic } from "../../protocol/results";
 
 export type ToolEffect = "none" | "filesystem" | "process" | "device";
 
-export interface DiagnosticSideReport {
-  toolName: string;
-  phase: string;
+export interface RuntimeDiagnosticReport {
   summary: string;
-  counts: {
-    error: number;
-    warning: number;
-    info: number;
-  };
-  validationTarget: {
-    path: string;
-    complete: boolean;
-    totalLines: number;
-    totalBytes: number;
-    contentHash: string;
-  };
-  diagnostics: StDiagnostic[];
-  repairPacket?: DiagnosticRepairPacket;
+  toolName?: string;
+  phase?: string;
+  diagnostics?: readonly unknown[];
+  [key: string]: unknown;
 }
 
-export type DiagnosticSideReporter = (report: DiagnosticSideReport) => void;
+export type DiagnosticSideReporter = (report: RuntimeDiagnosticReport) => void;
 export type RuntimeToolCallGuard = (
   toolName: string,
   input: unknown,
 ) => string | undefined;
+
+export interface BeforeEffectContext {
+  toolName: string;
+  input: unknown;
+  workspace: WorkspaceScope;
+  signal?: AbortSignal;
+}
+
+export interface BeforeEffectResult {
+  ok: boolean;
+  risk?: ToolRisk;
+  error?: string;
+  failureData?: unknown;
+  diagnostics?: readonly Diagnostic[];
+  metadata?: Record<string, unknown>;
+  receiptData?: Record<string, unknown>;
+}
+
+export type BeforeEffectHook = (
+  context: BeforeEffectContext,
+) => Promise<BeforeEffectResult | undefined>;
 
 export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
@@ -77,17 +60,13 @@ export interface ToolBuildContext {
   cfg: AgentConfig;
   policy: ToolPolicy;
   plc: PlcAdapter;
-  stAnalyzer: StAnalyzer;
-  stToolOptions: StAnalyzerToolOptions;
-  requiresStValidation: boolean;
-  inlineStValidation: boolean;
   workspace: WorkspaceScope;
   guardrails: ToolGuardrails;
-  deliveryWorkflow?: DeliveryWorkflow;
-  stValidationState: StValidationState;
-  validatedStContent: Set<string>;
-  stValidationCache: Map<string, Promise<string>>;
+  workflowContract?: WorkflowContract;
+  workflow?: WorkflowRuntime;
   diagnosticReporter?: DiagnosticSideReporter;
+  beforeEffectsFor: (toolName: string) => readonly BeforeEffectHook[];
+  registerBeforeEffect: (toolName: string, hook: BeforeEffectHook) => void;
   withEffect: <T>(
     toolName: string,
     input: unknown,
@@ -193,6 +172,7 @@ function buildToolGuardrails(
   cfg: AgentConfig,
   policy: ToolPolicy,
   runtimeToolGuard?: RuntimeToolCallGuard,
+  riskByTool?: Readonly<Record<string, ToolRisk>>,
 ) {
   const context = {
     workspaceRoot: cfg.workspaceRoot,
@@ -210,27 +190,35 @@ function buildToolGuardrails(
         input,
         context,
       );
+      const risk = riskByTool?.[name];
       const runtimeReason = decision.allowed
         ? runtimeToolGuard?.(name, input)
         : undefined;
       const finalDecision = runtimeReason
         ? { ...decision, allowed: false, reason: runtimeReason }
         : decision;
+      const registeredDecision = risk
+        ? {
+            ...finalDecision,
+            risk,
+            requiresApproval: risk === "write" || risk === "execute",
+          }
+        : finalDecision;
       audit(cfg, {
         type: "guardrail_evaluated",
         toolName: name,
-        risk: finalDecision.risk,
-        decision: finalDecision.allowed ? "allow" : "deny",
+        risk: registeredDecision.risk,
+        decision: registeredDecision.allowed ? "allow" : "deny",
         metadata: {
-          requiresApproval: finalDecision.requiresApproval,
-          reason: finalDecision.reason,
+          requiresApproval: registeredDecision.requiresApproval,
+          reason: registeredDecision.reason,
         },
       });
-      return finalDecision.allowed
-        ? ToolGuardrailFunctionOutputFactory.allow(finalDecision)
+      return registeredDecision.allowed
+        ? ToolGuardrailFunctionOutputFactory.allow(registeredDecision)
         : ToolGuardrailFunctionOutputFactory.rejectContent(
-            finalDecision.reason ?? "工具调用被工控安全策略拒绝。",
-            finalDecision,
+            registeredDecision.reason ?? "工具调用被工控安全策略拒绝。",
+            registeredDecision,
           );
     },
   });
@@ -239,27 +227,28 @@ function buildToolGuardrails(
 
 export function createToolBuildContext(
   cfg: AgentConfig,
-  deliveryContract: DeliveryContract | undefined,
-  deliveryWorkflow: DeliveryWorkflow | undefined,
-  stValidationState: StValidationState,
-  diagnosticReporter?: DiagnosticSideReporter,
-  runtimeToolGuard?: RuntimeToolCallGuard,
+  options: {
+    workflowContract?: WorkflowContract;
+    workflow?: WorkflowRuntime;
+    diagnosticReporter?: DiagnosticSideReporter;
+    runtimeToolGuard?: RuntimeToolCallGuard;
+    riskByTool?: Readonly<Record<string, ToolRisk>>;
+    beforeEffectsFor: (toolName: string) => readonly BeforeEffectHook[];
+    registerBeforeEffect: (toolName: string, hook: BeforeEffectHook) => void;
+  },
 ): ToolBuildContext {
-  const policy = cfg.policy ?? new DefaultToolPolicy();
+  const policy = cfg.policy ?? new DefaultToolPolicy(options.riskByTool);
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
-  const stAnalyzer = cfg.stAnalyzer ?? new FallbackStAnalyzer();
-  const stToolOptions = cfg.stAnalyzerOptions ?? {};
-  const requiresStValidation = deliveryContract?.deliverables.some(
-    (deliverable) =>
-      deliverable.required &&
-      deliverable.requiredVerificationTools?.includes("validate_st_code"),
-  ) === true;
-  const inlineStValidation = deliveryWorkflow?.validationInputMode === "inline_code";
   const workspace = workspaceScopeFromRoots(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
   );
-  const guardrails = buildToolGuardrails(cfg, policy, runtimeToolGuard);
+  const guardrails = buildToolGuardrails(
+    cfg,
+    policy,
+    options.runtimeToolGuard,
+    options.riskByTool,
+  );
   const withEffect = <T>(
     toolName: string,
     input: unknown,
@@ -297,17 +286,13 @@ export function createToolBuildContext(
     cfg,
     policy,
     plc,
-    stAnalyzer,
-    stToolOptions,
-    requiresStValidation,
-    inlineStValidation,
     workspace,
     guardrails,
-    deliveryWorkflow,
-    stValidationState,
-    validatedStContent: stValidationState.hashes,
-    stValidationCache: new Map<string, Promise<string>>(),
-    diagnosticReporter,
+    workflowContract: options.workflowContract,
+    workflow: options.workflow,
+    diagnosticReporter: options.diagnosticReporter,
+    beforeEffectsFor: options.beforeEffectsFor,
+    registerBeforeEffect: options.registerBeforeEffect,
     withEffect,
     contract,
     failed,

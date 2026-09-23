@@ -76,6 +76,7 @@ export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionA
   readonly id: string;
   readonly title: string;
   readonly stages: WorkflowStage[];
+  readonly services?: ReadonlyMap<string, unknown>;
   readonly validationInputMode?: "inline_code" | "path_or_code";
   readonly requiredActionTool?: string;
   initialTool(options: { isResume: boolean }): string | undefined;

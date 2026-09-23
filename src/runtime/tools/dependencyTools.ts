@@ -13,7 +13,7 @@ import type {
   StAnalyzerEngineInfo,
   StTarget,
 } from '../../analysis/stAnalyzer';
-import type { ToolBuildContext } from './toolBuildContext';
+import type { StToolBuildContext } from '../workflows/stToolContext';
 
 /** 回执里最多列出的条目数(超出部分只报计数,避免刷爆上下文) */
 const MAX_LISTED = 40;
@@ -23,7 +23,7 @@ function isPlaceholderText(value: string): boolean {
   return /^(none|null|undefined|n\/?a)$/i.test(value.trim());
 }
 
-export function createStGraphTools(context: ToolBuildContext) {
+export function createStGraphTools(context: StToolBuildContext) {
   const { stAnalyzer, stToolOptions, workspace, guard, contract, failed, guardrails } = context;
 
   const toDisplay = (absolutePath: string): string => {

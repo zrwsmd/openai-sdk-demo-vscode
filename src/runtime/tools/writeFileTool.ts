@@ -2,21 +2,15 @@ import { tool } from "@openai/agents";
 import { z } from "zod";
 import { writeFileText } from "../../tools/workspaceTools";
 import { toolResult } from "../../tools/toolContract";
-import { hashStContent } from "../stContentHash";
+import { hashContent } from "../contentHash";
 import type { ToolBuildContext } from "./toolBuildContext";
-import type { ValidateStContentBeforeWrite } from "./validateStTool";
 
-export function createWriteFileTool(
-  ctx: ToolBuildContext,
-  validateStContentBeforeWrite: ValidateStContentBeforeWrite,
-) {
+export function createWriteFileTool(ctx: ToolBuildContext) {
   const {
     contract,
-    deliveryWorkflow,
+    beforeEffectsFor,
     guard,
     guardrails,
-    requiresStValidation,
-    validatedStContent,
     workspace,
     withEffect,
   } = ctx;
@@ -36,51 +30,35 @@ export function createWriteFileTool(
       guard(
         async () => {
           const target = workspace.resolve(p);
-          let preWriteValidation:
-            | Awaited<ReturnType<ValidateStContentBeforeWrite>>
-            | undefined;
-          if (
-            requiresStValidation &&
-            target.relativePath.toLowerCase().endsWith(".st") &&
-            !(deliveryWorkflow?.canWriteContent
-              ? deliveryWorkflow.canWriteContent(content)
-              : validatedStContent.has(hashStContent(content)))
-          ) {
-            preWriteValidation = await validateStContentBeforeWrite(
-              content,
-              target.relativePath,
-              details?.signal,
-            );
-            if (!preWriteValidation.ok) {
+          const receiptData: Record<string, unknown> = {};
+          for (const beforeEffect of beforeEffectsFor("write_file")) {
+            const result = await beforeEffect({
+              toolName: "write_file",
+              input: {
+                path: target.relativePath,
+                workspaceRoot: target.root,
+                content,
+              },
+              workspace,
+              signal: details?.signal,
+            });
+            if (!result) continue;
+            if (!result.ok) {
               return toolResult({
                 ok: false,
-                error: "ST 写入内容与最近一次通过校验的草稿不一致，且写入前重新校验未通过。",
-                data: {
-                  suppliedContentHash: preWriteValidation.contentHash,
-                  lastValidatedContentHash: deliveryWorkflow?.canWriteContent
-                    ? undefined
-                    : [...validatedStContent].at(-1),
-                  errorCount: preWriteValidation.counts.error,
-                  warningCount: preWriteValidation.counts.warning,
-                  diagnostics: preWriteValidation.repairPacket
-                    ? preWriteValidation.repairPacket.diagnostics
-                    : preWriteValidation.diagnostics,
-                  ...(preWriteValidation.repairPacket
-                    ? { repairPacket: preWriteValidation.repairPacket }
-                    : {}),
-                },
-                diagnostics: preWriteValidation.protocolDiagnostics.length
-                  ? preWriteValidation.protocolDiagnostics
-                  : [{
-                      code: "st_pre_write_validation_failed",
-                      message: "写入内容未通过 ST 预写校验。",
-                      severity: "error",
-                      path: target.relativePath,
-                    }],
+                error: result.error ?? "写入前检查未通过。",
+                ...(result.failureData !== undefined
+                  ? { data: result.failureData }
+                  : {}),
+                ...(result.diagnostics
+                  ? { diagnostics: [...result.diagnostics] }
+                  : {}),
+                ...(result.metadata ? { metadata: result.metadata } : {}),
                 effect: "none",
-                risk: "plan",
+                risk: result.risk ?? "plan",
               });
             }
+            Object.assign(receiptData, result.receiptData ?? {});
           }
           return withEffect(
             "write_file",
@@ -98,18 +76,8 @@ export function createWriteFileTool(
                     target.relativePath,
                     content,
                   )),
-                  contentHash: hashStContent(content),
-                  ...(preWriteValidation
-                    ? {
-                        preWriteValidation: {
-                          errorCount: preWriteValidation.counts.error,
-                          warningCount: preWriteValidation.counts.warning,
-                          infoCount: preWriteValidation.counts.info,
-                          validatedContentHash: preWriteValidation.contentHash,
-                          summary: preWriteValidation.summary,
-                        },
-                      }
-                    : {}),
+                  contentHash: hashContent(content),
+                  ...receiptData,
                 },
                 "write",
                 "filesystem",

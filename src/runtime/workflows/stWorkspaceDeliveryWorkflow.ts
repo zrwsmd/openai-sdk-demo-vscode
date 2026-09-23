@@ -39,6 +39,7 @@ export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
 ] as const;
 
 const ST_WORKSPACE_DELIVERY_STATE_KEY = "st_workspace_delivery.validation";
+export const ST_TOOL_STATE_SERVICE = "st.validationState";
 
 export function createStValidationState(): StValidationState {
   return { hashes: new Set<string>() };
@@ -125,11 +126,14 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly parallelToolCalls = false;
   readonly validationInputMode = "inline_code" as const;
   readonly requiredActionTool = "write_file";
+  readonly services: ReadonlyMap<string, unknown>;
 
   constructor(
     private readonly contract: DeliveryContract | undefined,
     readonly state: StValidationState,
-  ) {}
+  ) {
+    this.services = new Map([[ST_TOOL_STATE_SERVICE, state]]);
+  }
 
   initialTool(options: { isResume: boolean }): string | undefined {
     return options.isResume ? undefined : "validate_st_code";

@@ -25,8 +25,8 @@ import {
   optionalStringParam,
   parseOptionalBoolean,
   parseOptionalString,
-  type ToolBuildContext,
 } from "./toolBuildContext";
+import type { StToolBuildContext } from "../workflows/stToolContext";
 
 export interface StPreWriteValidationResult {
   ok: boolean;
@@ -51,7 +51,7 @@ export type ValidateStContentBeforeWrite = (
   signal?: AbortSignal,
 ) => Promise<StPreWriteValidationResult>;
 
-export function createValidateStTools(ctx: ToolBuildContext) {
+export function createValidateStTools(ctx: StToolBuildContext) {
   const {
     audit,
     cfg,
