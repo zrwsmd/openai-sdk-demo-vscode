@@ -33,6 +33,7 @@ export const TOOL_RISK_BY_NAME: Record<string, ToolRisk> = {
   validate_st_code: "plan",
   st_dependency_map: "plan",
   st_change_impact: "plan",
+  st_symbol_references: "plan",
   deliver_artifact: "plan",
   list_files: "read",
   read_file: "read",

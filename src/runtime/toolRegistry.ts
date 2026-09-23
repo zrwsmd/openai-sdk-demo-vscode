@@ -61,7 +61,7 @@ export function buildTools(
     validateStContentBeforeWrite,
   );
   const runCommandTool = createRunCommandTool(context);
-  const { stDependencyMap, stChangeImpact } = createStGraphTools(context);
+  const { stDependencyMap, stChangeImpact, stSymbolReferences } = createStGraphTools(context);
 
   const allTools = [
     getIoTable,
@@ -75,6 +75,7 @@ export function buildTools(
     runCommandTool,
     stDependencyMap,
     stChangeImpact,
+    stSymbolReferences,
   ];
   if (workflowToolNames) {
     return allTools.filter((item) => {

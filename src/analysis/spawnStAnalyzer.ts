@@ -8,6 +8,7 @@ import {
   parseStAnalyzerResponse,
   parseStGraphResponse,
   parseStImpactResponse,
+  parseStSymbolReferencesResponse,
   ST_ANALYZER_PROTOCOL_VERSION,
   StAnalyzerUnavailableError,
   type StAnalyzer,
@@ -16,6 +17,8 @@ import {
   type StGraphResult,
   type StImpactRequest,
   type StImpactResult,
+  type StSymbolReferencesRequest,
+  type StSymbolReferencesResult,
   type StValidationRequest,
   type StValidationResult,
 } from './stAnalyzer';
@@ -85,8 +88,24 @@ export class SpawnStAnalyzer implements StAnalyzer {
     return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
   }
 
+  async findSymbolReferences(
+    request: StSymbolReferencesRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StSymbolReferencesResult> {
+    const startedAt = this.now();
+    const raw = await this.runAction('symbol', {
+      workspaceRoot: request.workspaceRoot,
+      files: request.files,
+      symbol: request.symbol,
+      ...(request.path ? { path: request.path } : {}),
+      options: request.options ?? {},
+    }, context);
+    const parsed = parseStSymbolReferencesResponse(raw);
+    return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
+  }
+
   /**
-   * 执行一次桥动作(validate/graph/impact 共用)。
+   * 执行一次桥动作(validate/graph/impact/symbol 共用)。
    * 按候选链依次尝试;不可用错误换下一个候选;取消原样上抛。
    */
   private async runAction(

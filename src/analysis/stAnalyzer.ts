@@ -96,6 +96,11 @@ export interface StAnalyzer {
     request: StImpactRequest,
     context?: { signal?: AbortSignal },
   ): Promise<StImpactResult>;
+  /** 符号级引用明细:某符号声明在哪、被哪些文件的哪一行引用。 */
+  findSymbolReferences(
+    request: StSymbolReferencesRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StSymbolReferencesResult>;
 }
 
 /**
@@ -332,6 +337,66 @@ export interface StGraphAnalysisOptions {
   maxEdges?: number;
 }
 
+// ---------- 符号引用查询(action=symbol) ----------
+
+/**
+ * 符号引用查询请求:回答"这个符号声明在哪、被哪些文件的哪一行引用"。
+ *
+ * 与依赖图的分工:依赖图给的是文件级边(谁依赖谁),
+ * 这里给的是符号级明细(具体哪个变量/类型,在哪些行被用到),
+ * 因此能覆盖同一文件内部的本地变量引用 —— 那是 edges 拿不到的。
+ */
+export interface StSymbolReferencesRequest {
+  workspaceRoot: string;
+  /** 参与分析的文件池(通常为目标文件 + 工作区上下文) */
+  files: StTarget[];
+  /** 要查询的符号名(区分大小写,与源码一致) */
+  symbol: string;
+  /** 可选:把声明限定在某个文件里,用于同名符号消歧 */
+  path?: string;
+  options?: StSymbolReferencesOptions;
+}
+
+export interface StSymbolReferencesOptions {
+  /** 每处声明最多列出多少条引用,缺省 40 */
+  maxReferences?: number;
+  /** 最多列出多少处声明,缺省 20 */
+  maxDeclarations?: number;
+}
+
+/** 一处引用点(使用处)。line/character 为 1 起的行列号。 */
+export interface StSymbolReferenceLocation {
+  file: string;
+  line: number;
+  character: number;
+}
+
+/** 一处声明及其被引用情况。 */
+export interface StSymbolDeclaration {
+  file: string;
+  /** 声明时使用的原始名字(大小写保留) */
+  name: string;
+  /** 声明类型:FunctionBlock / Program / VarDeclarationInit / ... */
+  type: string;
+  line: number;
+  character: number;
+  /** 该声明被引用的总处数(可能大于 references.length,超出配额时见 truncated) */
+  referenceCount: number;
+  references: StSymbolReferenceLocation[];
+}
+
+export interface StSymbolReferencesResult {
+  engine: StAnalyzerEngineInfo;
+  /** 查询用的符号名 */
+  symbol: string;
+  /** 匹配到的声明处数。为 0 表示分析池内没有这个名字的声明 */
+  declarationCount: number;
+  declarations: StSymbolDeclaration[];
+  /** 结果被配额截断(还有未列出的声明或引用) */
+  truncated: boolean;
+  elapsedMs: number;
+}
+
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
@@ -481,6 +546,44 @@ export function parseStImpactResponse(raw: string): StImpactResult {
           ),
         }
       : {}),
+    elapsedMs: asNumber(parsed.elapsedMs),
+  };
+}
+
+/** 解析 action=symbol 的响应。结构异常归为协议错误(可降级),绝不返回假的空引用。 */
+export function parseStSymbolReferencesResponse(raw: string): StSymbolReferencesResult {
+  const parsed = parseBridgeEnvelope(raw);
+  const references = (parsed.references ?? {}) as Record<string, unknown>;
+  const rawDeclarations = Array.isArray(references.declarations) ? references.declarations : [];
+  return {
+    engine: parseStEngine(parsed.engine),
+    symbol: asString(references.symbol),
+    declarationCount: asNumber(references.declarationCount),
+    declarations: rawDeclarations
+      .map((entry): StSymbolDeclaration => {
+        const record = (entry ?? {}) as Record<string, unknown>;
+        const rawReferences = Array.isArray(record.references) ? record.references : [];
+        return {
+          file: asString(record.file),
+          name: asString(record.name),
+          type: asString(record.type, 'unknown'),
+          line: asNumber(record.line),
+          character: asNumber(record.character),
+          referenceCount: asNumber(record.referenceCount),
+          references: rawReferences
+            .map((point) => {
+              const location = (point ?? {}) as Record<string, unknown>;
+              return {
+                file: asString(location.file),
+                line: asNumber(location.line),
+                character: asNumber(location.character),
+              };
+            })
+            .filter((location) => location.file),
+        };
+      })
+      .filter((declaration) => declaration.file),
+    truncated: references.truncated === true,
     elapsedMs: asNumber(parsed.elapsedMs),
   };
 }

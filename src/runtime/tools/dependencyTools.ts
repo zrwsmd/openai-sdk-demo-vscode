@@ -54,9 +54,15 @@ export function createStGraphTools(context: ToolBuildContext) {
     description:
       '查询 ST 工作区的真实符号依赖关系(基于语言服务器语义解析,非文本搜索)。' +
       '不带参数返回工程地图(每个 .st 文件依赖哪些文件);带 path 返回该文件的依赖方与被依赖方、以及具体符号名。' +
-      '修改任何 .st 文件前建议先查询,以了解会波及哪些文件;找不到某个变量/功能块的定义时也可用它定位。',
+      '修改任何 .st 文件前建议先查询,以了解会波及哪些文件。' +
+      '若要定位某个具体符号的声明位置与全部使用行,请改用 st_symbol_references。',
     parameters: z.object({
-      path: z.string().optional().describe('工作区内的 .st 文件路径;留空返回整个工作区的依赖摘要'),
+      path: z
+        .string()
+        .optional()
+        .describe(
+          '工作区内的 .st 文件路径(如 st-refs/MainProgram.st);省略或留空表示返回整个工作区的依赖摘要,不要填 None/null 之类的占位值',
+        ),
     }),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
@@ -66,6 +72,11 @@ export function createStGraphTools(context: ToolBuildContext) {
           if (!workspace.primaryRoot) {
             return failed(new Error('未打开工作区文件夹,依赖图不可用'), 'plan');
           }
+          // 模型偶尔给可选参数填 "None"/"null" 这类占位串:按"未提供"处理。
+          // 否则会拿它去查一个不存在的文件,返回空 dependsOn/dependents,
+          // 看起来像"这个工程没有依赖",而实际是路径没对上。
+          const asked = typeof requestedPath === 'string' ? requestedPath.trim() : '';
+          const pathArg = /^(none|null|undefined|n\/?a)$/i.test(asked) ? '' : asked;
           const collected = await collectWorkspaceFiles();
           if (!collected.files.length) {
             return failed(new Error('工作区内没有 .st 文件'), 'plan');
@@ -86,9 +97,24 @@ export function createStGraphTools(context: ToolBuildContext) {
             contextTruncated: collected.truncated,
           };
 
-          if (requestedPath) {
-            const resolved = workspace.resolve(requestedPath);
-            const target = resolved.absolutePath;
+          if (pathArg) {
+            const resolved = workspace.resolve(pathArg);
+            // 与 edges 的 from/to 同源比较(它们就是请求里的 path 原样回传),
+            // 大小写/分隔符差异统一后再比,避免"文件其实在池里却匹配不上边"。
+            const normalize = (value: string) => value.split(path.sep).join('/').toLowerCase();
+            const target = graph.files.find(
+              (file) => normalize(file) === normalize(resolved.absolutePath),
+            );
+            if (!target) {
+              return failed(
+                new Error(
+                  `指定的文件不在本次分析池内: ${pathArg}。` +
+                    `可能是路径写错、文件不存在,或超出上下文文件配额。` +
+                    `本次实际分析的文件: ${graph.files.map(toDisplay).join(', ')}`,
+                ),
+                'plan',
+              );
+            }
             const dependsOn = graph.edges.filter((edge) => edge.from === target);
             const dependents = graph.edges.filter((edge) => edge.to === target);
             const unresolvedHere = graph.unresolved.filter((item) => item.file === target);
@@ -150,7 +176,8 @@ export function createStGraphTools(context: ToolBuildContext) {
     description:
       '评估改动一个 .st 文件(或其中特定符号)会波及哪些文件:返回直接依赖方与传递依赖方。' +
       '在修改 GVL / 功能块 / 类型定义之前调用,可以知道哪些程序可能需要同步复核。' +
-      '传入 symbols 可做符号级评估(只关心这些符号的引用方)。',
+      '传入 symbols 可做符号级评估(只关心这些符号的引用方);' +
+      '注意 symbols 只看跨文件引用,若要包含同一文件内的本地变量引用,请用 st_symbol_references。',
     parameters: z.object({
       path: z.string().describe('要变更的 .st 文件路径(工作区内)'),
       symbols: z
@@ -227,5 +254,106 @@ export function createStGraphTools(context: ToolBuildContext) {
       ),
   });
 
-  return { stDependencyMap, stChangeImpact };
+  const stSymbolReferences = tool({
+    name: 'st_symbol_references',
+    description:
+      '查询某个符号(变量 / 功能块 / 类型 / 程序)声明在哪、被哪些文件的哪一行引用,基于语言服务器语义解析。' +
+      '与 st_dependency_map 的分工:后者给文件级依赖(谁依赖谁),本工具给符号级明细(具体符号在哪些行被用到),' +
+      '因此能覆盖同一文件内部的本地变量引用。' +
+      '改名、删除、修改某个符号的接口前调用它,可以一次拿到全部引用点。' +
+      '同名符号(不同文件里各有一个同名变量)会分组返回;用 path 可把结果限定在某个文件的声明上。',
+    parameters: z.object({
+      symbol: z.string().describe('要查询的符号名(区分大小写,与源码一致,如 MainMotor / FB_MotorControl)'),
+      path: z
+        .string()
+        .optional()
+        .describe('可选:把声明限定在某个 .st 文件内,用于同名符号消歧'),
+    }),
+    inputGuardrails: guardrails.input,
+    outputGuardrails: guardrails.output,
+    execute: ({ symbol, path: requestedPath }, _toolContext, details) =>
+      guard(
+        async () => {
+          if (!workspace.primaryRoot) {
+            return failed(new Error('未打开工作区文件夹,符号引用查询不可用'), 'plan');
+          }
+          const name = symbol.trim();
+          if (!name) {
+            return failed(new Error('symbol 不能为空'), 'plan');
+          }
+          let pathFilter: string | undefined;
+          if (requestedPath) {
+            const resolved = workspace.resolve(requestedPath);
+            if (!resolved.absolutePath.toLowerCase().endsWith('.st')) {
+              return failed(new Error(`${resolved.relativePath} 不是 .st 文件`), 'plan');
+            }
+            pathFilter = resolved.absolutePath;
+          }
+          const collected = await collectWorkspaceFiles();
+          if (!collected.files.length) {
+            return failed(new Error('工作区内没有 .st 文件'), 'plan');
+          }
+          const result = await stAnalyzer.findSymbolReferences(
+            {
+              workspaceRoot: workspace.primaryRoot,
+              files: collected.files,
+              symbol: name,
+              ...(pathFilter ? { path: pathFilter } : {}),
+            },
+            { signal: details?.signal },
+          );
+          if (result.engine.id !== 'st-analyze') {
+            return degraded('st_symbol_references', result.engine, '符号引用查询需要真实 ST 语言服务');
+          }
+
+          const totalReferences = result.declarations.reduce(
+            (sum, declaration) => sum + declaration.referenceCount,
+            0,
+          );
+          const declarations = result.declarations.slice(0, 20).map((declaration) => ({
+            file: toDisplay(declaration.file),
+            name: declaration.name,
+            type: declaration.type,
+            line: declaration.line,
+            character: declaration.character,
+            referenceCount: declaration.referenceCount,
+            references: declaration.references.slice(0, MAX_LISTED).map((reference) => ({
+              file: toDisplay(reference.file),
+              line: reference.line,
+              character: reference.character,
+            })),
+          }));
+
+          // 零声明有两种原因(限定文件内没有 / 全池都没有),给模型不同的下一步提示,
+          // 避免它把"查不到声明"直接当成"这个符号没有引用"。
+          const hint = result.declarationCount
+            ? totalReferences === 0
+              ? '该符号已声明但当前分析池内没有任何引用点。'
+              : undefined
+            : pathFilter
+              ? `指定文件内没有名为 ${name} 的声明;去掉 path 可查询整个工作区。`
+              : `分析池内没有名为 ${name} 的声明(可能是外部库符号,或名字/大小写不符)。`;
+
+          return contract(
+            {
+              engine: result.engine.id,
+              symbol: result.symbol,
+              declarationCount: result.declarationCount,
+              referenceCount: totalReferences,
+              analyzedFiles: collected.files.length,
+              contextTruncated: collected.truncated,
+              declarations,
+              ...(result.truncated ? { truncated: true } : {}),
+              ...(hint ? { hint } : {}),
+              note: 'references 是符号的实际使用点(1 起行列号);引用点所在的文件可能需要同步复核。',
+              elapsedMs: result.elapsedMs,
+            },
+            'plan',
+          );
+        },
+        'plan',
+      ),
+  });
+
+  return { stDependencyMap, stChangeImpact, stSymbolReferences };
 }

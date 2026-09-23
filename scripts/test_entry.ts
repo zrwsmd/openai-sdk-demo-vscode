@@ -1,5 +1,6 @@
 // 测试专用入口:把内核、会话与工作区工具层打进同一个 ESM bundle 供 node 测试脚本 import
 export * from '../src/runtime/agent';
+export * from '../src/runtime/toolRegistry';
 export * from '../src/runtime/session';
 export * from '../src/app/chatSessions';
 export * from '../src/tools/workspaceTools';

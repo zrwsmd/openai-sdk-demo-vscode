@@ -352,9 +352,10 @@ try {
   });
   const tools = runtime?.visibleToolNames ?? [];
   if (
-    tools.length !== 2 ||
+    tools.length !== 3 ||
     !tools.includes('st_dependency_map') ||
     !tools.includes('st_change_impact') ||
+    !tools.includes('st_symbol_references') ||
     tools.includes('validate_st_code') ||
     tools.includes('write_file')
   ) {

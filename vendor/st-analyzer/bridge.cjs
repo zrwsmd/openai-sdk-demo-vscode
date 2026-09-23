@@ -275,6 +275,123 @@ function buildImpactAnalysis(graphData, request) {
   return payload;
 }
 
+// ---- 符号引用查询(action=symbol) ----
+
+// 文本偏移 -> 1 起的行列号
+function positionOfOffset(text, offset) {
+  const head = text.slice(0, offset);
+  const lines = head.split('\n');
+  return { line: lines.length, character: lines[lines.length - 1].length + 1 };
+}
+
+// 从 AstNodeDescription 的 segment 取声明位置(缺失时返回 0,表示未知)
+function positionOfSegment(text, segment) {
+  if (!text || !segment || typeof segment.offset !== 'number' || segment.offset < 0) {
+    return { line: 0, character: 0 };
+  }
+  return positionOfOffset(text, segment.offset);
+}
+
+function toDescriptionArray(streamLike) {
+  if (!streamLike) return [];
+  if (typeof streamLike.toArray === 'function') return streamLike.toArray();
+  return Array.from(streamLike);
+}
+
+/**
+ * 符号引用查询:回答"这个符号声明在哪、被哪些文件的哪一行引用"。
+ *
+ * 数据来源与依赖图不同:依赖图走的是跨文件边(edges),
+ * 这里走的是 document.references —— 因此能覆盖同一文件内部的本地变量引用,
+ * 那是 edges 拿不到的(本地引用不产生跨文件边)。
+ *
+ * 声明表额外取自 IndexManager,覆盖"声明了但没有任何引用"的符号,
+ * 否则这类符号会查不到,被误读成"符号不存在"。
+ */
+function buildSymbolReferences(shared, created, request) {
+  const options = request.options || {};
+  const maxReferences = options.maxReferences || 40;
+  const maxDeclarations = options.maxDeclarations || 20;
+  const symbolName = typeof request.symbol === 'string' ? request.symbol : '';
+  const pathFilter = typeof request.path === 'string' ? request.path : '';
+
+  const keyToPath = new Map(created.map((item) => [item.key, item.requestPath]));
+  const keyToText = new Map(created.map((item) => [item.key, item.text || '']));
+
+  // 目标声明(uri#path) -> 条目。按"声明节点"聚合而非按名字聚合,同名遮蔽才不会串。
+  const targets = new Map();
+  const ensureTarget = (uriKey, desc) => {
+    const key = uriKey + '#' + String((desc && desc.path) || '');
+    if (!targets.has(key)) {
+      const text = keyToText.get(uriKey) || '';
+      const segment = desc && (desc.selectionSegment || desc.nameSegment);
+      const pos = positionOfSegment(text, segment);
+      targets.set(key, {
+        file: keyToPath.get(uriKey),
+        name: String((desc && desc.name) || ''),
+        type: String((desc && desc.type) || 'unknown'),
+        line: pos.line,
+        character: pos.character,
+        references: [],
+      });
+    }
+    return targets.get(key);
+  };
+
+  // ① 全局索引里的声明:保证"零引用"的符号也能被找到
+  for (const desc of toDescriptionArray(shared.workspace.IndexManager.allElements())) {
+    if (!desc || desc.name !== symbolName) continue;
+    const uriKey = String(desc.documentUri || '');
+    if (!keyToPath.has(uriKey)) continue; // 只认本次分析池内的文件
+    ensureTarget(uriKey, desc);
+  }
+
+  // ② 反向索引:每条引用按目标声明归档,附带使用点行列
+  for (const item of created) {
+    const text = keyToText.get(item.key) || '';
+    for (const r of item.document.references || []) {
+      const nd = r && r.$nodeDescription;
+      if (!nd || !nd.documentUri || nd.name !== symbolName) continue;
+      const uriKey = String(nd.documentUri);
+      if (!keyToPath.has(uriKey)) continue; // 指向分析池外(外部库符号)的引用不计
+      const entry = ensureTarget(uriKey, nd);
+      const offset = r.$refNode ? r.$refNode.offset : -1;
+      if (offset < 0) continue;
+      const pos = positionOfOffset(text, offset);
+      entry.references.push({ file: item.requestPath, line: pos.line, character: pos.character });
+    }
+  }
+
+  const comparePath = (a, b) => (a === b ? 0 : a < b ? -1 : 1);
+  let list = [...targets.values()];
+  if (pathFilter) list = list.filter((item) => item.file === pathFilter);
+  list.sort((a, b) => comparePath(a.file, b.file) || a.line - b.line);
+
+  let truncated = list.length > maxDeclarations;
+  const declarations = list.slice(0, maxDeclarations).map((item) => {
+    const refs = item.references
+      .sort((a, b) => comparePath(a.file, b.file) || a.line - b.line || a.character - b.character);
+    const kept = refs.slice(0, maxReferences);
+    if (refs.length > kept.length) truncated = true;
+    return {
+      file: item.file,
+      name: item.name,
+      type: item.type,
+      line: item.line,
+      character: item.character,
+      referenceCount: refs.length,
+      references: kept,
+    };
+  });
+
+  return {
+    symbol: symbolName,
+    declarationCount: list.length,
+    declarations,
+    truncated,
+  };
+}
+
 
 (async () => {
   let request;
@@ -303,9 +420,11 @@ function buildImpactAnalysis(graphData, request) {
   const addDocument = (item) => {
     const uri = makeUri(resolveAbsolutePath(workspaceRoot, item.path));
     if (docs.hasDocument(uri)) docs.deleteDocument(uri);
-    const document = shared.workspace.LangiumDocumentFactory.fromString(normalizeText(item.text), uri);
+    const text = normalizeText(item.text);
+    const document = shared.workspace.LangiumDocumentFactory.fromString(text, uri);
     docs.addDocument(document);
-    created.push({ key: uri.toString(), uri, document, requestPath: item.path });
+    // text 仅供符号引用查询换算行列号,其余动作不读它
+    created.push({ key: uri.toString(), uri, document, requestPath: item.path, text });
     return uri.toString();
   };
 
@@ -316,21 +435,37 @@ function buildImpactAnalysis(graphData, request) {
     const targets = Array.isArray(request.targets) ? request.targets : [];
     const context = Array.isArray(request.context) ? request.context : [];
 
-    if (action === 'graph' || action === 'impact') {
-      // 图/影响面动作把 targets 与 context 合并成一个构建池(或由 files 显式给出)
+    if (action === 'graph' || action === 'impact' || action === 'symbol') {
+      // 图/影响面/符号引用三个动作共用同一个构建池(targets 与 context 合并,或由 files 显式给出)
       const pool = Array.isArray(request.files) && request.files.length ? request.files : [...context, ...targets];
       for (const item of pool) addDocument(item);
       await shared.workspace.DocumentBuilder.build(created.map((item) => item.document), { validation: false });
-      const graph = buildGraphAnalysis(shared, created, request);
-      payload = {
-        protocolVersion: 1,
-        engine: engineInfo(),
-        graph,
-        contextLoaded: pool.length,
-        elapsedMs: Date.now() - startedAt,
-      };
-      if (action === 'impact') {
-        payload.impact = buildImpactAnalysis(graph, request);
+      if (action === 'symbol') {
+        const symbolName = typeof request.symbol === 'string' ? request.symbol.trim() : '';
+        if (!symbolName) {
+          process.stderr.write('symbol action requires a non-empty "symbol" field\n');
+          exitCode = 3;
+        } else {
+          payload = {
+            protocolVersion: 1,
+            engine: engineInfo(),
+            references: buildSymbolReferences(shared, created, request),
+            contextLoaded: pool.length,
+            elapsedMs: Date.now() - startedAt,
+          };
+        }
+      } else {
+        const graph = buildGraphAnalysis(shared, created, request);
+        payload = {
+          protocolVersion: 1,
+          engine: engineInfo(),
+          graph,
+          contextLoaded: pool.length,
+          elapsedMs: Date.now() - startedAt,
+        };
+        if (action === 'impact') {
+          payload.impact = buildImpactAnalysis(graph, request);
+        }
       }
     } else if (action === 'validate') {
       for (const item of context) addDocument(item);

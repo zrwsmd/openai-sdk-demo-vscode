@@ -549,6 +549,58 @@ if (!hasVendor) {
     assert.equal(isStValidationFailure(withContext), false, '带上下文时跨文件引用应通过');
     assert.equal(withContext.contextLoaded, 1);
   });
+
+  await test('[16] 真实端到端:符号引用查询(action=symbol)', async () => {
+    const real = new SpawnStAnalyzer({
+      launches: [{ exe: process.execPath, args: [bridgePath], cwd: vendorDir }],
+      runner: new NodeProcessRunner(),
+      timeoutMs: 20000,
+    });
+    const workspaceRoot = 'F:\\st-analyzer-test-ws';
+    const files = [
+      {
+        path: 'Motor.st',
+        text:
+          'FUNCTION_BLOCK FB_Motor\nVAR_INPUT\n  Start : BOOL;\nEND_VAR\nVAR\n  RunLatch : BOOL;\nEND_VAR\n  RunLatch := Start;\nEND_FUNCTION_BLOCK\n',
+      },
+      {
+        path: 'Main.st',
+        text: 'PROGRAM Main\nVAR\n  M : FB_Motor;\nEND_VAR\n  M(Start := TRUE);\nEND_PROGRAM\n',
+      },
+    ];
+
+    // 跨文件符号:声明 + 引用分处两个文件
+    const crossFile = await real.findSymbolReferences({ workspaceRoot, files, symbol: 'FB_Motor' });
+    assert.equal(crossFile.engine.id, 'st-analyze');
+    assert.equal(crossFile.symbol, 'FB_Motor');
+    assert.equal(crossFile.declarationCount, 1, 'FB_Motor 应有一处声明');
+    assert.equal(crossFile.declarations[0].file, 'Motor.st');
+    assert.equal(crossFile.declarations[0].line, 1, '声明应定位到 FUNCTION_BLOCK 那一行');
+    assert.deepEqual(
+      crossFile.declarations[0].references.map((item) => `${item.file}:${item.line}`),
+      ['Main.st:3'],
+      '应给出跨文件引用点及其行号',
+    );
+
+    // 文件内本地变量:edges 拿不到,符号引用必须拿得到(两套工具互补的硬证据)
+    const local = await real.findSymbolReferences({ workspaceRoot, files, symbol: 'RunLatch' });
+    assert.equal(local.declarationCount, 1);
+    assert.equal(local.declarations[0].line, 6);
+    assert.deepEqual(
+      local.declarations[0].references.map((item) => `${item.file}:${item.line}`),
+      ['Motor.st:8'],
+    );
+    const graph = await real.dependencyGraph({ workspaceRoot, files });
+    assert.ok(
+      !graph.edges.some((edge) => edge.symbols.includes('RunLatch')),
+      '依赖图的跨文件边不应包含纯本地变量',
+    );
+
+    // 查不到的符号:如实报 0,不编造
+    const missing = await real.findSymbolReferences({ workspaceRoot, files, symbol: 'NotHere' });
+    assert.equal(missing.declarationCount, 0);
+    assert.deepEqual(missing.declarations, []);
+  });
 }
 
 console.log('');

@@ -11,6 +11,7 @@ import type {
 export const ST_INSPECTION_TOOL_NAMES = [
   "st_dependency_map",
   "st_change_impact",
+  "st_symbol_references",
 ] as const;
 
 const ST_INSPECTION_WORKFLOW_ID = "st_inspection";
@@ -90,6 +91,8 @@ export class StInspectionWorkflow implements DeliveryWorkflow {
       "\n本轮是只读 ST 工作区依赖分析，不是代码交付任务。" +
       "优先调用 st_dependency_map 获取整个工作区的真实依赖图；" +
       "只有用户明确要求某个文件的变更影响面时，才调用 st_change_impact。" +
+      "当用户问的是某个具体符号（变量 / 功能块 / 类型）在哪声明、被哪些行引用时，调用 st_symbol_references；" +
+      "它给的是符号级明细，包含同一文件内的本地变量引用，这是 st_dependency_map 给不出的。" +
       "禁止调用 validate_st_code、write_file、export_st_program 或其他未暴露工具。" +
       "不要编造 ST 草稿，也不要修改工作区文件。"
     );

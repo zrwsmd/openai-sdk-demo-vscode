@@ -12,6 +12,8 @@ import {
   type StGraphRequest,
   type StImpactRequest,
   type StImpactResult,
+  type StSymbolReferencesRequest,
+  type StSymbolReferencesResult,
   type StTarget,
   type StValidationRequest,
   type StValidationResult,
@@ -93,6 +95,18 @@ export class FallbackStAnalyzer implements StAnalyzer {
       elapsedMs: 0,
     };
   }
+
+  /** 符号引用同属"给不出就别说"的一类:空结果 + fallbackReason,由工具层提示改用文本搜索。 */
+  async findSymbolReferences(request: StSymbolReferencesRequest): Promise<StSymbolReferencesResult> {
+    return {
+      engine: { id: 'fallback', fallbackReason: this.reason },
+      symbol: request.symbol,
+      declarationCount: 0,
+      declarations: [],
+      truncated: false,
+      elapsedMs: 0,
+    };
+  }
 }
 
 /**
@@ -160,6 +174,28 @@ export class ResilientStAnalyzer implements StAnalyzer {
     } catch (error) {
       if (error instanceof StAnalyzerUnavailableError) {
         const result = await this.fallback.changeImpact(request, context);
+        return {
+          ...result,
+          engine: {
+            ...result.engine,
+            fallbackReason: error.code,
+            ...(error.detail ? { detail: error.detail } : {}),
+          },
+        };
+      }
+      throw error;
+    }
+  }
+
+  async findSymbolReferences(
+    request: StSymbolReferencesRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StSymbolReferencesResult> {
+    try {
+      return await this.primary.findSymbolReferences(request, context);
+    } catch (error) {
+      if (error instanceof StAnalyzerUnavailableError) {
+        const result = await this.fallback.findSymbolReferences(request, context);
         return {
           ...result,
           engine: {
