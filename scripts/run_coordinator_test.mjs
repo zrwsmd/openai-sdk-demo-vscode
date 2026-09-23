@@ -10,7 +10,16 @@ import {
   AgentActionVerificationError,
 } from './agent.testbundle.mjs';
 
-const config = { baseUrl: 'http://mock/v1', model: 'mock', exportDir: '', workspaceRoot: '' };
+// Coordinator lifecycle tests must stay offline. Jev has its own regression
+// suite; inheriting TYPESAFE_API_KEY here would turn every fixture into a
+// live network call and make timing-sensitive tests look hung.
+const config = {
+  baseUrl: 'http://mock/v1',
+  model: 'mock',
+  exportDir: '',
+  workspaceRoot: '',
+  jev: { enabled: false },
+};
 const usage = { inputTokens: 1, outputTokens: 2, requests: 1 };
 
 async function fixture(executeAgent, planTask, team = {}) {
@@ -1166,9 +1175,14 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
 {
   let calls = 0;
   const initialStates = [];
+  let executorStartedResolve;
+  const executorStarted = new Promise((resolve) => {
+    executorStartedResolve = resolve;
+  });
   const test = await fixture(async (_cfg, session, userText, options) => {
     calls += 1;
     initialStates.push(options.initialState);
+    executorStartedResolve();
     await session.addItems([{ type: 'message', role: 'user', content: userText }]);
     if (calls === 1) {
       await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
@@ -1183,7 +1197,7 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     return { status: 'completed', output: 'continued safely', usage };
   });
   const running = test.coordinator.start('cancel me', config, 'key');
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await executorStarted;
   await test.coordinator.initialize();
   if (!test.events.some((event) => event.type === 'runAttached')) throw new Error('live run was mistaken for a crash');
   await test.coordinator.stop();
