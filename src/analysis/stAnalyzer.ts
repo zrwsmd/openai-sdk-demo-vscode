@@ -413,6 +413,53 @@ export function parseStGraphResponse(raw: string): StGraphResult {
   };
 }
 
+// ---------- 符号定义查询(桥协议 action=definition) ----------
+
+/** 一处符号声明的位置。line/character 为 1 起的行列号。 */
+export interface StDefinitionMatch {
+  /** 声明所在文件 */
+  file: string;
+  /** 声明时使用的原始名字(大小写保留) */
+  name: string;
+  /** 声明类型:FunctionBlock / Program / VarGlobal / StFunction / ... */
+  type: string;
+  line: number;
+  character: number;
+}
+
+export interface StDefinitionResult {
+  engine: StAnalyzerEngineInfo;
+  /** 查询用的符号名 */
+  symbolName: string;
+  /** 匹配到的全部声明(同名符号可能有多处,遮蔽场景由调用方结合上下文判断) */
+  matches: StDefinitionMatch[];
+  elapsedMs: number;
+}
+
+/** 解析 action=definition 的响应。 */
+export function parseStDefinitionResponse(raw: string): StDefinitionResult {
+  const parsed = parseBridgeEnvelope(raw);
+  const definition = (parsed.definition ?? {}) as Record<string, unknown>;
+  const rawMatches = Array.isArray(definition.matches) ? definition.matches : [];
+  return {
+    engine: parseStEngine(parsed.engine),
+    symbolName: asString(definition.symbolName),
+    matches: rawMatches
+      .map((entry) => {
+        const record = (entry ?? {}) as Record<string, unknown>;
+        return {
+          file: asString(record.file),
+          name: asString(record.name),
+          type: asString(record.type, 'unknown'),
+          line: asNumber(record.line),
+          character: asNumber(record.character),
+        };
+      })
+      .filter((match) => match.file),
+    elapsedMs: asNumber(parsed.elapsedMs),
+  };
+}
+
 /** 解析 action=impact 的响应。 */
 export function parseStImpactResponse(raw: string): StImpactResult {
   const parsed = parseBridgeEnvelope(raw);
