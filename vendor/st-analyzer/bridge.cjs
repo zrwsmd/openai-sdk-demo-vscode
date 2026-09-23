@@ -249,7 +249,8 @@ function buildImpactAnalysis(graphData, request) {
     target,
     granularity,
     directDependents: [...direct].slice(0, maxDependents),
-    allDependents: [...reverseBfs([target])],
+    // 闭包不含目标自身(与 directDependents 口径一致:"受影响"指别人,不是自己)
+    allDependents: [...reverseBfs([target])].filter((file) => file !== target),
   };
 
   if (symbols) {
@@ -268,7 +269,7 @@ function buildImpactAnalysis(graphData, request) {
     }
     payload.bySymbol = bySymbol;
     payload.directDependents = [...firstHop].slice(0, maxDependents);
-    payload.allDependents = [...reverseBfs(firstHop)];
+    payload.allDependents = [...reverseBfs(firstHop)].filter((file) => file !== target);
   }
 
   return payload;

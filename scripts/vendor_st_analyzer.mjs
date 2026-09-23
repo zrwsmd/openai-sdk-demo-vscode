@@ -99,7 +99,10 @@ const meta = {
 };
 await fs.writeFile(META_FILE, JSON.stringify(meta, null, 2), 'utf8');
 
-const unchanged = previous?.sha256?.main === sha.main && previous?.sha256?.data === sha.data;
+const unchanged =
+  previous?.sha256?.main === sha.main &&
+  previous?.sha256?.data === sha.data &&
+  previous?.sha256?.bridge === sha.bridge;
 const stats = await Promise.all(
   ['main.cjs', 'data.json', 'bridge.cjs'].map(async (name) => (await fs.stat(path.join(OUT_DIR, name))).size),
 );
