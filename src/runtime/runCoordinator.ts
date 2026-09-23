@@ -53,6 +53,10 @@ import {
 } from './workflow/decisionService';
 import type { WorkflowDecision } from './workflow/types';
 import {
+  getDefaultWorkflowRegistry,
+  type WorkflowRegistry,
+} from './workflow/registry';
+import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
   completeTeamNode,
@@ -115,8 +119,10 @@ function shouldUseRuntimeManagedWorkflow(
   workflowId: DurableRunRecord['workflowId'],
   contract: DurableRunRecord['deliveryContract'],
   orchestration: DurableRunConfig['orchestration'],
+  registry: WorkflowRegistry,
 ): boolean {
-  return orchestration !== 'team' && isRuntimeManagedWorkflow(workflowId, contract);
+  return orchestration !== 'team' &&
+    isRuntimeManagedWorkflow(workflowId, contract, registry);
 }
 
 function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): boolean {
@@ -153,6 +159,8 @@ export interface RunCoordinatorDependencies {
   createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   /** Shared semantic decision service; omitted by embedders to use a local instance. */
   decisionService?: AgentDecisionService;
+  /** Workflow plugins supplied by the host composition root. */
+  workflowRegistry?: WorkflowRegistry;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
   routeTeamTask?: typeof routeTeamTask;
   planTeamTask?: typeof planTeamTask;
@@ -255,6 +263,7 @@ export class RunCoordinator {
   private readonly compactContext: ContextCompactor;
   private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
   private readonly decisionService: AgentDecisionService;
+  private readonly workflowRegistry: WorkflowRegistry;
   private readonly workflowDecisionService: WorkflowDecisionService;
   private busy = false;
   private transitioning = false;
@@ -293,7 +302,12 @@ export class RunCoordinator {
     this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
     this.createStAnalyzer = dependencies.createStAnalyzer;
     this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
-    this.workflowDecisionService = new WorkflowDecisionService(this.writeLog, this.decisionService);
+    this.workflowRegistry = dependencies.workflowRegistry ?? getDefaultWorkflowRegistry();
+    this.workflowDecisionService = new WorkflowDecisionService(
+      this.writeLog,
+      this.decisionService,
+      this.workflowRegistry,
+    );
   }
 
   private agentConfig(config: DurableRunConfig, apiKey: string): AgentConfig {
@@ -552,6 +566,7 @@ export class RunCoordinator {
         run.workflowId,
         run.deliveryContract,
         config.orchestration,
+        this.workflowRegistry,
       );
       const suppressAutoPreparation = shouldSuppressAutoPreparation(
         workflowDecision,
@@ -965,6 +980,7 @@ export class RunCoordinator {
         run.workflowId,
         run.deliveryContract,
         run.config.orchestration,
+        this.workflowRegistry,
       )
         ? undefined
         : shouldSkipDeliveryClassifier(workflowDecision)
@@ -979,6 +995,7 @@ export class RunCoordinator {
         run.workflowId,
         run.deliveryContract,
         run.config.orchestration,
+        this.workflowRegistry,
       )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
@@ -1011,6 +1028,7 @@ export class RunCoordinator {
         run.workflowId,
         run.deliveryContract,
         run.config.orchestration,
+        this.workflowRegistry,
       )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
@@ -1019,6 +1037,7 @@ export class RunCoordinator {
       run.workflowId,
       run.deliveryContract,
       run.config.orchestration,
+      this.workflowRegistry,
     );
     const suppressAutoPreparation = shouldSuppressAutoPreparation(
       workflowDecision,
@@ -1361,6 +1380,7 @@ export class RunCoordinator {
             teamTask: run.teamTask,
             workflowId: run.workflowId,
             deliveryContract: run.deliveryContract,
+            workflowRegistry: this.workflowRegistry,
             allowedToolNames: run.toolAllowlist,
             signal: controller.signal,
             protocol: {
@@ -1847,6 +1867,7 @@ export class RunCoordinator {
               initialState: node.state,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
+              workflowRegistry: this.workflowRegistry,
               signal: nodeController.signal,
               protocol: {
                 runId: run.id,
@@ -2220,7 +2241,11 @@ export class RunCoordinator {
     this.protocolFactory = new AgentEventFactory(run.id, run.operationId);
     this.protocolRunId = run.id;
     this.protocolRun = run;
-    const workflow = describeWorkflow(run.workflowId, run.deliveryContract);
+    const workflow = describeWorkflow(
+      run.workflowId,
+      run.deliveryContract,
+      this.workflowRegistry,
+    );
     this.emitProtocol(this.protocolFactory.next({
       type: 'run.started',
       payload: {

@@ -5,8 +5,8 @@ import {
   type TaskDecisionHint,
 } from "../decision/agentDecision";
 import {
-  getWorkflowByRoute,
-  listWorkflows,
+  getDefaultWorkflowRegistry,
+  type WorkflowRegistry,
 } from "./registry";
 import type {
   WorkflowDecision,
@@ -27,6 +27,7 @@ export class WorkflowDecisionService {
   constructor(
     private readonly log: (line: string) => void = () => {},
     private readonly decisionService: AgentDecisionService = new AgentDecisionService(log),
+    private readonly registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
   ) {}
 
   async decide(
@@ -36,7 +37,7 @@ export class WorkflowDecisionService {
     history: AgentInputItem[] = [],
     options: { modelClassifier?: WorkflowModelClassifier } = {},
   ): Promise<WorkflowDecision> {
-    const workflows = listWorkflows();
+    const workflows = this.registry.list();
     const jevHint = await this.decisionService.taskHint(cfg.jev, userText, signal);
     const jevDecision = this.workflowFromJevHint(jevHint);
     if (jevDecision) return jevDecision;
@@ -58,9 +59,9 @@ export class WorkflowDecisionService {
   }
 
   private workflowFromJevHint(hint: TaskDecisionHint): WorkflowDecision | undefined {
-    const workflow = getWorkflowByRoute(hint.workflow);
+    const workflow = this.registry.getByRoute(hint.workflow);
     if (!workflow) return undefined;
-    const contract = workflow.createDeliveryContract({
+    const contract = (workflow.createContract ?? workflow.createDeliveryContract)?.({
       source: "jev",
       reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
     });
@@ -123,9 +124,9 @@ export class WorkflowDecisionService {
     }
     if (!decision) return undefined;
     if (decision.kind === "workflow") {
-      const workflow = listWorkflows().find((item) => item.id === decision.workflowId);
+      const workflow = this.registry.get(decision.workflowId);
       if (!workflow) return undefined;
-      const contract = workflow.createDeliveryContract({
+      const contract = (workflow.createContract ?? workflow.createDeliveryContract)?.({
         source: "model",
         reason: decision.reason,
       });

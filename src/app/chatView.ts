@@ -13,6 +13,7 @@ import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
 import { JsonAuditSink } from '../observability/audit';
 import { ChatSessionCatalog, titleFromUserText } from './chatSessions';
 import { AgentDecisionService } from '../runtime/decision/agentDecision';
+import { createAppWorkflowRegistry } from './workflowRegistry';
 import {
   isAgentApiFormat,
   isAgentProvider,
@@ -58,6 +59,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly storageRoot: string;
   private readonly log: vscode.OutputChannel;
   private readonly decisionService: AgentDecisionService;
+  private readonly workflowRegistry = createAppWorkflowRegistry();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -157,6 +159,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
       log: (line) => this.log.appendLine(line),
       decisionService: this.decisionService,
+      workflowRegistry: this.workflowRegistry,
       planTask,
       classifyWorkflowDecision,
       classifyDeliveryContract,

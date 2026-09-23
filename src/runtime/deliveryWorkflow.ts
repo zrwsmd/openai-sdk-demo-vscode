@@ -3,7 +3,10 @@ import {
   createDeliveryWorkflowRuntimeState,
   type DeliveryWorkflowRuntimeState,
 } from "./workflow/runtimeState";
-import { getWorkflow, listWorkflows } from "./workflow/registry";
+import {
+  getDefaultWorkflowRegistry,
+  type WorkflowRegistry,
+} from "./workflow/registry";
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
@@ -28,57 +31,63 @@ export function createWorkflowRuntime(
   workflowId: string | undefined,
   contract: DeliveryContract | undefined,
   state: DeliveryWorkflowRuntimeState,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): DeliveryWorkflow | undefined {
-  const matched = getWorkflowDescriptor(workflowId, contract);
+  const matched = getWorkflowDescriptor(workflowId, contract, registry);
   return matched?.createRuntime?.(contract, state);
 }
 
 export function createDeliveryWorkflow(
   contract: DeliveryContract | undefined,
   state: DeliveryWorkflowRuntimeState,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): DeliveryWorkflow | undefined {
-  return createWorkflowRuntime(undefined, contract, state);
+  return createWorkflowRuntime(undefined, contract, state, registry);
 }
 
 export function describeDeliveryWorkflow(
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): DeliveryWorkflowDescriptor | undefined {
-  return describeWorkflow(undefined, contract);
+  return describeWorkflow(undefined, contract, registry);
 }
 
 export function describeWorkflow(
   workflowId: string | undefined,
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): DeliveryWorkflowDescriptor | undefined {
-  return getWorkflowDescriptor(workflowId, contract)?.describe();
+  return getWorkflowDescriptor(workflowId, contract, registry)?.describe();
 }
 
 export function getDeliveryWorkflowDescriptor(
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): WorkflowDescriptor | undefined {
-  return getWorkflowDescriptor(undefined, contract);
+  return getWorkflowDescriptor(undefined, contract, registry);
 }
 
 export function getWorkflowDescriptor(
   workflowId: string | undefined,
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): WorkflowDescriptor | undefined {
-  const selected = getWorkflow(workflowId);
+  const selected = registry.get(workflowId);
   if (selected) return selected;
-  if (!contract) return undefined;
-  return listWorkflows()
-    .find((workflow) => workflow.matchesDeliveryContract?.(contract) === true);
+  return registry.findByContract(contract);
 }
 
 export function isRuntimeManagedDeliveryWorkflow(
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): boolean {
-  return isRuntimeManagedWorkflow(undefined, contract);
+  return isRuntimeManagedWorkflow(undefined, contract, registry);
 }
 
 export function isRuntimeManagedWorkflow(
   workflowId: string | undefined,
   contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): boolean {
-  return getWorkflowDescriptor(workflowId, contract)?.runtimeManaged === true;
+  return getWorkflowDescriptor(workflowId, contract, registry)?.runtimeManaged === true;
 }

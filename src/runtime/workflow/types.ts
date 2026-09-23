@@ -7,6 +7,21 @@ import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
 
 export type WorkflowId = string;
 
+/**
+ * Generic names used by the workflow runtime.
+ *
+ * The DeliveryWorkflow aliases below remain available during the migration so
+ * existing plugins and persisted-run callers do not need to change at once.
+ */
+export type WorkflowContract = DeliveryContract;
+export type WorkflowState = DeliveryWorkflowRuntimeState;
+
+export interface WorkflowRuntimeContext {
+  readonly contract?: WorkflowContract;
+  readonly state: WorkflowState;
+  readonly services?: ReadonlyMap<string, unknown>;
+}
+
 export type WorkflowToolRecord = {
   name: string;
   args: string;
@@ -38,19 +53,15 @@ export type DeliveryWorkflowDescriptor = {
   }>;
 };
 
-export interface DeliveryWorkflow {
-  readonly id: string;
-  readonly title: string;
-  readonly stages: WorkflowStage[];
-  readonly pipelinePlan?: PipelineStagePlan;
+export type WorkflowDescription = DeliveryWorkflowDescriptor;
+
+export interface WorkflowToolPolicy {
   readonly visibleToolNames?: readonly string[];
+  readonly pipelinePlan?: PipelineStagePlan;
   readonly parallelToolCalls: boolean;
-  readonly validationInputMode?: "inline_code" | "path_or_code";
-  readonly requiredActionTool?: string;
-  initialTool(options: { isResume: boolean }): string | undefined;
-  instructions(): string;
-  recordSuccessfulValidation?(content: string, hash: string): void;
-  canWriteContent?(content: string): boolean;
+}
+
+export interface WorkflowCompletionAdapter {
   chooseRepairTool(
     gate: Exclude<CompletionGateResult, { passed: true }>,
     records: WorkflowToolRecord[],
@@ -60,6 +71,21 @@ export interface DeliveryWorkflow {
   hydrate(records: WorkflowToolRecord[]): void;
   verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined;
 }
+
+export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionAdapter {
+  readonly id: string;
+  readonly title: string;
+  readonly stages: WorkflowStage[];
+  readonly validationInputMode?: "inline_code" | "path_or_code";
+  readonly requiredActionTool?: string;
+  initialTool(options: { isResume: boolean }): string | undefined;
+  instructions(): string;
+  recordSuccessfulValidation?(content: string, hash: string): void;
+  canWriteContent?(content: string): boolean;
+}
+
+/** @deprecated Use WorkflowRuntime in new code. */
+export type DeliveryWorkflow = WorkflowRuntime;
 
 export type WorkflowDecisionSource =
   | "jev"
@@ -93,7 +119,14 @@ export interface WorkflowDescriptor {
   workflowRoute?: string;
   visibleToolNames?: readonly string[];
   pipelinePlan?: PipelineStagePlan;
-  describe(): DeliveryWorkflowDescriptor;
+  describe(): WorkflowDescription;
+  /** Generic contract hooks. */
+  matchesContract?(contract: WorkflowContract | undefined): boolean;
+  createContract?(options?: {
+    reason?: string;
+    source?: WorkflowDecisionSource;
+  }): WorkflowContract | undefined;
+  /** Compatibility hooks used by the current delivery runtime. */
   matchesDeliveryContract?(contract: DeliveryContract | undefined): boolean;
   createDeliveryContract(options?: {
     reason?: string;
@@ -101,9 +134,10 @@ export interface WorkflowDescriptor {
   }): DeliveryContract | undefined;
   localMatch?(context: WorkflowDecisionContext): WorkflowLocalMatch;
   createRuntime?(
-    contract: DeliveryContract | undefined,
-    state: DeliveryWorkflowRuntimeState,
-  ): DeliveryWorkflow | undefined;
+    contract: WorkflowContract | undefined,
+    state: WorkflowState,
+    context?: WorkflowRuntimeContext,
+  ): WorkflowRuntime | undefined;
 }
 
 export interface WorkflowSelectedDecision {

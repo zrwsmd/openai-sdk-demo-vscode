@@ -111,7 +111,11 @@ import type {
   WorkflowFallbackMode,
   WorkflowModelDecision,
 } from "./workflow/types";
-import { getWorkflowByRoute } from "./workflow/registry";
+import {
+  getDefaultWorkflowRegistry,
+  getWorkflowByRoute,
+  type WorkflowRegistry,
+} from "./workflow/registry";
 import {
   runFinalOutputFinalizer,
   synthesizeStructuredFailure,
@@ -163,6 +167,8 @@ export interface AgentRunOptions {
   deliveryContract?: DeliveryContract;
   /** Registered workflow selected before execution. */
   workflowId?: string;
+  /** Registry used to resolve the selected workflow. */
+  workflowRegistry?: WorkflowRegistry;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
   /** Persists validated step transitions outside the SDK session. */
@@ -1364,7 +1370,7 @@ export async function classifyDeliveryContract(
   if (inferred) return inferred;
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
   const hint = await decisionService.taskHint(cfg.jev, userText, signal);
-  const workflow = getWorkflowByRoute(hint.workflow);
+  const workflow = getWorkflowByRoute(hint.workflow, getDefaultWorkflowRegistry());
   if (workflow) {
     agentLog(
       `[delivery] Jev 高置信度识别 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})，启用运行时交付契约`,
@@ -1858,6 +1864,7 @@ export async function runAgent(
     options.workflowId,
     options.deliveryContract,
     workflowState,
+    options.workflowRegistry,
   );
   let deliveryWorkflowCompleted = false;
   let deliveryWorkflowCompletionLogged = false;
