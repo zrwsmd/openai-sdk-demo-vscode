@@ -1,4 +1,8 @@
 // 测试专用入口:把内核、会话与工作区工具层打进同一个 ESM bundle 供 node 测试脚本 import
+import { createAppWorkflowRegistry } from '../src/app/workflowRegistry';
+
+createAppWorkflowRegistry();
+
 export * from '../src/runtime/agent';
 export * from '../src/runtime/toolRegistry';
 export * from '../src/runtime/session';
@@ -32,6 +36,7 @@ export * from '../src/runtime/workflow/types';
 export * from '../src/runtime/workflow/runtimeState';
 export * from '../src/runtime/workflow/registry';
 export * from '../src/runtime/workflow/decisionService';
+export * from '../src/app/workflowRegistry';
 export * from '../src/runtime/workflows/stDeliveryContract';
 export * from '../src/runtime/workflows/stWorkspaceDeliveryWorkflow';
 export * from '../src/runtime/workflows/stInspectionWorkflow';
