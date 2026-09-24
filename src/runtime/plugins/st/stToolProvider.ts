@@ -1,5 +1,4 @@
 import type { Tool } from "@openai/agents";
-import type { ToolRisk } from "../../../tools/toolContract";
 import { hashStContent } from "./stContentHash";
 import type {
   BeforeEffectContext,
@@ -11,14 +10,6 @@ import { createStGraphTools } from "./tools/dependencyTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createStToolBuildContext } from "./stToolContext";
 
-const ST_TOOL_RISKS: Readonly<Record<string, ToolRisk>> = {
-  validate_st_code: "plan",
-  export_st_program: "write",
-  st_dependency_map: "plan",
-  st_change_impact: "plan",
-  st_symbol_references: "plan",
-};
-
 const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
     name: "validate_st_code",
@@ -26,6 +17,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["校验 ST 代码", "检查 ST 语法", "分析 ST 诊断"],
     tags: ["structured_text", "validation", "analysis"],
+    risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -35,7 +27,9 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["导出 ST 程序", "保存 ST 程序"],
     tags: ["structured_text", "write", "export"],
+    risk: "write",
     effect: "filesystem",
+    evidence: ["successful_export", "successful_write"],
     fallbackModes: ["file_edit"],
   },
   {
@@ -44,6 +38,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["分析 ST 依赖", "查看文件依赖", "分析引用关系"],
     tags: ["structured_text", "analysis", "dependencies"],
+    risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -53,6 +48,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["分析 ST 变更影响", "查看影响范围", "评估修改影响"],
     tags: ["structured_text", "analysis", "impact"],
+    risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -62,6 +58,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["查找 ST 符号引用", "查看符号定义", "分析符号使用"],
     tags: ["structured_text", "analysis", "references"],
+    risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -136,11 +133,7 @@ function writeFileBeforeEffect(
 export function createStToolProvider(): ToolProvider {
   return {
     id: "st",
-    riskByTool: ST_TOOL_RISKS,
     capabilities: ST_TOOL_CAPABILITIES,
-    evidenceByTool: {
-      export_st_program: ["successful_export", "successful_write"],
-    },
     createTools(context): readonly Tool[] {
       const stContext = createStToolBuildContext(context);
       const validationTools = createValidateStTools(stContext);

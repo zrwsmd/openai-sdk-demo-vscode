@@ -70,6 +70,12 @@ export class ToolRegistry {
         throw new Error(`Conflicting risk registration for tool ${toolName}`);
       }
     }
+    for (const capability of provider.capabilities ?? []) {
+      const declaredRisk = provider.riskByTool?.[capability.name.trim()];
+      if (declaredRisk && capability.risk && declaredRisk !== capability.risk) {
+        throw new Error(`Conflicting risk registration for tool ${capability.name}`);
+      }
+    }
     this.toolCatalog.registerProvider(
       provider.id,
       provider.capabilities ?? [],
@@ -104,22 +110,34 @@ export class ToolRegistry {
   }
 
   getRisk(toolName: string): ToolRisk | undefined {
-    return this.risks.get(toolName);
+    return this.toolCatalog.get(toolName)?.risk ?? this.risks.get(toolName);
   }
 
   riskMap(): Readonly<Record<string, ToolRisk>> {
-    return Object.fromEntries(this.risks);
+    return {
+      ...Object.fromEntries(this.risks),
+      ...this.toolCatalog.riskMap(),
+    };
   }
 
   evidenceMap(): Readonly<Record<string, readonly DeliveryEvidence[]>> {
+    const merged = new Map<string, Set<DeliveryEvidence>>();
+    for (const [name, evidence] of this.evidence) {
+      merged.set(name, new Set(evidence));
+    }
+    for (const [name, evidence] of Object.entries(this.toolCatalog.evidenceMap())) {
+      const values = merged.get(name) ?? new Set<DeliveryEvidence>();
+      for (const item of evidence) values.add(item);
+      merged.set(name, values);
+    }
     return Object.fromEntries(
-      [...this.evidence].map(([name, evidence]) => [name, [...evidence]]),
+      [...merged].map(([name, evidence]) => [name, [...evidence]]),
     );
   }
 
   toolsForEvidence(evidence: DeliveryEvidence): readonly string[] {
-    return [...this.evidence]
-      .filter(([, values]) => values.has(evidence))
+    return Object.entries(this.evidenceMap())
+      .filter(([, values]) => values.includes(evidence))
       .map(([name]) => name);
   }
 

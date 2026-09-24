@@ -244,6 +244,34 @@ export class ToolCatalog {
     return this.find({ tags: [tag] });
   }
 
+  riskMap(): Readonly<Record<string, ToolRisk>> {
+    return Object.freeze(
+      Object.fromEntries(
+        this.list()
+          .filter((capability): capability is RegisteredToolCapability & { risk: ToolRisk } =>
+            capability.risk !== undefined,
+          )
+          .map((capability) => [capability.name, capability.risk]),
+      ),
+    );
+  }
+
+  evidenceMap(): Readonly<Record<string, readonly DeliveryEvidence[]>> {
+    return Object.freeze(
+      Object.fromEntries(
+        this.list()
+          .filter((capability) => (capability.evidence?.length ?? 0) > 0)
+          .map((capability) => [capability.name, capability.evidence ?? []]),
+      ),
+    );
+  }
+
+  toolsForEvidence(evidence: DeliveryEvidence): readonly string[] {
+    return this.list()
+      .filter((capability) => capability.evidence?.includes(evidence))
+      .map((capability) => capability.name);
+  }
+
   toolsForFallback(mode: ToolFallbackMode): readonly string[] {
     return this.list()
       .filter((capability) => capability.fallbackModes?.includes(mode))

@@ -1,22 +1,10 @@
 import type { Tool } from "@openai/agents";
-import type { ToolRisk } from "../../tools/toolContract";
 import type { ToolProvider } from "../toolRegistry";
 import type { ToolCapability } from "../toolCatalog";
 import { createRunCommandTool } from "./runCommandTool";
 import { createWorkspaceReadTools } from "./workspaceReadTools";
 import { createWriteFileTool } from "./writeFileTool";
 import { createEditFileTool } from "./editFileTool";
-
-const CORE_TOOL_RISKS: Readonly<Record<string, ToolRisk>> = {
-  get_io_table: "read",
-  read_plc_variables: "read",
-  list_files: "read",
-  read_file: "read",
-  search_files: "read",
-  write_file: "write",
-  edit_file: "write",
-  run_command: "execute",
-};
 
 const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
@@ -25,6 +13,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "plc",
     intents: ["查询 I/O", "查看变量表", "读取 PLC 项目变量"],
     tags: ["plc", "read", "io"],
+    risk: "read",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -34,6 +23,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "plc",
     intents: ["读取 PLC 变量", "查询变量当前值", "查看设备变量"],
     tags: ["plc", "read", "variables"],
+    risk: "read",
     effect: "device",
     fallbackModes: ["read_only"],
   },
@@ -43,6 +33,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["列出文件", "查看工作区文件", "浏览目录"],
     tags: ["workspace", "read", "files"],
+    risk: "read",
     effect: "none",
     fallbackModes: ["read_only", "file_edit"],
   },
@@ -52,6 +43,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["读取文件", "查看文件内容", "打开文件"],
     tags: ["workspace", "read", "files"],
+    risk: "read",
     effect: "none",
     fallbackModes: ["read_only", "file_edit"],
   },
@@ -61,6 +53,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["搜索文件", "查找文本", "查找引用"],
     tags: ["workspace", "read", "search"],
+    risk: "read",
     effect: "none",
     fallbackModes: ["read_only", "file_edit"],
   },
@@ -70,7 +63,9 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["写入文件", "创建文件", "保存文件"],
     tags: ["workspace", "write", "files"],
+    risk: "write",
     effect: "filesystem",
+    evidence: ["successful_write"],
     fallbackModes: ["file_edit"],
   },
   {
@@ -79,7 +74,9 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["编辑文件", "修改文件", "替换文本"],
     tags: ["workspace", "write", "diff"],
+    risk: "write",
     effect: "filesystem",
+    evidence: ["successful_write"],
     fallbackModes: ["file_edit"],
   },
   {
@@ -88,6 +85,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "workspace",
     intents: ["运行命令", "执行脚本", "检查工程"],
     tags: ["workspace", "execute", "command"],
+    risk: "execute",
     effect: "process",
   },
 ];
@@ -95,12 +93,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
 export function createCoreToolProvider(): ToolProvider {
   return {
     id: "core",
-    riskByTool: CORE_TOOL_RISKS,
     capabilities: CORE_TOOL_CAPABILITIES,
-    evidenceByTool: {
-      write_file: ["successful_write"],
-      edit_file: ["successful_write"],
-    },
     createTools(context): readonly Tool[] {
       const {
         getIoTable,

@@ -17,6 +17,22 @@ assert.equal(coreCatalog.get('read_file')?.providerId, 'core');
 assert.equal(coreCatalog.get('read_file')?.risk, 'read');
 assert.equal(coreCatalog.get('write_file')?.risk, 'write');
 assert.equal(coreCatalog.get('write_file')?.requiresApproval, true);
+assert.equal(coreRegistry.getRisk('write_file'), 'write');
+assert.deepEqual(coreRegistry.evidenceMap().write_file, ['successful_write']);
+assert.deepEqual(coreCatalog.riskMap(), {
+  get_io_table: 'read',
+  read_plc_variables: 'read',
+  list_files: 'read',
+  read_file: 'read',
+  search_files: 'read',
+  write_file: 'write',
+  edit_file: 'write',
+  run_command: 'execute',
+});
+assert.deepEqual(coreCatalog.evidenceMap(), {
+  write_file: ['successful_write'],
+  edit_file: ['successful_write'],
+});
 assert.deepEqual(coreCatalog.toolsForFallback('read_only'), [
   'get_io_table',
   'read_plc_variables',
@@ -52,6 +68,7 @@ const appCatalog = appRegistry.getToolCatalog();
 assert.equal(appCatalog.get('st_dependency_map')?.providerId, 'st');
 assert.equal(appCatalog.get('st_dependency_map')?.domain, 'structured_text');
 assert.equal(appCatalog.get('export_st_program')?.evidence?.includes('successful_export'), true);
+assert.deepEqual(appRegistry.toolsForEvidence('successful_export'), ['export_st_program']);
 assert.deepEqual(
   appCatalog.find({ providerId: 'st', tags: ['analysis'] }).map((item) => item.name),
   ['validate_st_code', 'st_dependency_map', 'st_change_impact', 'st_symbol_references'],
@@ -112,6 +129,37 @@ const dynamicRegistry = new ToolRegistry([{
   capabilities: [customCapability],
   createTools: () => [],
 }]);
+assert.equal(dynamicRegistry.getRisk('query_modbus_device'), 'read');
+
+const capabilityOnlyRegistry = new ToolRegistry([{
+  id: 'capability-only',
+  capabilities: [{
+    name: 'capability_write',
+    description: '能力声明直接提供写入工具元数据。',
+    risk: 'write',
+    evidence: ['successful_write'],
+    effect: 'filesystem',
+  }],
+  createTools: () => [],
+}]);
+assert.equal(capabilityOnlyRegistry.getRisk('capability_write'), 'write');
+assert.deepEqual(capabilityOnlyRegistry.evidenceMap().capability_write, ['successful_write']);
+assert.deepEqual(capabilityOnlyRegistry.toolsForEvidence('successful_write'), ['capability_write']);
+
+assert.throws(
+  () => new ToolRegistry([{
+    id: 'conflicting-metadata',
+    riskByTool: { conflicting_tool: 'read' },
+    capabilities: [{
+      name: 'conflicting_tool',
+      description: '冲突元数据测试。',
+      risk: 'write',
+    }],
+    createTools: () => [],
+  }]),
+  /Conflicting risk registration/,
+);
+
 const decisionService = new WorkflowDecisionService(
   () => {},
   new AgentDecisionService(() => {}),
