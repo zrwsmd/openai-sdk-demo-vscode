@@ -765,7 +765,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
-// [6] 首轮 auto 未执行动作时,只在第二轮启用一次强制工具兜底
+// [6] 首轮 auto 未执行动作时,第二轮只发送一次普通提醒,不强制 tool_choice。
 {
   const asked = [];
   const capabilityLogStart = diagLines.length;
@@ -776,27 +776,50 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const capabilityRequests = diagLines
     .slice(capabilityLogStart)
     .filter((line) => line.includes('[req]'));
-  const forcedRequest = capabilityRequests.find(
-    (line) => line.includes('export_st_program') && !line.includes('choice=-'),
-  );
+  const reminderLog = diagLines
+    .slice(capabilityLogStart)
+    .find((line) => line.includes('[action]') && line.includes('不强制 toolChoice'));
   console.log(
-    '[6] 工具选择兜底:首轮 =',
+    '[6] 普通动作提醒:首轮 =',
     capabilityRequests[0] ?? '(无)',
-    '| 强制兜底 =',
-    forcedRequest ?? '(无)',
+    '| 提醒 =',
+    reminderLog ?? '(无)',
   );
   if (!capabilityRequests[0]?.includes('choice=-')) {
     throw new Error('场景6 首轮没有使用 auto 工具选择');
   }
-  if (!forcedRequest) {
-    throw new Error('场景6 首轮未执行动作后没有启用强制工具兜底');
+  if (!reminderLog || capabilityRequests.length < 2) {
+    throw new Error('场景6 首轮未执行动作后没有发送普通提醒');
   }
-  if (process.env.MOCK_REJECT_COMBINED === '1'
-    && !capabilityRequests.some((line) => line.includes('format=-') && !line.includes('choice=-'))) {
-    throw new Error('场景6 网关组合能力冲突后没有降级工具请求');
+  if (capabilityRequests.some((line) => line.includes('choice={'))) {
+    throw new Error('场景6 普通动作提醒错误地设置了强制 tool_choice');
   }
   if (asked.length !== 1 || asked[0].name !== 'export_st_program' || !r.output.includes('导出')) {
-    throw new Error('场景6 强制工具兜底未完成审批和导出');
+    throw new Error('场景6 普通动作提醒后没有完成审批和导出');
+  }
+}
+
+// [6b] 查询上一轮状态时,即使动作词出现在问题里,也不能因为没有可用工具而
+// 强制 write_file,否则会在 SDK 本地校验阶段直接崩溃。
+{
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn(
+    '刚刚写入了哪个文件了',
+    noApproval,
+    { allowedToolNames: [] },
+    new JsonFileSession(path.join(dir, 'action-query-session.json')),
+  );
+  const capabilityRequests = diagLines
+    .slice(capabilityLogStart)
+    .filter((line) => line.includes('[req]'));
+  console.log(
+    '[6b] 动作查询不强制工具:请求 =',
+    capabilityRequests.length,
+    '| 输出 =',
+    r.output,
+  );
+  if (r.status !== 'completed' || capabilityRequests.some((line) => line.includes('choice={'))) {
+    throw new Error('动作查询错误地强制了 write_file');
   }
 }
 

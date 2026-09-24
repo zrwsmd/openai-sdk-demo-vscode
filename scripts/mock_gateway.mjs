@@ -441,14 +441,22 @@ const server = http.createServer((req, res) => {
       endWithToolCall(res, model);
     } else if (
       userText.includes('自动兜底') &&
+      serializedMessages.includes('运行时动作提醒') &&
+      last.role !== 'tool'
+    ) {
+      // 普通动作兜底只发送一次提示，不设置 tool_choice；模型收到提醒后自行选择工具。
+      endWithNamedToolCall(res, model, 'export_st_program', JSON.stringify({ code: ST_CODE }));
+    } else if (
+      userText.includes('自动兜底') &&
       req_body.tool_choice &&
       last.role !== 'tool'
     ) {
-      // 兜底场景:首轮让模型保持 auto 并故意不选工具,第二轮收到强制
-      // tool_choice 后才执行动作,验证强制选择确实只是一次性 fallback。
+      // 旧路径保留用于兼容历史测试输入；新的 Agent 逻辑不应走到这里。
       endWithNamedToolCall(res, model, 'export_st_program', JSON.stringify({ code: ST_CODE }));
     } else if (userText.includes('自动兜底') && last.role !== 'tool') {
       await streamStructuredText(res, model, '我先说明一下,但还没有执行导出工具。');
+    } else if (userText.includes('刚刚写入了哪个文件') && last.role !== 'tool') {
+      await streamStructuredText(res, model, '当前请求是在查询上一轮状态，不执行新的文件写入。');
     } else if (userText.includes('交付物工具回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'deliver_artifact', JSON.stringify({
         kind: 'code',

@@ -126,6 +126,8 @@ assert.equal(inferRequiredTool('不要读取 lk.txt，只解释读取工具'), u
 assert.equal(inferRequiredTool('只解释一下 write_file 的作用，不要执行写入'), undefined);
 assert.equal(inferRequiredTool('请把这段 ST 程序导出保存'), 'export_st_program');
 assert.equal(inferRequiredTool('请运行这个命令检查工程'), 'run_command');
+assert.equal(inferRequiredTool('刚刚写入了哪个文件了'), undefined);
+assert.equal(inferRequiredTool('之前保存的是哪个文件？'), undefined);
 const outputFormat = zodTextFormat(industrialAgentOutputSchema, 'industrial_agent_output');
 const assertClosedObjects = (value) => {
   if (!value || typeof value !== 'object') return;
