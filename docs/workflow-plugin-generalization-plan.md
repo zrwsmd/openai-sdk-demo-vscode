@@ -39,7 +39,7 @@
 - [x] 5. 让 `write_file` 变成真正通用的文件工具
 - [x] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
 - [x] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
-- [ ] 8. 迁移 ST 功能为正式插件
+- [x] 8. 迁移 ST 功能为正式插件
 - [ ] 9. 用非 ST Workflow 验证通用性
 - [ ] 10. 清理兼容层并完成边界封锁
 
@@ -122,6 +122,26 @@ Tool Provider。ST 分析器由宿主作为服务注入，公共层不读取或�
 
 将现有 ST Delivery、ST Inspection、ST 工具、ST 状态、ST 契约和 ST Completion
 Adapter 收拢到 `src/runtime/plugins/st/`。`src/analysis/*` 和桥实现保持不变。
+
+本阶段已完成：
+
+- 新增正式插件目录 `src/runtime/plugins/st/`。
+- ST Delivery、ST Inspection、ST 交付契约、Pipeline、运行时状态和内容哈希已迁入插件目录。
+- `validate_st_code`、`export_st_program`、依赖图、影响面和符号引用工具已迁入
+  `src/runtime/plugins/st/tools/`。
+- ST Provider、ST Tool Context 和 ST Workflow 直接在插件目录内组装。
+- 宿主的 Workflow Registry、Tool Registry 和分析器服务装配直接引用正式插件目录。
+- 原 `src/runtime/workflows/*`、`src/runtime/tools/*` 和 `src/runtime/pipeline/*` 的 ST
+  路径保留为纯 re-export 兼容层，不包含业务实现，便于历史测试和宿主调用平滑迁移。
+- 未修改 `src/analysis/*` 和 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:batch` 通过。
+- `npm run test:agent` 通过（含 mock gateway、ST 交付、审批、兜底和断点恢复）。
+- `npm run test:st`、`npm run test:workflow`、`npm run test:jev` 通过。
 
 ## 9. 非 ST Workflow 验证
 

@@ -28,7 +28,7 @@ import {
 import {
   ST_ANALYZER_OPTIONS_SERVICE,
   ST_ANALYZER_SERVICE,
-} from '../runtime/workflows/stToolContext';
+} from '../runtime/plugins/st/stToolContext';
 import type { DurableRunConfig } from '../runtime/runStore';
 
 const VENDOR_DIR_NAME = 'st-analyzer';

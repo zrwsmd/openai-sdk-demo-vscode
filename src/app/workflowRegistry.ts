@@ -2,8 +2,8 @@ import {
   setDefaultWorkflowRegistry,
   WorkflowRegistry,
 } from "../runtime/workflow/registry";
-import { ST_INSPECTION_WORKFLOW } from "../runtime/workflows/stInspectionWorkflow";
-import { ST_WORKSPACE_DELIVERY_WORKFLOW } from "../runtime/workflows/stWorkspaceDeliveryWorkflow";
+import { ST_INSPECTION_WORKFLOW } from "../runtime/plugins/st/stInspectionWorkflow";
+import { ST_WORKSPACE_DELIVERY_WORKFLOW } from "../runtime/plugins/st/stWorkspaceDeliveryWorkflow";
 
 /**
  * Application composition root for the built-in workflow plugins.

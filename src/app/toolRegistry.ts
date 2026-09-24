@@ -3,7 +3,7 @@ import {
   ToolRegistry,
 } from "../runtime/toolRegistry";
 import { createCoreToolProvider } from "../runtime/tools/coreToolProvider";
-import { createStToolProvider } from "../runtime/workflows/stToolProvider";
+import { createStToolProvider } from "../runtime/plugins/st/stToolProvider";
 
 /** Host composition root; the runtime registry itself remains domain-neutral. */
 export function createAppToolRegistry(): ToolRegistry {
