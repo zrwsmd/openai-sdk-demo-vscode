@@ -1,6 +1,7 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import {
+  MAX_READ_LINES,
   listFiles,
   readFileRange,
   searchText,
@@ -77,16 +78,17 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
     name: "read_file",
     description:
       "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。" +
-      "读取全文时传 startLine=1、endLine=0;需要分段读取大文件时传起止行号。" +
+      "读取整个文件时传 startLine=1、endLine=0;需要分段读取大文件时传起止行号。" +
+      "单次最多返回 " + MAX_READ_LINES + " 行,超出会自动截断,以结果里的 data.truncated 为准。" +
       "结果 data.complete/data.truncated 明确表示是否完整读取；data.fileContentHash 是完整文件哈希。" +
       "界面可能只展示 content 的摘要，摘要省略不代表文件被截断。",
     parameters: z.object({
       path: z.string().describe("相对工作区的文件路径"),
       startLine: defaultedIntParam(1).describe(
-        "起始行(1 起),整数;读取全文时传 1,分段读取时传正整数",
+        "起始行(1 起),整数;读取整个文件时传 1,分段读取时传正整数",
       ),
       endLine: defaultedIntParam(0).describe(
-        "结束行(含),整数;读取全文时传 0 表示读到文件末尾,分段读取时传正整数",
+        "结束行(含),整数;读取整个文件时传 0,单次最多返回 " + MAX_READ_LINES + " 行,超出会截断",
       ),
     }),
     inputGuardrails: guardrails.input,

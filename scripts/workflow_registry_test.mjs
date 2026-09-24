@@ -72,11 +72,15 @@ assert.equal(readFileTool.parameters.properties.startLine.default, 1);
 assert.equal(readFileTool.parameters.properties.endLine.default, 0);
 assert.match(
   readFileTool.parameters.properties.startLine.description,
-  /读取全文时传 1/u,
+  /读取整个文件时传 1/u,
 );
 assert.match(
   readFileTool.parameters.properties.endLine.description,
-  /读取全文时传 0 表示读到文件末尾/u,
+  /读取整个文件时传 0/u,
+);
+assert.match(
+  readFileTool.parameters.properties.endLine.description,
+  /超出会截断/u,
 );
 
 const appTools = createAppToolRegistry();

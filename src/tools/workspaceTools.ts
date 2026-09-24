@@ -11,6 +11,9 @@ const SKIP_DIRS = new Set(['node_modules', '.git', '.vscode', 'dist', 'out', 'bu
 /** 文本搜索时跳过的二进制/资源扩展名 */
 const BINARY_EXT = new Set(['.exe', '.dll', '.so', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.zip', '.gz', '.7z', '.rar', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.woff', '.woff2', '.ttf', '.mp3', '.mp4', '.wav', '.class', '.jar']);
 
+/** read_file 单次返回的最大行数;超出部分截断,并以 truncated 标记。 */
+export const MAX_READ_LINES = 4000;
+
 export class ToolError extends Error {}
 
 export interface ReadFileRangeResult {
@@ -103,7 +106,7 @@ export async function readFileRange(
   const raw = await fs.readFile(abs, 'utf8');
   const all = raw.split(/\r?\n/);
   const s = Math.max(1, startLine);
-  const e = Math.min(all.length, endLine ?? s + 3999);
+  const e = Math.min(all.length, endLine ?? s + MAX_READ_LINES - 1);
   const complete = s === 1 && e === all.length;
   const text = complete ? raw : all.slice(s - 1, e).join('\n');
   return {
