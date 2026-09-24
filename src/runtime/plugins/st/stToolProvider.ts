@@ -6,6 +6,7 @@ import type {
   BeforeEffectResult,
 } from "../../tools/toolBuildContext";
 import type { ToolProvider } from "../../toolRegistry";
+import type { ToolCapability } from "../../toolCatalog";
 import { createStGraphTools } from "./tools/dependencyTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createStToolBuildContext } from "./stToolContext";
@@ -17,6 +18,49 @@ const ST_TOOL_RISKS: Readonly<Record<string, ToolRisk>> = {
   st_change_impact: "plan",
   st_symbol_references: "plan",
 };
+
+const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
+  {
+    name: "validate_st_code",
+    description: "校验 IEC 61131-3 Structured Text 代码并返回诊断。",
+    domain: "structured_text",
+    intents: ["校验 ST 代码", "检查 ST 语法", "分析 ST 诊断"],
+    tags: ["structured_text", "validation", "analysis"],
+    effect: "none",
+  },
+  {
+    name: "export_st_program",
+    description: "把 ST 程序导出为工作区文件。",
+    domain: "structured_text",
+    intents: ["导出 ST 程序", "保存 ST 程序"],
+    tags: ["structured_text", "write", "export"],
+    effect: "filesystem",
+  },
+  {
+    name: "st_dependency_map",
+    description: "分析 ST 工作区文件之间的符号依赖关系。",
+    domain: "structured_text",
+    intents: ["分析 ST 依赖", "查看文件依赖", "分析引用关系"],
+    tags: ["structured_text", "analysis", "dependencies"],
+    effect: "none",
+  },
+  {
+    name: "st_change_impact",
+    description: "分析 ST 文件或符号变更可能影响的范围。",
+    domain: "structured_text",
+    intents: ["分析 ST 变更影响", "查看影响范围", "评估修改影响"],
+    tags: ["structured_text", "analysis", "impact"],
+    effect: "none",
+  },
+  {
+    name: "st_symbol_references",
+    description: "查询 ST 符号的声明位置和引用位置。",
+    domain: "structured_text",
+    intents: ["查找 ST 符号引用", "查看符号定义", "分析符号使用"],
+    tags: ["structured_text", "analysis", "references"],
+    effect: "none",
+  },
+];
 
 function writeFileBeforeEffect(
   context: ReturnType<typeof createStToolBuildContext>,
@@ -88,6 +132,7 @@ export function createStToolProvider(): ToolProvider {
   return {
     id: "st",
     riskByTool: ST_TOOL_RISKS,
+    capabilities: ST_TOOL_CAPABILITIES,
     evidenceByTool: {
       export_st_program: ["successful_export", "successful_write"],
     },

@@ -3,6 +3,10 @@ import type { ToolRisk } from "../tools/toolContract";
 import type { DeliveryEvidence } from "./deliveryContract";
 import type { AgentConfig } from "./agentConfig";
 import {
+  ToolCatalog,
+  type ToolCapability,
+} from "./toolCatalog";
+import {
   commandToolResult,
   createToolBuildContext,
   type BeforeEffectHook,
@@ -14,6 +18,13 @@ import { createCoreToolProvider } from "./tools/coreToolProvider";
 import type { WorkflowContract, WorkflowRuntime } from "./workflow/types";
 
 export { commandToolResult };
+export { ToolCatalog };
+export type {
+  RegisteredToolCapability,
+  ToolCapability,
+  ToolCapabilityQuery,
+  ToolCapabilityRegistrationDefaults,
+} from "./toolCatalog";
 export type {
   BeforeEffectContext,
   BeforeEffectHook,
@@ -29,6 +40,7 @@ export interface ToolProvider {
   id: string;
   riskByTool?: Readonly<Record<string, ToolRisk>>;
   evidenceByTool?: Readonly<Record<string, readonly DeliveryEvidence[]>>;
+  capabilities?: readonly ToolCapability[];
   createTools(context: ToolProviderContext): readonly Tool[];
 }
 
@@ -36,6 +48,7 @@ export class ToolRegistry {
   private readonly providers = new Map<string, ToolProvider>();
   private readonly risks = new Map<string, ToolRisk>();
   private readonly evidence = new Map<string, Set<DeliveryEvidence>>();
+  private readonly toolCatalog = new ToolCatalog();
 
   constructor(initial: readonly ToolProvider[] = []) {
     this.registerMany(initial);
@@ -56,6 +69,14 @@ export class ToolRegistry {
         throw new Error(`Conflicting risk registration for tool ${toolName}`);
       }
     }
+    this.toolCatalog.registerProvider(
+      provider.id,
+      provider.capabilities ?? [],
+      {
+        riskByTool: provider.riskByTool,
+        evidenceByTool: provider.evidenceByTool,
+      },
+    );
     this.providers.set(provider.id, provider);
     for (const [toolName, risk] of Object.entries(provider.riskByTool ?? {})) {
       this.risks.set(toolName, risk);
@@ -75,6 +96,10 @@ export class ToolRegistry {
 
   list(): readonly ToolProvider[] {
     return [...this.providers.values()];
+  }
+
+  getToolCatalog(): ToolCatalog {
+    return this.toolCatalog;
   }
 
   getRisk(toolName: string): ToolRisk | undefined {
