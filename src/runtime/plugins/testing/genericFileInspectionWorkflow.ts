@@ -85,7 +85,7 @@ export const GENERIC_FILE_INSPECTION_WORKFLOW: WorkflowDescriptor = {
   description: "A domain-neutral read-only workflow for inspecting workspace files.",
   runtimeManaged: true,
   workflowRoute: GENERIC_FILE_INSPECTION_WORKFLOW_ID,
-  visibleToolNames: GENERIC_FILE_INSPECTION_TOOL_NAMES,
+  businessToolNames: GENERIC_FILE_INSPECTION_TOOL_NAMES,
   describe: describeGenericFileInspection,
   createDeliveryContract: () => undefined,
   localMatch,
@@ -97,9 +97,14 @@ export class GenericFileInspectionWorkflow implements DeliveryWorkflow {
   readonly id = GENERIC_FILE_INSPECTION_WORKFLOW_ID;
   readonly title = GENERIC_FILE_INSPECTION_WORKFLOW.title;
   readonly stages = describeGenericFileInspection().stages;
-  readonly visibleToolNames = GENERIC_FILE_INSPECTION_TOOL_NAMES;
+  readonly businessToolNames = GENERIC_FILE_INSPECTION_TOOL_NAMES;
   readonly parallelToolCalls = true;
   readonly services: ReadonlyMap<string, unknown>;
+
+  /** @deprecated Use businessToolNames. */
+  get visibleToolNames(): readonly string[] {
+    return this.businessToolNames;
+  }
 
   constructor(readonly state: GenericFileInspectionState) {
     this.services = new Map([

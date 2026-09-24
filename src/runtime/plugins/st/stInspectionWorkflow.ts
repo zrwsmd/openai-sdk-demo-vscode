@@ -5,7 +5,9 @@ import type {
   DeliveryWorkflowDescriptor,
   WorkflowDecisionContext,
   WorkflowDescriptor,
+  WorkflowBusinessToolPolicy,
   WorkflowToolRecord,
+  WorkflowToolVisibilityContext,
 } from "../../workflow/types";
 
 export const ST_INSPECTION_TOOL_NAMES = [
@@ -17,6 +19,30 @@ export const ST_INSPECTION_TOOL_NAMES = [
 const ST_INSPECTION_WORKFLOW_ID = "st_inspection";
 const ST_INSPECTION_KEYWORDS =
   /依赖关系|依赖图|引用关系|引用图|调用关系|调用图|影响面|影响范围|波及|dependency|dependencies|reference graph|call graph|change impact/i;
+
+function stInspectionToolNamesForText(userText: string): readonly string[] {
+  const asksImpact = /影响面|影响范围|波及|change\s+impact|impact/i.test(userText);
+  const asksSymbol = /符号|变量|功能块|类型|声明|引用位置|symbol|symbol\s+reference/i.test(
+    userText,
+  );
+  const asksGraph =
+    /依赖|依赖图|引用关系|引用图|调用关系|调用图|dependency|dependencies|reference\s+graph|call\s+graph/i.test(
+      userText,
+    );
+  if (asksImpact) return ["st_change_impact"];
+  if (asksSymbol && !asksGraph) return ["st_symbol_references"];
+  if (asksGraph) return ["st_dependency_map"];
+  return ["st_dependency_map"];
+}
+
+function stInspectionBusinessToolPolicy(
+  context: WorkflowToolVisibilityContext,
+): WorkflowBusinessToolPolicy {
+  return {
+    mode: "allow_list",
+    names: stInspectionToolNamesForText(context.userText),
+  };
+}
 
 function describeStInspection(): DeliveryWorkflowDescriptor {
   return {
@@ -64,11 +90,13 @@ export const ST_INSPECTION_WORKFLOW: WorkflowDescriptor = {
     "只读分析当前工作区中 ST 文件、功能块、类型和符号之间的依赖关系及变更影响面，不生成或保存代码。",
   runtimeManaged: true,
   workflowRoute: ST_INSPECTION_WORKFLOW_ID,
-  visibleToolNames: ST_INSPECTION_TOOL_NAMES,
+  businessToolNames: ST_INSPECTION_TOOL_NAMES,
+  resolveBusinessToolPolicy: stInspectionBusinessToolPolicy,
   describe: describeStInspection,
   createDeliveryContract: () => undefined,
   localMatch: stInspectionLocalMatch,
-  createRuntime: () => new StInspectionWorkflow(),
+  createRuntime: (_contract, _state, context) =>
+    new StInspectionWorkflow(context?.userText),
 };
 
 /**
@@ -79,11 +107,18 @@ export class StInspectionWorkflow implements DeliveryWorkflow {
   readonly id = ST_INSPECTION_WORKFLOW_ID;
   readonly title = ST_INSPECTION_WORKFLOW.title;
   readonly stages = describeStInspection().stages;
-  readonly visibleToolNames = ST_INSPECTION_TOOL_NAMES;
+  readonly businessToolNames = ST_INSPECTION_TOOL_NAMES;
   readonly parallelToolCalls = false;
 
+  /** @deprecated Use businessToolNames. */
+  get visibleToolNames(): readonly string[] {
+    return this.businessToolNames;
+  }
+
+  constructor(private readonly userText = "") {}
+
   initialTool(options: { isResume: boolean }): string | undefined {
-    return options.isResume ? undefined : "st_dependency_map";
+    return options.isResume ? undefined : stInspectionToolNamesForText(this.userText)[0];
   }
 
   instructions(): string {

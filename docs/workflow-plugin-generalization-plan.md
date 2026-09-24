@@ -231,6 +231,31 @@ node scripts/run_store_test.mjs
 node scripts/run_coordinator_test.mjs
 ```
 
+## 后续阶段：通用 Workflow 工具可见性策略
+
+本阶段针对 `visibleToolNames` 的三个边界语义做了兼容性收敛：
+
+- 新增 `businessToolNames`，明确它只控制 Provider 提供的业务工具。
+- 新增 `resolveBusinessToolPolicy(context)`，允许 Workflow 根据当前用户请求、
+  Workflow 状态和 `ToolCatalog` 动态返回本轮业务工具名单。
+- 没有声明静态名单、动态 resolver 或显式默认策略时，业务工具默认
+  `deny_all`，不再把“未声明”解释成“全部放行”。
+- 如果确实需要开放全部业务工具，Workflow 必须显式声明
+  `defaultBusinessToolAccess: "allow_all"`。
+- `visibleToolNames` 保留为兼容别名；新插件应使用 `businessToolNames`。
+- `report_plan_progress`、`deliver_artifact` 等运行时控制工具改称
+  `runtimeControlTools` 通道，与业务工具分开组装，不受业务工具名单过滤。
+- ST Inspection 已接入动态策略：依赖/引用请求只开放
+  `st_dependency_map`，影响面请求只开放 `st_change_impact`，符号请求只开放
+  `st_symbol_references`。
+
+阶段验证：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过，包含默认拒绝、显式 `allow_all`、描述器策略、
+  动态 ST 工具选择和运行时控制工具隔离测试。
+
 ## 实施纪律
 
 - 不修改 `st-analyze` 桥和 `src/analysis/*` 的实现。

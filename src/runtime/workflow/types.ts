@@ -9,6 +9,7 @@ import type { PipelineStagePlan } from "../pipeline/stagePlan";
 import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
 import type { RuntimeServiceContainer } from "../services";
 import type { ToolEvidenceExtractor } from "../decision/completionEvidence";
+import type { ToolCatalog } from "../toolCatalog";
 
 export type WorkflowId = string;
 
@@ -25,6 +26,9 @@ export interface WorkflowRuntimeContext {
   readonly contract?: WorkflowContract;
   readonly state: WorkflowState;
   readonly services?: RuntimeServiceContainer;
+  readonly userText?: string;
+  readonly history?: readonly AgentInputItem[];
+  readonly toolCatalog?: ToolCatalog;
 }
 
 export type WorkflowToolRecord = {
@@ -60,8 +64,44 @@ export type DeliveryWorkflowDescriptor = {
 
 export type WorkflowDescription = DeliveryWorkflowDescriptor;
 
-export interface WorkflowToolPolicy {
+export type WorkflowBusinessToolAccess =
+  | "allow_list"
+  | "allow_all"
+  | "deny_all";
+
+export interface WorkflowBusinessToolPolicy {
+  readonly mode: WorkflowBusinessToolAccess;
+  readonly names?: readonly string[];
+}
+
+export interface WorkflowToolVisibilityContext {
+  readonly userText: string;
+  readonly history?: readonly AgentInputItem[];
+  readonly contract?: WorkflowContract;
+  readonly state: WorkflowState;
+  readonly toolCatalog: ToolCatalog;
+}
+
+export type WorkflowBusinessToolPolicyResolver = (
+  context: WorkflowToolVisibilityContext,
+) => WorkflowBusinessToolPolicy;
+
+export interface WorkflowToolPolicySource {
+  readonly businessToolNames?: readonly string[];
+  readonly resolveBusinessToolPolicy?: WorkflowBusinessToolPolicyResolver;
+  readonly defaultBusinessToolAccess?: Exclude<WorkflowBusinessToolAccess, "allow_list">;
+  /** @deprecated Use businessToolNames. */
   readonly visibleToolNames?: readonly string[];
+}
+
+/**
+ * This policy covers provider-owned business tools only.
+ *
+ * Runtime-control tools such as plan progress and inline artifact delivery
+ * are assembled by the Agent runtime in a separate channel and are not
+ * filtered by this business-tool policy.
+ */
+export interface WorkflowToolPolicy extends WorkflowToolPolicySource {
   readonly pipelinePlan?: PipelineStagePlan;
   readonly parallelToolCalls: boolean;
 }
@@ -133,6 +173,10 @@ export interface WorkflowDescriptor {
   description: string;
   runtimeManaged: boolean;
   workflowRoute?: string;
+  businessToolNames?: readonly string[];
+  resolveBusinessToolPolicy?: WorkflowBusinessToolPolicyResolver;
+  defaultBusinessToolAccess?: Exclude<WorkflowBusinessToolAccess, "allow_list">;
+  /** @deprecated Use businessToolNames. */
   visibleToolNames?: readonly string[];
   pipelinePlan?: PipelineStagePlan;
   describe(): WorkflowDescription;
@@ -164,6 +208,67 @@ export function createWorkflowContract(
   } = {},
 ): WorkflowContract | undefined {
   return (workflow.createContract ?? workflow.createDeliveryContract)?.(options);
+}
+
+function normalizedToolNames(names: readonly string[] | undefined): readonly string[] {
+  return [
+    ...new Set(
+      (names ?? [])
+        .filter((name): name is string => typeof name === "string")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function normalizeBusinessToolPolicy(
+  policy: WorkflowBusinessToolPolicy,
+): WorkflowBusinessToolPolicy {
+  if (policy.mode !== "allow_list") {
+    return { mode: policy.mode };
+  }
+  return {
+    mode: "allow_list",
+    names: normalizedToolNames(policy.names),
+  };
+}
+
+/**
+ * Resolve the business-tool channel from the most specific workflow source.
+ *
+ * A runtime may override its descriptor policy. If no source declares a
+ * policy, business tools are denied by default instead of being implicitly
+ * exposed. Runtime-control tools are intentionally outside this result.
+ */
+export function resolveWorkflowBusinessToolPolicy(
+  sources: readonly (WorkflowToolPolicySource | undefined)[],
+  context: WorkflowToolVisibilityContext,
+): WorkflowBusinessToolPolicy {
+  for (const source of sources) {
+    if (source?.resolveBusinessToolPolicy) {
+      return normalizeBusinessToolPolicy(source.resolveBusinessToolPolicy(context));
+    }
+  }
+  let defaultAccess: Exclude<WorkflowBusinessToolAccess, "allow_list"> | undefined;
+  for (const source of sources) {
+    if (!source) continue;
+    if (source.businessToolNames !== undefined) {
+      return {
+        mode: "allow_list",
+        names: normalizedToolNames(source.businessToolNames),
+      };
+    }
+    if (source.visibleToolNames !== undefined) {
+      return {
+        mode: "allow_list",
+        names: normalizedToolNames(source.visibleToolNames),
+      };
+    }
+    if (source.defaultBusinessToolAccess !== undefined && defaultAccess === undefined) {
+      defaultAccess = source.defaultBusinessToolAccess;
+    }
+  }
+  return { mode: defaultAccess ?? "deny_all" };
 }
 
 export interface WorkflowSelectedDecision {

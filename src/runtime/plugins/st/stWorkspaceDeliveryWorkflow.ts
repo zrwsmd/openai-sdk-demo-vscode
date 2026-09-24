@@ -103,7 +103,7 @@ export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
   description: "生成、修复、校验并保存 IEC 61131-3 ST/PLC 程序源码。",
   runtimeManaged: true,
   workflowRoute: "st_delivery",
-  visibleToolNames: ST_WORKSPACE_DELIVERY_TOOL_NAMES,
+  businessToolNames: ST_WORKSPACE_DELIVERY_TOOL_NAMES,
   pipelinePlan: ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
   describe: describeStWorkspaceDelivery,
   matchesDeliveryContract: isStWorkspaceDeliveryContract,
@@ -127,12 +127,17 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly stages = ST_WORKSPACE_DELIVERY_STAGES;
   readonly pipelinePlan = ST_WORKSPACE_DELIVERY_PIPELINE_PLAN;
 
-  readonly visibleToolNames = ST_WORKSPACE_DELIVERY_TOOL_NAMES;
+  readonly businessToolNames = ST_WORKSPACE_DELIVERY_TOOL_NAMES;
   readonly parallelToolCalls = false;
   readonly validationInputMode = "inline_code" as const;
   readonly requiredActionTool = "write_file";
   readonly services: ReadonlyMap<string, unknown>;
   readonly evidenceExtractors = ST_TOOL_EVIDENCE_EXTRACTORS;
+
+  /** @deprecated Use businessToolNames. */
+  get visibleToolNames(): readonly string[] {
+    return this.businessToolNames;
+  }
 
   constructor(
     private readonly contract: DeliveryContract | undefined,

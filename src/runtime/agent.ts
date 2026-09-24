@@ -91,6 +91,7 @@ import {
 import {
   createWorkflowRuntime,
   createDeliveryWorkflowRuntimeState,
+  getWorkflowDescriptor,
 } from "./deliveryWorkflow";
 import {
   commandToolResult,
@@ -112,6 +113,7 @@ import type {
   WorkflowModelDecision,
   WorkflowDecisionSignals,
 } from "./workflow/types";
+import { resolveWorkflowBusinessToolPolicy } from "./workflow/types";
 import type { WorkflowRegistry } from "./workflow/registry";
 import {
   runFinalOutputFinalizer,
@@ -349,7 +351,7 @@ function toolNameOf(item: unknown): string | undefined {
  */
 export function composeToolSet<T>(
   businessTools: readonly T[],
-  runtimeTools: readonly T[],
+  runtimeControlTools: readonly T[],
   allowedToolNames: readonly string[] | undefined,
   getName: (item: T) => string | undefined = (item) => toolNameOf(item),
 ): T[] {
@@ -359,7 +361,7 @@ export function composeToolSet<T>(
         return typeof name === "string" && allowedToolNames.includes(name);
       })
     : [...businessTools];
-  return [...visibleBusinessTools, ...runtimeTools];
+  return [...visibleBusinessTools, ...runtimeControlTools];
 }
 
 function renderAvailableToolsPrompt(toolNames: readonly string[]): string {
@@ -1878,17 +1880,36 @@ export async function runAgent(
     name === "deliver_artifact" || name === "report_plan_progress"
       ? "plan"
       : registeredToolRisks[name] ?? "execute";
+  const workflowDescriptor = getWorkflowDescriptor(
+    options.workflowId,
+    options.deliveryContract,
+    options.workflowRegistry,
+  );
+  const workflowVisibilityContext = {
+    userText,
+    contract: options.deliveryContract,
+    state: workflowState,
+    toolCatalog: toolRegistry.getToolCatalog(),
+  };
   const deliveryWorkflow = createWorkflowRuntime(
     options.workflowId,
     options.deliveryContract,
     workflowState,
     options.workflowRegistry,
+    workflowVisibilityContext,
   );
+  const workflowBusinessToolPolicy = deliveryWorkflow || workflowDescriptor
+    ? resolveWorkflowBusinessToolPolicy(
+        [deliveryWorkflow, workflowDescriptor],
+        workflowVisibilityContext,
+      )
+    : undefined;
   let deliveryWorkflowCompleted = false;
   let deliveryWorkflowCompletionLogged = false;
-  const deliveryWorkflowToolNames = deliveryWorkflow?.visibleToolNames
-    ? new Set(deliveryWorkflow.visibleToolNames)
-    : undefined;
+  const deliveryWorkflowToolNames =
+    workflowBusinessToolPolicy?.mode === "allow_list"
+      ? new Set(workflowBusinessToolPolicy.names ?? [])
+      : undefined;
   const completedWorkflowToolRejection = (toolName: string): string | undefined => {
     if (!deliveryWorkflow || !deliveryWorkflowCompleted) return undefined;
     if (deliveryWorkflowToolNames && !deliveryWorkflowToolNames.has(toolName)) {
@@ -2026,9 +2047,6 @@ export async function runAgent(
       }),
     );
   };
-  const workflowToolNames = deliveryWorkflow?.visibleToolNames
-    ? new Set(deliveryWorkflow.visibleToolNames)
-    : undefined;
   const registeredTools = toolRegistry.createTools({
     cfg,
     workflowContract: options.deliveryContract,
@@ -2036,17 +2054,30 @@ export async function runAgent(
     diagnosticReporter: reportDiagnostics,
     runtimeToolGuard,
   }).filter((item) => {
-    if (!workflowToolNames) return true;
+    if (!workflowBusinessToolPolicy || workflowBusinessToolPolicy.mode === "allow_all") {
+      return true;
+    }
+    if (workflowBusinessToolPolicy.mode === "deny_all") {
+      return false;
+    }
     const name = toolNameOf(item);
-    return typeof name === "string" && workflowToolNames.has(name);
+    return typeof name === "string" &&
+      workflowBusinessToolPolicy.names?.includes(name) === true;
   });
+  const allowedBusinessToolNames = workflowBusinessToolPolicy
+    ? workflowBusinessToolPolicy.mode === "allow_list"
+      ? workflowBusinessToolPolicy.names ?? []
+      : workflowBusinessToolPolicy.mode === "deny_all"
+        ? []
+        : undefined
+    : options.allowedToolNames;
   const tools = composeToolSet(
     registeredTools,
     [
       ...(planProgressTool ? [planProgressTool] : []),
       ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
     ],
-    options.allowedToolNames,
+    allowedBusinessToolNames,
   );
   const availableToolNameList = tools
     .map(toolNameOf)

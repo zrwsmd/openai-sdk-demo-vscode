@@ -6,6 +6,8 @@ import {
   AgentDecisionService,
   GENERIC_FILE_INSPECTION_TOOL_NAMES,
   GENERIC_FILE_INSPECTION_WORKFLOW,
+  ST_INSPECTION_WORKFLOW,
+  ToolCatalog,
   ToolRegistry,
   WorkflowDecisionService,
   WorkflowRegistry,
@@ -13,6 +15,7 @@ import {
   createDeliveryWorkflowRuntimeState,
   evaluateCompletionGate,
   getGenericFileInspectionState,
+  resolveWorkflowBusinessToolPolicy,
 } from './agent.testbundle.mjs';
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'generic-workflow-'));
@@ -107,6 +110,65 @@ try {
     getGenericFileInspectionState(runtimeState).inspectedTargets.has('sample.txt'),
   );
   assert(resumedRuntime.state.inspectedTargets.has('sample.txt'));
+
+  const visibilityContext = {
+    userText: '检查当前工作区里的文件内容',
+    state: runtimeState,
+    toolCatalog: toolRegistry.getToolCatalog(),
+  };
+  assert.deepEqual(
+    resolveWorkflowBusinessToolPolicy([{
+      id: 'no-policy',
+    }], visibilityContext),
+    { mode: 'deny_all' },
+  );
+  assert.deepEqual(
+    resolveWorkflowBusinessToolPolicy([{
+      id: 'all-business-tools',
+      defaultBusinessToolAccess: 'allow_all',
+    }], visibilityContext),
+    { mode: 'allow_all' },
+  );
+  const descriptorOnlyPolicy = {
+    id: 'descriptor-only',
+    businessToolNames: ['read_file'],
+  };
+  assert.deepEqual(
+    resolveWorkflowBusinessToolPolicy([descriptorOnlyPolicy], visibilityContext),
+    { mode: 'allow_list', names: ['read_file'] },
+  );
+
+  const stState = createDeliveryWorkflowRuntimeState();
+  const stRuntime = ST_INSPECTION_WORKFLOW.createRuntime?.(
+    undefined,
+    stState,
+    { userText: '分析这个 ST 文件的变更影响面' },
+  );
+  assert(stRuntime);
+  const stVisibility = resolveWorkflowBusinessToolPolicy(
+    [stRuntime, ST_INSPECTION_WORKFLOW],
+    {
+      userText: '分析这个 ST 文件的变更影响面',
+      state: stState,
+      toolCatalog: new ToolCatalog(),
+    },
+  );
+  assert.deepEqual(stVisibility, {
+    mode: 'allow_list',
+    names: ['st_change_impact'],
+  });
+  assert.equal(stRuntime.initialTool({ isResume: false }), 'st_change_impact');
+  assert.deepEqual(
+    resolveWorkflowBusinessToolPolicy(
+      [stRuntime, ST_INSPECTION_WORKFLOW],
+      {
+        userText: '查找变量的声明和引用位置',
+        state: stState,
+        toolCatalog: new ToolCatalog(),
+      },
+    ),
+    { mode: 'allow_list', names: ['st_symbol_references'] },
+  );
 
   console.log('generic workflow plugin tests passed');
 } finally {

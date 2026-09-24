@@ -11,6 +11,7 @@ import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
   WorkflowDescriptor,
+  WorkflowRuntimeContext,
   WorkflowStage,
   WorkflowToolRecord,
 } from "./workflow/types";
@@ -32,9 +33,14 @@ export function createWorkflowRuntime(
   contract: DeliveryContract | undefined,
   state: DeliveryWorkflowRuntimeState,
   registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+  context?: Omit<WorkflowRuntimeContext, "contract" | "state">,
 ): DeliveryWorkflow | undefined {
   const matched = getWorkflowDescriptor(workflowId, contract, registry);
-  return matched?.createRuntime?.(contract, state);
+  return matched?.createRuntime?.(contract, state, {
+    ...context,
+    contract,
+    state,
+  });
 }
 
 export function createDeliveryWorkflow(
