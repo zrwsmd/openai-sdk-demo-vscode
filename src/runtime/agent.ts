@@ -2059,6 +2059,15 @@ export async function runAgent(
   const runner = new Runner({
     tracingDisabled,
     toolExecution: { maxFunctionToolConcurrency: null },
+    // A model can occasionally replay a stale tool call from an older turn.
+    // Let the SDK return a model-visible error so the current turn can recover
+    // instead of failing the whole run before valid calls are processed.
+    toolNotFoundBehavior: "return_error_to_model",
+    toolErrorFormatter: ({ kind, toolName, defaultMessage }) => {
+      if (kind !== "tool_not_found") return defaultMessage;
+      const available = availableToolNameList.join("、") || "无";
+      return `${defaultMessage} 当前本轮可用工具仅限：${available}。请忽略历史工具调用，只处理当前用户请求。`;
+    },
   });
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = "";

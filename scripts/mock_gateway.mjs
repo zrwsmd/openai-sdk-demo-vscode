@@ -337,6 +337,13 @@ const server = http.createServer((req, res) => {
       ? req_body.tool_choice
       : req_body.tool_choice?.function?.name;
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
+    const unknownToolRecovery = userText.includes('未知工具恢复回归');
+    const hasToolNotFoundResult = messages.some(
+      (message) =>
+        message?.role === 'tool' &&
+        typeof message.content === 'string' &&
+        /not found|不存在|不可用/i.test(message.content),
+    );
     console.log(`[mock] model=${model} tools=${(req_body.tools || []).length} stream=${req_body.stream} msgs=${messages.length} last_role=${last.role}`);
 
     if (rejectCombined && req_body.response_format && req_body.tool_choice) {
@@ -389,7 +396,11 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     sse(res, chunk(model, { role: 'assistant' }));
 
-    if (
+    if (unknownToolRecovery && !hasToolNotFoundResult && !hasAssistantToolCall('ghost_tool')) {
+      endWithNamedToolCall(res, model, 'ghost_tool', '{}');
+    } else if (unknownToolRecovery && hasToolNotFoundResult) {
+      await streamText(res, model, '未知工具已被运行时拒绝，已恢复并完成当前请求。');
+    } else if (
       serializedMessages.includes('Team schema repair') &&
       serializedMessages.includes('schema错误')
     ) {

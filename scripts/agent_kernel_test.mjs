@@ -919,6 +919,35 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [9c] 模型回放了当前工具表之外的旧工具时,运行时应把错误回传给模型,
+//      而不是直接抛出 ModelBehaviorError 终止本轮。
+{
+  const before = diagLines.length;
+  const r = await runTestTurn(
+    '未知工具恢复回归',
+    noApproval,
+    {},
+    new JsonFileSession(path.join(dir, 'unknown-tool-session.json')),
+  );
+  const requestLines = diagLines
+    .slice(before)
+    .filter((line) => line.includes('[req]'));
+  console.log(
+    '[9c] 未知工具恢复:模型调用 =',
+    r.usage.requests,
+    '| 输出 =',
+    r.output,
+    '| 请求数 =',
+    requestLines.length,
+  );
+  if (!r.output.includes('未知工具已被运行时拒绝')) {
+    throw new Error('未知工具没有回传给模型并恢复当前请求');
+  }
+  if (r.usage.requests < 2 || requestLines.length < 2) {
+    throw new Error('未知工具恢复没有产生第二次模型请求');
+  }
+}
+
 // [10] 新会话:clearSession 后文件清空
 {
   await session.clearSession();
