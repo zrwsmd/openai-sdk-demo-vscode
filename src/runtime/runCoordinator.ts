@@ -755,7 +755,7 @@ export class RunCoordinator {
         run.canContinue = false;
         await this.store.update(run);
         this.emit({ type: 'resumeStarted', runId: run.id, approvalId });
-        await this.execute(run, apiKey);
+        await this.execute(run, apiKey, { preserveToolHistory: true });
         return;
       }
       if (!run.state) return;
@@ -914,7 +914,13 @@ export class RunCoordinator {
         await this.pausePending(run, false);
         return;
       }
-      await this.execute(run, apiKey, canResumeSdkState ? { initialState: run.state } : {});
+      await this.execute(
+        run,
+        apiKey,
+        canResumeSdkState
+          ? { initialState: run.state }
+          : { preserveToolHistory: true },
+      );
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
@@ -1216,7 +1222,7 @@ export class RunCoordinator {
         }));
       }
       this.writeLog(`[run:${run.id}] 重试 operation=${run.operationId}`);
-      await this.execute(run, apiKey);
+      await this.execute(run, apiKey, { preserveToolHistory: true });
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error) });
     } finally {
@@ -1267,7 +1273,7 @@ export class RunCoordinator {
   private async execute(
     run: DurableRunRecord,
     apiKey: string,
-    options: Pick<AgentRunOptions, 'initialState' | 'decisions'> = {},
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'> = {},
   ): Promise<void> {
     if (this.busy) return;
     this.busy = true;
@@ -1363,7 +1369,7 @@ export class RunCoordinator {
         return;
       }
       const executeSingleAgent = (
-        agentOptions: Pick<AgentRunOptions, 'initialState' | 'decisions'>,
+        agentOptions: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'>,
       ): Promise<AgentRunResult> =>
         this.executeAgent(
           {
@@ -1720,7 +1726,7 @@ export class RunCoordinator {
     apiKey: string,
     signal: AbortSignal,
     generation: number,
-    options: Pick<AgentRunOptions, 'initialState' | 'decisions'>,
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'>,
   ): Promise<AgentRunResult> {
     if (!run.teamTask?.executionGraph) throw new Error('Team 执行图不存在');
     let graph = run.teamTask.executionGraph;
@@ -1872,6 +1878,7 @@ export class RunCoordinator {
             nodePrompt,
             {
               initialState: node.state,
+              preserveToolHistory: options.preserveToolHistory,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
               workflowRegistry: this.workflowRegistry,

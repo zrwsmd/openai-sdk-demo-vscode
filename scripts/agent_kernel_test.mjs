@@ -16,6 +16,8 @@ import {
   createDeliveryContract,
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
+  projectNewTurnSessionHistory,
+  isToolHistoryItem,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
@@ -633,6 +635,74 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const has = (t) => chat.some((c) => c.text.includes(t));
   console.log('[3] session.json 条目 =', raw.items.length, '| 回放消息 =', chat.length, '| 含"张三" =', has('张三'));
   if (!raw.sessionId || !has('张三') || !has('你好')) throw new Error('场景3 持久化不完整');
+}
+
+// [3a] 新请求只把普通对话历史带给模型,不把上一轮的工具调用链当成当前任务继续执行;
+//      持久化会话本身仍保留原始工具条目,便于审计和 UI 回放。
+{
+  const isolationSession = new JsonFileSession(path.join(dir, 'history-isolation-session.json'));
+  const oldCall = {
+    type: 'function_call',
+    name: 'old_tool',
+    callId: 'old-call',
+    arguments: '{}',
+  };
+  const oldResult = {
+    type: 'function_call_result',
+    name: 'old_tool',
+    callId: 'old-call',
+    output: JSON.stringify({ ok: true }),
+  };
+  await isolationSession.addItems([
+    { type: 'message', role: 'user', content: '上一轮任务' },
+    oldCall,
+    oldResult,
+    { type: 'message', role: 'assistant', content: '上一轮任务已结束。' },
+  ]);
+  const projected = projectNewTurnSessionHistory(
+    await isolationSession.getItems(),
+    [{ type: 'message', role: 'user', content: '历史工具隔离回归' }],
+  );
+  if (projected.some(isToolHistoryItem)) {
+    throw new Error('新请求历史投影仍包含旧工具调用链');
+  }
+  const before = diagLines.length;
+  const r = await runTestTurn('历史工具隔离回归', noApproval, {}, isolationSession);
+  const requestLines = diagLines
+    .slice(before)
+    .filter((line) => line.includes('[req]'));
+  const rawItems = await isolationSession.getItems();
+  console.log(
+    '[3a] 新请求历史隔离:旧工具仍在持久化 =',
+    rawItems.some(isToolHistoryItem),
+    '| 请求 =',
+    requestLines[0] ?? '(无)',
+  );
+  if (requestLines.some((line) => line.includes('assistant(tool_calls:old_tool)'))) {
+    throw new Error('旧工具调用仍被发送给新请求模型');
+  }
+  if (!rawItems.some(isToolHistoryItem) || !r.output.includes('PLC 编程助手')) {
+    throw new Error('历史隔离错误地修改了持久化会话或新请求没有完成');
+  }
+}
+
+// [3b] 同一任务的安全重启可以显式保留工具链,供失败后继续处理;
+//      这与新用户请求的默认历史隔离是两条不同路径。
+{
+  const before = diagLines.length;
+  await runTestTurn(
+    '安全重启保留工具历史回归',
+    noApproval,
+    { preserveToolHistory: true },
+    new JsonFileSession(path.join(dir, 'history-isolation-session.json')),
+  );
+  const requestLines = diagLines
+    .slice(before)
+    .filter((line) => line.includes('[req]'));
+  console.log('[3b] 安全重启保留工具历史:', requestLines[0] ?? '(无)');
+  if (!requestLines.some((line) => line.includes('assistant(tool_calls:old_tool)'))) {
+    throw new Error('安全重启没有保留同一任务的工具历史');
+  }
 }
 
 // [4] 星三角工具链(无需审批):get_io_table → 最终 ST 代码

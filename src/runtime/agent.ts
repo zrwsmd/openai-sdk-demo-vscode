@@ -16,6 +16,7 @@ import {
   type RunToolApprovalItem,
   type AgentInputItem,
   type Session,
+  type SessionInputCallback,
   type StreamedRunResult,
   type AgentOutputType,
 } from "@openai/agents";
@@ -149,6 +150,11 @@ export interface AgentRunCheckpoint {
 export interface AgentRunOptions {
   /** Resume a serialized SDK RunState instead of starting from userText. */
   initialState?: string;
+  /**
+   * Keep prior tool-call/result items when restarting the same task from a
+   * durable boundary. New user turns omit those items by default.
+   */
+  preserveToolHistory?: boolean;
   /** Decisions keyed by ApprovalRequest.id, used when resuming a checkpoint. */
   decisions?: Record<string, boolean>;
   /** Cancels model streaming and cooperative tool execution. */
@@ -316,6 +322,12 @@ const WORKFLOW_EXECUTION_PROMPT =
   "当前可用工具列表是唯一可调用工具集合；不要调用列表之外的工具，也不要用旧流程假设补工具。" +
   "如果缺少资料查询工具，基于用户请求、上下文和用户允许的模拟变量继续完成；确实无法继续时如实说明阻塞原因。";
 
+const NEW_TURN_SCOPE_PROMPT =
+  "\n\n本轮任务边界：" +
+  "只处理当前最新的用户请求。" +
+  "会话历史中的旧工具调用和工具回执不会自动延续为本轮动作；不要根据旧工具调用重放任何工作流。" +
+  "如果历史任务与当前请求不一致，以当前请求为准；只能调用当前可用工具列表中的工具。";
+
 const GENERIC_PLAN_SYSTEM_PROMPT =
   "你是通用任务执行助手，处理用户提出的文件、代码、命令、数据、PLC 或其他可用工具任务。" +
   "只在用户目标需要时调用相应工具，不要臆造额外领域步骤。" +
@@ -334,6 +346,59 @@ function renderAvailableToolsPrompt(toolNames: readonly string[]): string {
   return "\n\n当前可用工具仅限以下列表：\n" +
     toolNames.map((name) => `- ${name}`).join("\n") +
     "\n只能调用上面列出的工具；不要调用未列出的工具名。";
+}
+
+const TOOL_HISTORY_ITEM_TYPES = new Set([
+  "function_call",
+  "function_call_output",
+  "function_call_result",
+  "tool_call",
+  "tool_call_output",
+  "tool_result",
+  "computer_call",
+  "computer_call_output",
+  "computer_call_result",
+  "shell_call",
+  "shell_call_output",
+  "apply_patch_call",
+  "apply_patch_call_output",
+  "hosted_tool_call",
+  "hosted_tool_call_output",
+  "mcp_call",
+  "mcp_call_output",
+  "tool_search_call",
+  "tool_search_output",
+]);
+
+/**
+ * Project persistent history for a genuinely new user turn.
+ *
+ * The durable session remains untouched. Only the model-facing input omits
+ * executable tool-call/result items from older turns, so a previous workflow
+ * cannot be replayed as if it belonged to the current request.
+ */
+export function isToolHistoryItem(item: AgentInputItem): boolean {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === "string" ? value.type : "";
+  if (TOOL_HISTORY_ITEM_TYPES.has(type)) return true;
+  if (value.role === "tool") return true;
+  if (
+    value.role === "assistant" &&
+    (Array.isArray(value.tool_calls) || value.function_call !== undefined)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function projectNewTurnSessionHistory(
+  historyItems: AgentInputItem[],
+  newItems: AgentInputItem[],
+): AgentInputItem[] {
+  return [
+    ...historyItems.filter((item) => !isToolHistoryItem(item)),
+    ...newItems,
+  ];
 }
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
@@ -1966,29 +2031,35 @@ export async function runAgent(
     .filter((name): name is string => typeof name === "string");
   const availableToolNames = new Set(availableToolNameList);
   const availableToolsPrompt = renderAvailableToolsPrompt(availableToolNameList);
-  const executionInstructions = activePlan
-    ? BASE_AGENT_PROMPT +
-      availableToolsPrompt +
-      "\n\n" +
-      GENERIC_PLAN_SYSTEM_PROMPT +
-      "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种领域场景；以计划目标和用户原始要求为准。" +
-      "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
-      "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
-      "verification.evidence 必须具体说明观察到的证据；证据不足、工具失败或结果不符合标准时，填写 verdict=retry（继续修正）或 revise（换一种完成当前步骤的办法），并提供 issue 与 nextAction。" +
-      "只有 verdict=passed 会推进步骤；收到未通过的工具回执后必须继续处理当前步骤，不能跳到下一步或给最终答复。" +
-      "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
-      renderTaskPlan(activePlan)
-    : options.teamTask
+  const isolateHistoricalToolChain =
+    !options.initialState && !options.preserveToolHistory;
+  const executionInstructions = (
+    activePlan
       ? BASE_AGENT_PROMPT +
         availableToolsPrompt +
         "\n\n" +
         GENERIC_PLAN_SYSTEM_PROMPT +
-        "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
-        "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
-        "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
-      : deliveryWorkflow
-        ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
-        : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT;
+        "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种领域场景；以计划目标和用户原始要求为准。" +
+        "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
+        "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
+        "verification.evidence 必须具体说明观察到的证据；证据不足、工具失败或结果不符合标准时，填写 verdict=retry（继续修正）或 revise（换一种完成当前步骤的办法），并提供 issue 与 nextAction。" +
+        "只有 verdict=passed 会推进步骤；收到未通过的工具回执后必须继续处理当前步骤，不能跳到下一步或给最终答复。" +
+        "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
+        renderTaskPlan(activePlan)
+      : options.teamTask
+        ? BASE_AGENT_PROMPT +
+          availableToolsPrompt +
+          "\n\n" +
+          GENERIC_PLAN_SYSTEM_PROMPT +
+          "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
+          "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
+          "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
+        : deliveryWorkflow
+          ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
+          : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
+  ) + (isolateHistoricalToolChain
+    ? NEW_TURN_SCOPE_PROMPT
+    : "\n\n当前是同一任务的恢复执行。可以参考并继续使用该任务已有的工具回执，但不要引入无关任务的工具调用。");
   const deliveryInstructions = options.deliveryContract?.requiresDeliverable
     ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
       renderDeliveryContract(options.deliveryContract) +
@@ -2069,6 +2140,22 @@ export async function runAgent(
       return `${defaultMessage} 当前本轮可用工具仅限：${available}。请忽略历史工具调用，只处理当前用户请求。`;
     },
   });
+  let newTurnHistoryProjectionUsed = false;
+  const sessionInputCallback: SessionInputCallback | undefined =
+    !isolateHistoricalToolChain
+    ? undefined
+    : async (historyItems, newItems) => {
+        if (newTurnHistoryProjectionUsed) {
+          return [...historyItems, ...newItems];
+        }
+        newTurnHistoryProjectionUsed = true;
+        const projected = projectNewTurnSessionHistory(historyItems, newItems);
+        const removed = historyItems.length + newItems.length - projected.length;
+        if (removed > 0) {
+          agentLog(`[context] 新请求隔离旧工具链: 移除模型输入条目 ${removed} 个`);
+        }
+        return projected;
+      };
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
   let output = "";
   let structuredOutput: IndustrialAgentOutput | undefined;
@@ -3153,6 +3240,7 @@ export async function runAgent(
       stream: true,
       maxTurns: MAX_TURNS,
       session,
+      ...(sessionInputCallback ? { sessionInputCallback } : {}),
       signal: options.signal,
     });
     let outcome: "done" | "empty-bailed" | "cancelled";
