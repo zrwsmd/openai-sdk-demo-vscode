@@ -51,11 +51,13 @@ const coreToolNames = coreTools
   .createTools({ cfg: toolConfig })
   .map((tool) => tool.name);
 assert(coreToolNames.includes('write_file'));
+assert(coreToolNames.includes('edit_file'));
 assert(!coreToolNames.includes('validate_st_code'));
 assert(!coreToolNames.includes('st_dependency_map'));
 assert.equal(coreTools.getRisk('write_file'), 'write');
+assert.equal(coreTools.getRisk('edit_file'), 'write');
 assert.equal(coreTools.getRisk('validate_st_code'), undefined);
-assert.deepEqual(coreTools.toolsForEvidence('successful_write'), ['write_file']);
+assert.deepEqual(coreTools.toolsForEvidence('successful_write'), ['write_file', 'edit_file']);
 assert.deepEqual(coreTools.toolsForEvidence('successful_export'), []);
 
 const appTools = createAppToolRegistry();

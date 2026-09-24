@@ -128,6 +128,254 @@ export async function writeFileText(root: string, rel: string, content: string):
   return { file: abs, bytes: Buffer.byteLength(content) };
 }
 
+export interface FileEditOperation {
+  oldText: string;
+  newText: string;
+  replaceAll?: boolean;
+}
+
+export interface EditFileTextResult {
+  file: string;
+  bytes: number;
+  oldBytes: number;
+  changed: boolean;
+  editsApplied: number;
+  oldContentHash: string;
+  contentHash: string;
+  diff: string;
+}
+
+function countOccurrences(text: string, needle: string): number {
+  let count = 0;
+  let offset = 0;
+  while (offset <= text.length - needle.length) {
+    const index = text.indexOf(needle, offset);
+    if (index < 0) break;
+    count += 1;
+    offset = index + needle.length;
+  }
+  return count;
+}
+
+function contentHash(text: string): string {
+  return createHash('sha1').update(text, 'utf8').digest('hex');
+}
+
+type DiffOperation =
+  | { type: 'context'; oldLine: number; newLine: number; text: string }
+  | { type: 'remove'; oldLine: number; newLine: number; text: string }
+  | { type: 'add'; oldLine: number; newLine: number; text: string };
+
+function diffLines(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  return lines.length && lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines;
+}
+
+function buildDiffOperations(oldText: string, newText: string): DiffOperation[] {
+  const oldLines = diffLines(oldText);
+  const newLines = diffLines(newText);
+  const cellCount = (oldLines.length + 1) * (newLines.length + 1);
+  if (cellCount > 4_000_000) {
+    const prefix = oldLines.findIndex((line, index) => line !== newLines[index]);
+    const firstChanged = prefix < 0 ? Math.min(oldLines.length, newLines.length) : prefix;
+    const oldSuffix = oldLines.length - firstChanged;
+    const newSuffix = newLines.length - firstChanged;
+    const commonSuffix = (() => {
+      let count = 0;
+      while (
+        count < oldSuffix &&
+        count < newSuffix &&
+        oldLines[oldLines.length - count - 1] === newLines[newLines.length - count - 1]
+      ) count += 1;
+      return count;
+    })();
+    const operations: DiffOperation[] = [];
+    for (let index = 0; index < firstChanged; index += 1) {
+      operations.push({
+        type: 'context',
+        oldLine: index + 1,
+        newLine: index + 1,
+        text: oldLines[index] ?? '',
+      });
+    }
+    for (let index = firstChanged; index < oldLines.length - commonSuffix; index += 1) {
+      operations.push({
+        type: 'remove',
+        oldLine: index + 1,
+        newLine: firstChanged + 1,
+        text: oldLines[index] ?? '',
+      });
+    }
+    for (let index = firstChanged; index < newLines.length - commonSuffix; index += 1) {
+      operations.push({
+        type: 'add',
+        oldLine: firstChanged + 1,
+        newLine: index + 1,
+        text: newLines[index] ?? '',
+      });
+    }
+    for (let offset = commonSuffix; offset > 0; offset -= 1) {
+      const oldLine = oldLines.length - offset + 1;
+      const newLine = newLines.length - offset + 1;
+      operations.push({
+        type: 'context',
+        oldLine,
+        newLine,
+        text: oldLines[oldLine - 1] ?? '',
+      });
+    }
+    return operations;
+  }
+
+  const table = Array.from(
+    { length: oldLines.length + 1 },
+    () => new Uint32Array(newLines.length + 1),
+  );
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const operations: DiffOperation[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (
+      oldIndex < oldLines.length &&
+      newIndex < newLines.length &&
+      oldLines[oldIndex] === newLines[newIndex]
+    ) {
+      operations.push({
+        type: 'context',
+        oldLine: oldIndex + 1,
+        newLine: newIndex + 1,
+        text: oldLines[oldIndex],
+      });
+      oldIndex += 1;
+      newIndex += 1;
+      continue;
+    }
+    if (
+      newIndex >= newLines.length ||
+      (oldIndex < oldLines.length && table[oldIndex + 1][newIndex] >= table[oldIndex][newIndex + 1])
+    ) {
+      operations.push({
+        type: 'remove',
+        oldLine: oldIndex + 1,
+        newLine: newIndex + 1,
+        text: oldLines[oldIndex],
+      });
+      oldIndex += 1;
+      continue;
+    }
+    operations.push({
+      type: 'add',
+      oldLine: oldIndex + 1,
+      newLine: newIndex + 1,
+      text: newLines[newIndex],
+    });
+    newIndex += 1;
+  }
+  return operations;
+}
+
+function renderUnifiedDiff(
+  oldText: string,
+  newText: string,
+  relativePath: string,
+): string {
+  if (oldText === newText) return '';
+  const operations = buildDiffOperations(oldText, newText);
+  const changed = operations
+    .map((operation, index) => ({ operation, index }))
+    .filter(({ operation }) => operation.type !== 'context');
+  if (!changed.length) return '';
+
+  const ranges: Array<[number, number]> = [];
+  for (const { index } of changed) {
+    const start = Math.max(0, index - 3);
+    const end = Math.min(operations.length, index + 4);
+    const previous = ranges[ranges.length - 1];
+    if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+    else ranges.push([start, end]);
+  }
+
+  const hunks = ranges.map(([start, end]) => {
+    const hunk = operations.slice(start, end);
+    const oldStart = hunk.find((operation) => operation.type !== 'add')?.oldLine ?? 1;
+    const newStart = hunk.find((operation) => operation.type !== 'remove')?.newLine ?? 1;
+    const oldCount = hunk.filter((operation) => operation.type !== 'add').length;
+    const newCount = hunk.filter((operation) => operation.type !== 'remove').length;
+    const lines = hunk.map((operation) => {
+      const prefix = operation.type === 'add' ? '+' : operation.type === 'remove' ? '-' : ' ';
+      return `${prefix}${operation.text}`;
+    });
+    return [
+      `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`,
+      ...lines,
+    ].join('\n');
+  });
+  return [
+    `--- a/${relativePath}`,
+    `+++ b/${relativePath}`,
+    ...hunks,
+  ].join('\n');
+}
+
+export async function editFileText(
+  root: string,
+  rel: string,
+  edits: readonly FileEditOperation[],
+): Promise<EditFileTextResult> {
+  const abs = resolveInWorkspace(root, rel);
+  if (!edits.length) throw new ToolError('至少需要提供一个文件编辑操作');
+  const stat = await fs.stat(abs).catch(() => {
+    throw new ToolError(`文件不存在:${rel}`);
+  });
+  if (!stat.isFile()) throw new ToolError(`目标不是普通文件:${rel}`);
+  if (stat.size > 2 * 1024 * 1024) {
+    throw new ToolError(`文件过大(${stat.size}B),请先分段读取后再决定如何修改`);
+  }
+
+  const original = await fs.readFile(abs, 'utf8');
+  let content = original;
+  let editsApplied = 0;
+  for (const edit of edits) {
+    if (!edit.oldText) throw new ToolError(`编辑操作 ${editsApplied + 1} 的 oldText 不能为空`);
+    const occurrences = countOccurrences(content, edit.oldText);
+    if (!occurrences) {
+      throw new ToolError(`编辑操作 ${editsApplied + 1} 未找到要替换的原文`);
+    }
+    if (!edit.replaceAll && occurrences !== 1) {
+      throw new ToolError(
+        `编辑操作 ${editsApplied + 1} 匹配到 ${occurrences} 处，请提供更精确的 oldText 或设置 replaceAll=true`,
+      );
+    }
+    content = edit.replaceAll
+      ? content.split(edit.oldText).join(edit.newText)
+      : content.replace(edit.oldText, edit.newText);
+    editsApplied += edit.replaceAll ? occurrences : 1;
+  }
+
+  const changed = content !== original;
+  if (changed) await fs.writeFile(abs, content, 'utf8');
+  const relativePath = path.relative(root, abs).split(path.sep).join('/');
+  const diff = renderUnifiedDiff(original, content, relativePath);
+  return {
+    file: abs,
+    bytes: Buffer.byteLength(content, 'utf8'),
+    oldBytes: Buffer.byteLength(original, 'utf8'),
+    changed,
+    editsApplied,
+    oldContentHash: contentHash(original),
+    contentHash: contentHash(content),
+    diff: diff.length > 24_000 ? `${diff.slice(0, 24_000)}\n…(diff 已截断)` : diff,
+  };
+}
+
 /** glob 只支持 * 与 ?(按文件名匹配),够用且无依赖 */
 function globToRegExp(glob: string): RegExp {
   const body = glob

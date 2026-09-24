@@ -36,6 +36,7 @@ const RISK_BY_TOOL: Record<string, ToolRisk> = {
   read_file: 'read',
   search_files: 'read',
   write_file: 'write',
+  edit_file: 'write',
   run_command: 'execute',
   write_plc_variables: 'execute',
 };

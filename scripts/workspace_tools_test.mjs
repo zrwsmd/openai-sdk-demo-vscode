@@ -3,7 +3,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveInWorkspace, listFiles, readFileRange, writeFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
+import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-ws-test-'));
 await fs.writeFile(path.join(ws, 'main.st'), 'PROGRAM Demo\n  x := 1;\nEND_PROGRAM\n');
@@ -60,6 +60,48 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
   if (m2.some((s) => s.includes('node_modules'))) throw new Error('搜索未跳过 node_modules');
   if (m2.length !== 2) throw new Error('glob=*.st 应命中 main.st 的 2 行(PROGRAM/END_PROGRAM)');
   if (m3.length !== 1) throw new Error('正则搜索应命中 1 行');
+}
+
+// [4b] edit_file:精确替换、唯一匹配保护、unified diff 与失败不落盘
+{
+  const target = path.join(ws, 'sub', 'util.txt');
+  const before = await fs.readFile(target, 'utf8');
+  const edited = await editFileText(ws, 'sub/util.txt', [{
+    oldText: 'Motor_Star := TON_Star.Q;',
+    newText: 'Motor_Star := TON_Star.Q AND Enable;',
+  }]);
+  const after = await fs.readFile(target, 'utf8');
+  console.log('[4b] edit_file: changed =', edited.changed, '| edits =', edited.editsApplied, '| diff =', edited.diff.includes('-Motor_Star') && edited.diff.includes('+Motor_Star'));
+  if (
+    !edited.changed ||
+    edited.editsApplied !== 1 ||
+    !edited.diff.includes('--- a/sub/util.txt') ||
+    !edited.diff.includes('-Motor_Star := TON_Star.Q;') ||
+    !edited.diff.includes('+Motor_Star := TON_Star.Q AND Enable;') ||
+    after === before
+  ) throw new Error('精确编辑或 unified diff 生成错误');
+
+  await fs.writeFile(target, 'same\nsame\n', 'utf8');
+  let ambiguous = false;
+  try {
+    await editFileText(ws, 'sub/util.txt', [{
+      oldText: 'same',
+      newText: 'changed',
+    }]);
+  } catch (error) {
+    ambiguous = /匹配到 2 处/.test(error.message);
+  }
+  if (!ambiguous || await fs.readFile(target, 'utf8') !== 'same\nsame\n') {
+    throw new Error('非唯一匹配没有阻止写入');
+  }
+  const replaced = await editFileText(ws, 'sub/util.txt', [{
+    oldText: 'same',
+    newText: 'changed',
+    replaceAll: true,
+  }]);
+  if (!replaced.changed || replaced.editsApplied !== 2 || !replaced.diff.includes('+changed')) {
+    throw new Error('replaceAll 编辑错误');
+  }
 }
 
 // [5] 路径越界防护

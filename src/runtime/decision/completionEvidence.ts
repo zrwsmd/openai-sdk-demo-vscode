@@ -166,7 +166,7 @@ const baseToolEvidenceExtractor: ToolEvidenceExtractor = {
 
 const fileEvidenceExtractor: ToolEvidenceExtractor = {
   id: "file.generic",
-  toolNames: ["write_file", "read_file", "search_files", "list_files", "run_command"],
+  toolNames: ["write_file", "edit_file", "read_file", "search_files", "list_files", "run_command"],
   extract: (record, context) => {
     const { helpers } = context;
     const data = helpers.data(record.result);
@@ -180,6 +180,11 @@ const fileEvidenceExtractor: ToolEvidenceExtractor = {
     if (record.name === "write_file") {
       facts.push(fact("file.operation", "write", "file", record.name));
       facts.push(fact("file.write.persisted", record.result.ok === true, "file", record.name));
+    } else if (record.name === "edit_file") {
+      facts.push(fact("file.operation", "edit", "file", record.name));
+      facts.push(fact("file.edit.persisted", record.result.ok === true, "file", record.name));
+      facts.push(fact("file.edit.changed", data.changed === true, "file", record.name));
+      addNumberFact(facts, "file.edit.editsApplied", helpers.numberField(data, ["editsApplied"]), "file", record.name);
     } else if (record.name === "read_file") {
       facts.push(fact("file.operation", "read", "file", record.name));
       facts.push(fact("file.read.succeeded", record.result.ok === true, "file", record.name));

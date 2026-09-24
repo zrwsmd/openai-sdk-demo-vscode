@@ -222,6 +222,8 @@ function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): str
 
 function allowedToolsForFallback(mode: WorkflowFallbackMode): readonly string[] | undefined {
   if (mode === "read_only") return ["list_files", "read_file", "search_files"];
-  if (mode === "file_edit") return ["list_files", "read_file", "search_files", "write_file"];
+  if (mode === "file_edit") {
+    return ["list_files", "read_file", "search_files", "write_file", "edit_file"];
+  }
   return [];
 }

@@ -4,6 +4,7 @@ import type { ToolProvider } from "../toolRegistry";
 import { createRunCommandTool } from "./runCommandTool";
 import { createWorkspaceReadTools } from "./workspaceReadTools";
 import { createWriteFileTool } from "./writeFileTool";
+import { createEditFileTool } from "./editFileTool";
 
 const CORE_TOOL_RISKS: Readonly<Record<string, ToolRisk>> = {
   get_io_table: "read",
@@ -12,6 +13,7 @@ const CORE_TOOL_RISKS: Readonly<Record<string, ToolRisk>> = {
   read_file: "read",
   search_files: "read",
   write_file: "write",
+  edit_file: "write",
   run_command: "execute",
 };
 
@@ -21,6 +23,7 @@ export function createCoreToolProvider(): ToolProvider {
     riskByTool: CORE_TOOL_RISKS,
     evidenceByTool: {
       write_file: ["successful_write"],
+      edit_file: ["successful_write"],
     },
     createTools(context): readonly Tool[] {
       const {
@@ -37,6 +40,7 @@ export function createCoreToolProvider(): ToolProvider {
         readFileTool,
         searchFilesTool,
         createWriteFileTool(context),
+        createEditFileTool(context),
         createRunCommandTool(context),
       ];
     },

@@ -852,6 +852,20 @@ function formatToolResult(name, summary, result, run, durationMs) {
       detail: parsed,
     };
   }
+  if (name === 'edit_file' && typeof data.file === 'string') {
+    const file = args && typeof args.path === 'string' ? args.path : data.file;
+    const changed = data.changed === true;
+    const diff = typeof data.diff === 'string' ? data.diff : '';
+    return {
+      headline: `${changed ? '已修改' : '内容无变化'} ${file}`,
+      summary: diff
+        ? `本次编辑 ${typeof data.editsApplied === 'number' ? `${data.editsApplied} 处` : ''}，已生成变更 diff。`
+        : '没有可展示的文件差异。',
+      meta: metaParts.join(' · '),
+      detail: parsed,
+      diff,
+    };
+  }
   if (name === 'export_st_program' && typeof data.file === 'string') {
     return {
       headline: `已导出 ${data.file}`,
@@ -919,6 +933,32 @@ function addToolResult(name, ok, summary, result, run, durationMs) {
   meta.className = 'tool-result-meta';
   meta.textContent = formatted.meta || name;
   body.appendChild(meta);
+  if (formatted.diff) {
+    const diffDetails = document.createElement('details');
+    diffDetails.className = 'tool-diff-details';
+    diffDetails.open = true;
+    const diffSummary = document.createElement('summary');
+    diffSummary.textContent = '查看 Diff';
+    const diffPre = document.createElement('pre');
+    diffPre.className = 'tool-diff';
+    for (const line of String(formatted.diff).split('\n')) {
+      const lineEl = document.createElement('span');
+      lineEl.className = line.startsWith('+') && !line.startsWith('+++')
+        ? 'diff-add'
+        : line.startsWith('-') && !line.startsWith('---')
+          ? 'diff-remove'
+          : line.startsWith('@@')
+            ? 'diff-hunk'
+            : line.startsWith('---') || line.startsWith('+++')
+              ? 'diff-header'
+              : '';
+      lineEl.textContent = line;
+      diffPre.appendChild(lineEl);
+      diffPre.appendChild(document.createTextNode('\n'));
+    }
+    diffDetails.append(diffSummary, diffPre);
+    body.appendChild(diffDetails);
+  }
   if (formatted.detail) {
     const details = document.createElement('details');
     const summaryEl = document.createElement('summary');

@@ -6,7 +6,7 @@
  * for gateways that may otherwise answer without executing the tool.
  */
 
-export type RequiredAgentTool = 'read_file' | 'write_file' | 'export_st_program' | 'run_command';
+export type RequiredAgentTool = 'read_file' | 'write_file' | 'edit_file' | 'export_st_program' | 'run_command';
 
 export interface ActionPolicy {
   requiredToolFor(userText: string): RequiredAgentTool | undefined;
@@ -21,7 +21,9 @@ export class DefaultActionPolicy implements ActionPolicy {
     }
 
     const mentionsWorkspaceFile = /(?:文件|工作区|当前项目|workspace|\bfile\b|[`'"“”‘’]?[^\s`'"“”‘’]+\.[a-z0-9]{1,8}\b)/iu.test(text);
+    const asksToEdit = /(?:编辑|局部修改|替换|修订|修改|patch|edit|replace)/iu.test(text);
     const asksToWrite = /(?:写入|写到|写进|写文件|写|保存到|保存为|保存|落盘|创建|修改|覆盖|\bwrite\b|\bsave\b|\bcreate\b|\bmodify\b|\boverwrite\b)/iu.test(text);
+    if (mentionsWorkspaceFile && asksToEdit) return 'edit_file';
     if (mentionsWorkspaceFile && asksToWrite) return 'write_file';
 
     const asksToRead = /(?:读取|读一下|读出|查看|打开|内容|\bread\b|\bopen\b|\bcat\b)/iu.test(text);

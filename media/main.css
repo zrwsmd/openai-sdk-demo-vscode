@@ -217,6 +217,22 @@ body { display: flex; flex-direction: column; }
   word-break: break-word;
   font-size: 10px;
 }
+.tool-diff-details { color: var(--muted); }
+.tool-diff {
+  max-height: 260px;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+}
+.tool-diff span {
+  display: block;
+  min-height: 1.35em;
+  padding: 0 4px;
+}
+.tool-diff .diff-add { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); background: rgba(46, 160, 67, 0.12); }
+.tool-diff .diff-remove { color: var(--vscode-gitDecoration-deletedResourceForeground, #f48771); background: rgba(248, 81, 73, 0.12); }
+.tool-diff .diff-header { color: var(--accent); }
+.tool-diff .diff-hunk { color: var(--vscode-editorWarning-foreground, #d89614); }
 
 .diagnostic-report {
   display: flex;

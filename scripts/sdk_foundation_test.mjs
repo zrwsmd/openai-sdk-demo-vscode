@@ -120,7 +120,8 @@ assert.equal(inferRequiredTool('write this content to config.json'), 'write_file
 assert.equal(inferRequiredTool('写你好我是agent这5个字到rr.txt下面'), 'write_file');
 assert.equal(inferRequiredTool('读取 lk.txt 文件里面的内容'), 'read_file');
 assert.equal(inferRequiredTool('读取 `lk.txt` 文件里面的内容'), 'read_file');
-assert.equal(inferRequiredTool('读取并修改 lk.txt 文件'), 'write_file');
+assert.equal(inferRequiredTool('读取并编辑 lk.txt 文件'), 'edit_file');
+assert.equal(inferRequiredTool('读取并修改 lk.txt 文件'), 'edit_file');
 assert.equal(inferRequiredTool('不要读取 lk.txt，只解释读取工具'), undefined);
 assert.equal(inferRequiredTool('只解释一下 write_file 的作用，不要执行写入'), undefined);
 assert.equal(inferRequiredTool('请把这段 ST 程序导出保存'), 'export_st_program');

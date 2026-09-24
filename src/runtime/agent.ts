@@ -306,9 +306,9 @@ const GENERAL_WORKSPACE_PROMPT =
   "如有错误要根据工具诊断修正后重新验证，直到达到该 workflow 声明的成功条件。" +
   "warning 不阻断交付，但要在最终答复里说明。" +
   '用户要求生成代码时，默认把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
-  "当前工作区落盘时，如果 write_file 可用，必须调用 write_file；不要只用文字声称已经写入。" +
+  "当前工作区落盘时，如果 write_file 或 edit_file 可用，必须调用合适的文件工具；不要只用文字声称已经写入。" +
   "需要查看目录、读文件、搜索代码或执行命令时，只能在对应工具出现在当前可用工具列表时调用。" +
-  "当用户明确要求把内容写入或修改工作区文件时，必须调用 write_file，不能只用文字声称已经写入；" +
+  "当用户明确要求把内容写入工作区文件时，必须调用 write_file；当用户要求局部修改、替换或编辑已有文件时，优先调用 edit_file；" +
   "只有收到工具成功回执后，才能在最终结果中报告写入完成。";
 
 const WORKFLOW_EXECUTION_PROMPT =
@@ -2332,9 +2332,9 @@ export async function runAgent(
         const pathValue = typeof args.path === "string" ? args.path : "目标文件";
         return `读取 ${pathValue} 失败：${error}`;
       }
-      if (requiredTool === "write_file") {
+      if (requiredTool === "write_file" || requiredTool === "edit_file") {
         const pathValue = typeof args.path === "string" ? args.path : "目标文件";
-        return `写入 ${pathValue} 失败：${error}`;
+        return `${requiredTool === "edit_file" ? "修改" : "写入"} ${pathValue} 失败：${error}`;
       }
       if (requiredTool === "run_command") {
         const data = call.result.data && typeof call.result.data === "object"
@@ -2366,10 +2366,14 @@ export async function runAgent(
       }
       return `已读取 ${pathValue}${totalLines}${content ? "，内容较长，请查看上方工具执行详情。" : "。"}`;
     }
-    if (requiredTool === "write_file") {
+    if (requiredTool === "write_file" || requiredTool === "edit_file") {
       const file = typeof data.file === "string"
         ? data.file
         : typeof args.path === "string" ? args.path : "目标文件";
+      if (requiredTool === "edit_file") {
+        const changed = data.changed === true ? "已修改" : "内容无变化";
+        return `${changed} ${file}${typeof data.editsApplied === "number" ? ` · ${data.editsApplied} 处编辑` : ""}，具体 diff 请查看上方工具结果。`;
+      }
       const bytes = typeof data.bytes === "number" ? ` · ${data.bytes} 字节` : "";
       return `已写入 ${file}${bytes}。`;
     }
