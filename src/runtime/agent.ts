@@ -85,6 +85,7 @@ import {
   deliveryContractDecisionSchema,
   renderDeliveryContract,
   type DeliveryContract,
+  type DeliveryEvidence,
 } from "./deliveryContract";
 import {
   createWorkflowRuntime,
@@ -1783,6 +1784,7 @@ export async function runAgent(
   const workflowState = createDeliveryWorkflowRuntimeState();
   const toolRegistry = options.toolRegistry ?? getDefaultToolRegistry();
   const registeredToolRisks = toolRegistry.riskMap();
+  const registeredToolEvidence = toolRegistry.evidenceMap();
   const toolRisk = (name: string): ToolRisk =>
     name === "deliver_artifact" || name === "report_plan_progress"
       ? "plan"
@@ -1916,6 +1918,12 @@ export async function runAgent(
           }),
       })
     : undefined;
+  const toolEvidence: Record<string, readonly DeliveryEvidence[]> = {
+    ...registeredToolEvidence,
+    ...(artifactDeliveryTool
+      ? { deliver_artifact: ["final_artifact"] }
+      : {}),
+  };
   const reportDiagnostics: DiagnosticSideReporter = (report) => {
     if (!options.protocol.eventFactory) return;
     options.protocol.onEvent(
@@ -2413,6 +2421,8 @@ export async function runAgent(
        ],
       artifacts: [...artifacts, ...deliveredArtifactsFromTools()],
       deliveryContract: options.deliveryContract,
+      workflowAdapter: deliveryWorkflow,
+      toolEvidence,
     });
 
   const workflowToolRecords = () => [
@@ -2636,9 +2646,7 @@ export async function runAgent(
     );
     if (workflowRepairTool) return workflowRepairTool;
 
-    // Verification is the first dependency in a delivery workflow. Once a
-    // contract says a validator is required, force that named tool instead of
-    // hoping the model will remember it from a repair paragraph.
+    // Contract-named verification tools are the first repair dependency.
     const verificationIssue = gate.issues.find(
       (issue) => issue.toolName === "delivery_verification",
     );
@@ -2654,7 +2662,7 @@ export async function runAgent(
           return parsed.tool;
         }
       } catch {
-        // Continue with the delivery evidence fallback below.
+        // Continue with the contract evidence fallback below.
       }
     }
 
@@ -2667,29 +2675,26 @@ export async function runAgent(
           acceptableEvidence?: unknown;
           workspacePersistence?: unknown;
         };
-        const acceptableEvidence = Array.isArray(deliverable.acceptableEvidence)
+        const evidence = Array.isArray(deliverable.acceptableEvidence)
           ? deliverable.acceptableEvidence.filter(
-              (value): value is string => typeof value === "string",
+              (value): value is DeliveryEvidence =>
+                value === "final_artifact" ||
+                value === "successful_tool" ||
+                value === "successful_write" ||
+                value === "successful_export",
             )
           : [];
-        if (
-          (deliverable.workspacePersistence === "required" ||
-            acceptableEvidence.includes("successful_write")) &&
-          availableToolNames.has("write_file")
-        ) {
-          return "write_file";
-        }
-        if (
-          acceptableEvidence.includes("successful_export") &&
-          availableToolNames.has("export_st_program")
-        ) {
-          return "export_st_program";
-        }
-        if (
-          acceptableEvidence.includes("final_artifact") &&
-          availableToolNames.has("deliver_artifact")
-        ) {
-          return "deliver_artifact";
+        const preferredEvidence: DeliveryEvidence[] =
+          deliverable.workspacePersistence === "required"
+            ? ["successful_write", ...evidence]
+            : evidence;
+        for (const requiredEvidence of preferredEvidence) {
+          const providerTool = Object.entries(toolEvidence).find(
+            ([name, capabilities]) =>
+              availableToolNames.has(name) &&
+              capabilities.includes(requiredEvidence),
+          )?.[0];
+          if (providerTool) return providerTool;
         }
       } catch {
         // The completion gate already reports the malformed contract evidence.

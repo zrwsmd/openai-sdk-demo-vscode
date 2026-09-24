@@ -179,6 +179,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -220,6 +221,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -263,6 +265,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -310,6 +313,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -370,6 +374,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -419,6 +424,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -469,6 +475,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -519,6 +526,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(
@@ -556,6 +564,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       required: true,
       acceptableEvidence: ['final_artifact'],
       workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
     }],
   });
   const r = await runTestTurn(

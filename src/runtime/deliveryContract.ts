@@ -44,6 +44,7 @@ export const deliveryContractSchema = deliveryContractDecisionSchema.extend({
 
 export type DeliveryContract = z.infer<typeof deliveryContractSchema>;
 export type DeliveryContractDecision = z.infer<typeof deliveryContractDecisionSchema>;
+export type DeliveryEvidence = z.infer<typeof deliveryEvidenceSchema>;
 
 function compact(value: string, maxLength: number): string {
   return value.trim().replace(/\s+/g, ' ').slice(0, maxLength);
@@ -63,9 +64,6 @@ function normalizeDeliverable(item: DeliveryItem) {
   }
   const extension = item.workspaceFileExtension?.trim();
   const requiredVerificationTools = new Set(item.requiredVerificationTools ?? []);
-  if (item.kind === 'code' && extension?.toLowerCase() === '.st') {
-    requiredVerificationTools.add('validate_st_code');
-  }
   return {
     ...item,
     title: compact(item.title, 120) || '交付物',

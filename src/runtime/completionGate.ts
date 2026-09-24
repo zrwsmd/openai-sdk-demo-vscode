@@ -1,55 +1,43 @@
 import type { Artifact, ToolResult } from '../protocol/results';
-import type { RequiredAgentTool } from '../policy/actionPolicy';
 import type { DeliveryContract } from './deliveryContract';
-import { isStCodeDeliveryContract } from './workflows/stDeliveryContract';
+import type {
+  CompletionGateInput,
+  CompletionGateIssue,
+  CompletionGateResult,
+  CompletionGateToolRecord,
+  CompletionGateWorkflowContext,
+} from './completionTypes';
 
-export interface CompletionGateToolRecord {
-  name: string;
-  args: string;
-  result: ToolResult;
-  order?: number;
-}
-
-export interface CompletionGateInput {
-  userText: string;
-  finalMessage: string;
-  toolResults: CompletionGateToolRecord[];
-  requiredTool?: RequiredAgentTool;
-  artifacts?: Artifact[];
-  deliveryContract?: DeliveryContract;
-}
-
-export interface CompletionGateIssue {
-  toolName: string;
-  args: string;
-  targetKey: string;
-  order: number;
-  risk: ToolResult['risk'];
-  effect: ToolResult['effect'];
-  summary: string;
-  requiresRepair: boolean;
-}
-
-export type CompletionGateResult =
-  | { passed: true }
-  | {
-      passed: false;
-      reason: string;
-      repairInstruction: string;
-      issues: CompletionGateIssue[];
-    };
+export type {
+  CompletionGateInput,
+  CompletionGateIssue,
+  CompletionGateResult,
+  CompletionGateToolRecord,
+  CompletionGateWorkflowAdapter,
+  CompletionGateWorkflowContext,
+} from './completionTypes';
 
 const BLOCKING_DIAGNOSTIC_SEVERITIES = new Set(['error', 'blocking']);
 
 export function evaluateCompletionGate(
   input: CompletionGateInput,
 ): CompletionGateResult {
-  const records = input.toolResults
-    .map((record, index) => ({ ...record, order: record.order ?? index + 1 }))
-    .sort((a, b) => a.order - b.order);
+  const records = normalizeToolRecordOrder(input.toolResults);
+  const artifacts = [
+    ...(input.artifacts ?? []),
+    ...(input.workflowAdapter?.collectArtifacts?.(records) ?? []),
+  ];
+  const workflowContext: CompletionGateWorkflowContext = {
+    userText: input.userText,
+    finalMessage: input.finalMessage,
+    deliveryContract: input.deliveryContract,
+    records,
+    artifacts,
+  };
+  const normalizedInput = { ...input, artifacts };
   const unresolvedIssues = [
-    ...collectUnresolvedIssues(records, input),
-    ...collectDeliveryContractIssues(input, records),
+    ...collectUnresolvedIssues(records, normalizedInput, workflowContext),
+    ...collectDeliveryContractIssues(normalizedInput, records, workflowContext),
   ];
   if (!unresolvedIssues.length) return { passed: true };
 
@@ -82,11 +70,39 @@ export function evaluateCompletionGate(
 function collectUnresolvedIssues(
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
+  workflowContext: CompletionGateWorkflowContext,
 ): CompletionGateIssue[] {
-  const issues = records
+  const toolIssues = records
     .map((record) => issueFromToolResult(record, input))
     .filter((issue): issue is CompletionGateIssue => issue !== undefined);
-  return issues.filter((issue) => !hasLaterResolution(issue, records, input));
+  const workflowIssues = input.workflowAdapter?.collectIssues?.(workflowContext) ?? [];
+  const issues = [...toolIssues, ...workflowIssues];
+  return issues.filter((issue) =>
+    !hasLaterResolution(issue, records, input, workflowContext),
+  );
+}
+
+function normalizeToolRecordOrder(
+  toolResults: CompletionGateToolRecord[],
+): (CompletionGateToolRecord & { order: number })[] {
+  const suppliedOrders = toolResults
+    .map((record) => record.order)
+    .filter((order): order is number => Number.isFinite(order));
+  const hasDuplicateOrders = new Set(suppliedOrders).size !== suppliedOrders.length;
+
+  // A resumed run combines records whose local counters both start at one.
+  // When that happens, the input sequence is the durable chronology; rebasing
+  // it keeps "later success resolves earlier failure" deterministic.
+  if (hasDuplicateOrders) {
+    return toolResults.map((record, index) => ({
+      ...record,
+      order: index + 1,
+    }));
+  }
+
+  return toolResults
+    .map((record, index) => ({ ...record, order: record.order ?? index + 1 }))
+    .sort((a, b) => a.order - b.order);
 }
 
 function issueFromToolResult(
@@ -123,6 +139,7 @@ function issueFromToolResult(
     toolName: record.name,
     args: record.args,
     targetKey: targetKeyFor(record),
+    target: targetFor(record),
     order: record.order,
     risk: record.result.risk,
     effect: record.result.effect,
@@ -135,9 +152,13 @@ function hasLaterResolution(
   issue: CompletionGateIssue,
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
+  workflowContext: CompletionGateWorkflowContext,
 ): boolean {
+  const workflowResolution =
+    input.workflowAdapter?.resolveIssue?.(issue, workflowContext);
+  if (workflowResolution !== undefined) return workflowResolution;
   if (hasLaterDirectResolution(issue, records, input)) return true;
-  return hasLaterDeliveryResolution(issue, records, input);
+  return hasLaterDeliveryResolution(issue, records, input, workflowContext);
 }
 
 function hasLaterDirectResolution(
@@ -157,79 +178,46 @@ function hasLaterDeliveryResolution(
   issue: CompletionGateIssue,
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
+  workflowContext: CompletionGateWorkflowContext,
 ): boolean {
   const contract = input.deliveryContract;
   if (!contract?.requiresDeliverable) return false;
   const laterRecords = records.filter((record) => record.order > issue.order);
   const deliverables = contract.deliverables.filter((deliverable) => deliverable.required);
-
   if (
-    isStCodeDeliveryContract(contract) &&
-    (issue.toolName === 'validate_st_code' ||
-      issue.toolName === 'write_file' ||
-      issue.toolName === 'delivery_verification') &&
-    hasValidatedStWrite(records)
+    deliverables.some((deliverable) =>
+      deliverable.requiredVerificationTools?.includes(issue.toolName),
+    ) &&
+    hasSuccessfulVerification(
+      issue.toolName,
+      laterRecords,
+      input,
+      { ...workflowContext, records: laterRecords },
+    )
   ) {
     return true;
   }
-
-  if (issue.toolName === 'write_file') {
-    return deliverables.some((deliverable) =>
-      hasToolEvidence('successful_write', laterRecords, deliverable),
-    );
-  }
-
-  if (issue.toolName === 'export_st_program') {
-    return deliverables.some((deliverable) =>
-      hasToolEvidence('successful_export', laterRecords, deliverable),
-    );
-  }
-
+  const issueEvidence = input.toolEvidence?.[issue.toolName] ?? [];
   return deliverables.some((deliverable) =>
-    deliverable.requiredVerificationTools?.includes(issue.toolName) &&
-    hasSuccessfulVerification(issue.toolName, laterRecords),
+    deliverable.acceptableEvidence.some((evidence) =>
+      issueEvidence.includes(evidence) &&
+      laterRecords.some((record) =>
+        resolvesSameTarget(issue, record) &&
+        hasToolEvidence(evidence, [record], deliverable, input),
+      ),
+    ),
   );
 }
 
-function hasValidatedStWrite(
-  records: (CompletionGateToolRecord & { order: number })[],
+function resolvesSameTarget(
+  issue: CompletionGateIssue,
+  record: CompletionGateToolRecord,
 ): boolean {
-  const validationHashes = new Set<string>();
-  for (const record of records) {
-    if (record.name !== 'validate_st_code' || !toolResultSucceeded(record.result)) continue;
-    const data = record.result.data;
-    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
-    const value = data as Record<string, unknown>;
-    if (value.errorCount !== 0) continue;
-    const target = value.validationTarget;
-    const targetHash = target && typeof target === 'object' && !Array.isArray(target)
-      ? (target as Record<string, unknown>).contentHash
-      : undefined;
-    const hash = typeof value.validatedContentHash === 'string'
-      ? value.validatedContentHash
-      : typeof targetHash === 'string' ? targetHash : undefined;
-    if (hash) validationHashes.add(hash);
+  const candidateTarget = targetFor(record);
+  if (issue.target && candidateTarget) {
+    return normalizeTarget(issue.target) === normalizeTarget(candidateTarget);
   }
-  return records.some((record) => {
-    if (record.name !== 'write_file' || !toolResultSucceeded(record.result)) return false;
-    const data = record.result.data;
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
-    const value = data as Record<string, unknown>;
-    const preWriteHash = preWriteValidationHash(value);
-    if (
-      typeof value.file === 'string' &&
-      value.file.toLowerCase().endsWith('.st') &&
-      typeof value.contentHash === 'string' &&
-      preWriteHash === value.contentHash
-    ) {
-      return true;
-    }
-    if (!validationHashes.size) return false;
-    return typeof value.file === 'string' &&
-      value.file.toLowerCase().endsWith('.st') &&
-      typeof value.contentHash === 'string' &&
-      validationHashes.has(value.contentHash);
-  });
+  return !issue.target && record.name === issue.toolName;
 }
 
 function shouldRequireRepair(result: ToolResult, input: CompletionGateInput): boolean {
@@ -240,13 +228,16 @@ function shouldRequireRepair(result: ToolResult, input: CompletionGateInput): bo
 function collectDeliveryContractIssues(
   input: CompletionGateInput,
   records: (CompletionGateToolRecord & { order: number })[],
+  workflowContext: CompletionGateWorkflowContext,
 ): CompletionGateIssue[] {
   const contract = input.deliveryContract;
   if (!contract?.requiresDeliverable) return [];
   const artifacts = input.artifacts ?? [];
   const deliveryIssues = contract.deliverables
     .filter((deliverable) => deliverable.required)
-    .filter((deliverable) => !hasDeliveryEvidence(deliverable, artifacts, records))
+    .filter((deliverable) =>
+      !hasDeliveryEvidence(deliverable, artifacts, records, input),
+    )
     .map((deliverable, index) => ({
       toolName: 'delivery_contract',
       args: JSON.stringify(deliverable),
@@ -261,7 +252,9 @@ function collectDeliveryContractIssues(
     .filter((deliverable) => deliverable.required)
     .flatMap((deliverable, deliverableIndex) =>
       (deliverable.requiredVerificationTools ?? [])
-        .filter((toolName) => !hasSuccessfulVerification(toolName, records))
+        .filter((toolName) =>
+          !hasSuccessfulVerification(toolName, records, input, workflowContext),
+        )
         .map((toolName, verificationIndex) => ({
           toolName: 'delivery_verification',
           args: JSON.stringify({ deliverable: deliverable.title, tool: toolName }),
@@ -280,16 +273,17 @@ function hasDeliveryEvidence(
   deliverable: DeliveryContract['deliverables'][number],
   artifacts: Artifact[],
   records: (CompletionGateToolRecord & { order: number })[],
+  input: CompletionGateInput,
 ): boolean {
   if (
     deliverable.workspacePersistence === 'required' &&
-    !hasToolEvidence('successful_write', records, deliverable)
+    !hasToolEvidence('successful_write', records, deliverable, input)
   ) {
     return false;
   }
   return deliverable.acceptableEvidence.some((evidence) => {
     if (evidence === 'final_artifact') return hasArtifactEvidence(deliverable, artifacts);
-    return hasToolEvidence(evidence, records, deliverable);
+    return hasToolEvidence(evidence, records, deliverable, input);
   });
 }
 
@@ -305,7 +299,13 @@ function hasArtifactEvidence(
     if (!hasPayload) return false;
     if (deliverable.kind === 'unknown') return true;
     if (artifact.kind === deliverable.kind || artifact.kind === 'unknown') return true;
-    if (deliverable.kind === 'code') return artifact.kind === 'file' && hasCodeLikeName(artifact.name);
+    if (deliverable.kind === 'code') {
+      if (artifact.kind === 'code') return true;
+      const extension = deliverable.workspaceFileExtension?.toLowerCase();
+      return artifact.kind === 'file' &&
+        !!extension &&
+        artifact.name.toLowerCase().endsWith(extension);
+    }
     if (deliverable.kind === 'text') return artifact.kind === 'report' || artifact.kind === 'file' || artifact.kind === 'data';
     if (deliverable.kind === 'report') return artifact.kind === 'file' || artifact.kind === 'data';
     if (deliverable.kind === 'data') return artifact.kind === 'file';
@@ -315,21 +315,23 @@ function hasArtifactEvidence(
   });
 }
 
-function hasCodeLikeName(name: string): boolean {
-  return /\.(?:st|scl|iecst|c|cpp|h|hpp|cs|java|js|jsx|ts|tsx|py|go|rs|json|yaml|yml|xml|sql)$/i.test(name);
-}
-
 function hasToolEvidence(
   evidence: DeliveryContract['deliverables'][number]['acceptableEvidence'][number],
   records: (CompletionGateToolRecord & { order: number })[],
   deliverable: DeliveryContract['deliverables'][number],
+  input: CompletionGateInput,
 ): boolean {
   return records.some((record) => {
     if (!toolResultSucceeded(record.result)) return false;
     if (evidence === 'successful_tool') return true;
     if (evidence === 'successful_write') {
+      if (
+        input.toolEvidence &&
+        !input.toolEvidence[record.name]?.includes(evidence)
+      ) {
+        return false;
+      }
       const isWrite =
-        record.name === 'write_file' ||
         record.result.risk === 'write' ||
         record.result.effect === 'filesystem' ||
         record.result.effect === 'device';
@@ -339,7 +341,7 @@ function hasToolEvidence(
       const filePath = filePathFor(record);
       return !!filePath && filePath.toLowerCase().endsWith(extension);
     }
-    if (evidence === 'successful_export') return record.name === 'export_st_program' || record.name.toLowerCase().includes('export');
+    if (input.toolEvidence?.[record.name]?.includes(evidence)) return true;
     return false;
   });
 }
@@ -347,36 +349,16 @@ function hasToolEvidence(
 function hasSuccessfulVerification(
   toolName: string,
   records: (CompletionGateToolRecord & { order: number })[],
+  input: CompletionGateInput,
+  workflowContext: CompletionGateWorkflowContext,
 ): boolean {
+  const workflowResult =
+    input.workflowAdapter?.hasSuccessfulVerification?.(toolName, workflowContext);
+  if (workflowResult !== undefined) return workflowResult;
   return records.some((record) => {
-    if (toolName === 'validate_st_code' && hasSuccessfulStPreWriteValidation(record)) return true;
     if (record.name !== toolName || !toolResultSucceeded(record.result)) return false;
-    if (toolName !== 'validate_st_code') return true;
-    const data = record.result.data;
-    return !!data &&
-      typeof data === 'object' &&
-      !Array.isArray(data) &&
-      (data as Record<string, unknown>).errorCount === 0;
+    return true;
   });
-}
-
-function hasSuccessfulStPreWriteValidation(record: CompletionGateToolRecord): boolean {
-  if (record.name !== 'write_file' || !toolResultSucceeded(record.result)) return false;
-  const data = record.result.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
-  const value = data as Record<string, unknown>;
-  return typeof value.contentHash === 'string' &&
-    preWriteValidationHash(value) === value.contentHash;
-}
-
-function preWriteValidationHash(data: Record<string, unknown>): string | undefined {
-  const preWrite = data.preWriteValidation;
-  if (!preWrite || typeof preWrite !== 'object' || Array.isArray(preWrite)) return undefined;
-  const value = preWrite as Record<string, unknown>;
-  if (value.errorCount !== 0) return undefined;
-  return typeof value.validatedContentHash === 'string'
-    ? value.validatedContentHash
-    : undefined;
 }
 
 function toolResultSucceeded(result: ToolResult): boolean {

@@ -19,6 +19,9 @@ export function createCoreToolProvider(): ToolProvider {
   return {
     id: "core",
     riskByTool: CORE_TOOL_RISKS,
+    evidenceByTool: {
+      write_file: ["successful_write"],
+    },
     createTools(context): readonly Tool[] {
       const {
         getIoTable,

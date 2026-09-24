@@ -1,6 +1,10 @@
 import path from "node:path";
 import type { Artifact, ToolResult } from "../../protocol/results";
-import type { CompletionGateResult } from "../completionGate";
+import type {
+  CompletionGateIssue,
+  CompletionGateResult,
+  CompletionGateWorkflowContext,
+} from "../completionTypes";
 import type { DeliveryContract } from "../deliveryContract";
 import {
   ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
@@ -171,6 +175,49 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     return undefined;
   }
 
+  collectArtifacts(records: WorkflowToolRecord[]): Artifact[] {
+    return records
+      .map((record) => this.verifyRequiredAction(record))
+      .filter((artifact): artifact is Artifact => artifact !== undefined);
+  }
+
+  resolveIssue(
+    issue: CompletionGateIssue,
+    context: CompletionGateWorkflowContext,
+  ): boolean | undefined {
+    if (!isStCodeDeliveryContract(context.deliveryContract)) return undefined;
+    const laterRecords = context.records.filter(
+      (record) => (record.order ?? 0) > issue.order,
+    );
+    if (issue.toolName === "validate_st_code") {
+      return laterRecords.some((record) =>
+        hasSuccessfulStValidationRecord(record) ||
+        hasSuccessfulStPreWriteValidation(record),
+      );
+    }
+    if (issue.toolName === "write_file") {
+      return hasValidatedStWrite(context.records, issue.order);
+    }
+    if (issue.toolName === "export_st_program") {
+      return hasValidatedStExport(context.records, issue.order);
+    }
+    if (issue.toolName === "delivery_verification") {
+      return hasValidatedStWrite(context.records);
+    }
+    return undefined;
+  }
+
+  hasSuccessfulVerification(
+    toolName: string,
+    context: CompletionGateWorkflowContext,
+  ): boolean | undefined {
+    if (toolName !== "validate_st_code") return undefined;
+    return context.records.some((record) =>
+      hasSuccessfulStValidationRecord(record) ||
+      hasSuccessfulStPreWriteValidation(record),
+    );
+  }
+
   authoritativeMessage(records: WorkflowToolRecord[]): string | undefined {
     if (!isStCodeDeliveryContract(this.contract)) return undefined;
     const validationHashes = successfulStValidationHashes(records);
@@ -297,26 +344,106 @@ function hasSuccessfulStValidation(records: WorkflowToolRecord[]): boolean {
   return successfulStValidationHashes(records).size > 0;
 }
 
-function hasValidatedStWrite(records: WorkflowToolRecord[]): boolean {
-  const validationHashes = successfulStValidationHashes(records);
-  return records.some((record) => {
-    if (record.name !== "write_file" || !record.result.ok) return false;
+function hasSuccessfulStValidationRecord(record: WorkflowToolRecord): boolean {
+  if (record.name !== "validate_st_code" || !record.result.ok) return false;
+  return resultData(record.result).errorCount === 0;
+}
+
+function hasSuccessfulStPreWriteValidation(record: WorkflowToolRecord): boolean {
+  if (record.name !== "write_file" || !record.result.ok) return false;
+  const data = resultData(record.result);
+  const preWriteHash = preWriteValidationHash(data);
+  return typeof data.contentHash === "string" && preWriteHash === data.contentHash;
+}
+
+function hasValidatedStExport(
+  records: WorkflowToolRecord[],
+  afterOrder = Number.NEGATIVE_INFINITY,
+): boolean {
+  const validationHashes = new Set<string>();
+  const ordered = records
+    .map((record, index) => ({ ...record, order: record.order ?? index + 1 }))
+    .sort((a, b) => a.order - b.order);
+  for (const record of ordered) {
+    const validatedHash = successfulValidationHashForRecord(record);
+    if (validatedHash) validationHashes.add(validatedHash);
+    if (
+      record.order <= afterOrder ||
+      record.name !== "export_st_program" ||
+      !record.result.ok
+    ) {
+      continue;
+    }
     const data = resultData(record.result);
-    const preWriteHash = preWriteValidationHash(data);
+    const args = parseArgs(record.args);
+    const code = typeof args.code === "string" ? args.code : undefined;
+    const file = typeof data.file === "string" ? data.file : undefined;
+    const hash = typeof data.contentHash === "string"
+      ? data.contentHash
+      : code ? hashStContent(code) : undefined;
+    if (
+      file?.toLowerCase().endsWith(".st") &&
+      hash &&
+      validationHashes.has(hash)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasValidatedStWrite(
+  records: WorkflowToolRecord[],
+  afterOrder = Number.NEGATIVE_INFINITY,
+): boolean {
+  const validationHashes = new Set<string>();
+  const ordered = records
+    .map((record, index) => ({ ...record, order: record.order ?? index + 1 }))
+    .sort((a, b) => a.order - b.order);
+  for (const record of ordered) {
+    const validatedHash = successfulValidationHashForRecord(record);
+    if (validatedHash) validationHashes.add(validatedHash);
+    if (
+      record.order <= afterOrder ||
+      record.name !== "write_file" ||
+      !record.result.ok
+    ) {
+      continue;
+    }
+    const data = resultData(record.result);
     if (
       typeof data.file === "string" &&
       data.file.toLowerCase().endsWith(".st") &&
       typeof data.contentHash === "string" &&
-      preWriteHash === data.contentHash
+      validationHashes.has(data.contentHash)
     ) {
       return true;
     }
-    if (!validationHashes.size) return false;
-    return typeof data.file === "string" &&
-      data.file.toLowerCase().endsWith(".st") &&
-      typeof data.contentHash === "string" &&
-      validationHashes.has(data.contentHash);
-  });
+  }
+  return false;
+}
+
+function successfulValidationHashForRecord(
+  record: WorkflowToolRecord,
+): string | undefined {
+  if (!record.result.ok) return undefined;
+  const data = resultData(record.result);
+  if (record.name === "validate_st_code" && data.errorCount === 0) {
+    const target = data.validationTarget;
+    const targetHash = target && typeof target === "object" && !Array.isArray(target)
+      ? (target as Record<string, unknown>).contentHash
+      : undefined;
+    return typeof data.validatedContentHash === "string"
+      ? data.validatedContentHash
+      : typeof targetHash === "string" ? targetHash : undefined;
+  }
+  if (record.name === "write_file") {
+    const preWriteHash = preWriteValidationHash(data);
+    if (typeof data.contentHash === "string" && preWriteHash === data.contentHash) {
+      return preWriteHash;
+    }
+  }
+  return undefined;
 }
 
 function preWriteValidationHash(data: Record<string, unknown>): string | undefined {

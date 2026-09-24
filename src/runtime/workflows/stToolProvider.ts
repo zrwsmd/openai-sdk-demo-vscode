@@ -88,6 +88,9 @@ export function createStToolProvider(): ToolProvider {
   return {
     id: "st",
     riskByTool: ST_TOOL_RISKS,
+    evidenceByTool: {
+      export_st_program: ["successful_export", "successful_write"],
+    },
     createTools(context): readonly Tool[] {
       const stContext = createStToolBuildContext(context);
       const validationTools = createValidateStTools(stContext);

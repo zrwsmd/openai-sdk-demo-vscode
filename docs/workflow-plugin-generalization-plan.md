@@ -37,7 +37,7 @@
 - [x] 3. 把 Jev、规则、模型判定统一到通用 Workflow 决策链
 - [x] 4. 重构工具注册机制，公共层只认识通用 Tool Provider
 - [x] 5. 让 `write_file` 变成真正通用的文件工具
-- [ ] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
+- [x] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
 - [ ] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
 - [ ] 8. 迁移 ST 功能为正式插件
 - [ ] 9. 用非 ST Workflow 验证通用性
@@ -216,3 +216,25 @@ node scripts/run_coordinator_test.mjs
 - 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
   `npm run test:batch`、`npm run test:agent`、`npm run test:st`、`npm run test:jev`
   均通过；Agent 测试使用本地 mock gateway。
+
+### 6. 通用 Completion Gate
+
+- 新增 `src/runtime/completionTypes.ts`，把 Completion Gate 的记录、问题、结果、
+  Workflow Adapter 和上下文类型从领域模块中抽出，避免公共 Gate 与插件互相依赖。
+- `completionGate.ts` 只依据通用工具结果、交付契约、Provider 声明的
+  `DeliveryEvidence` 和可选 Workflow Completion Adapter 判定完成；移除了 ST 契约、
+  ST 工具名、ST 扩展名和 ST 内容哈希判断。
+- `ToolRegistry` 增加工具证据能力表；Core Provider 声明通用写入证据，ST Provider
+  声明导出/写入证据。`Agent` 通过能力表选择修复工具，不再在公共 Agent 逻辑里写死
+  领域工具名。
+- ST 交付 Workflow 自己提供完成产物、失败恢复、验证证据和权威结果消息；ST 代码契约
+  显式声明验证工具，不再由公共 `deliveryContract` 根据文件扩展名隐式补充。
+- Completion Gate 统一处理恢复运行中重复的局部工具序号，保证历史失败与恢复后的成功
+  结果仍按真实输入顺序判断，避免重复序号导致后续成功无法解决前序失败。
+- 新增 Provider 证据、跨目标写入隔离、哈希不一致阻断、契约显式验证和恢复重复序号
+  回归测试；Agent 端覆盖 ST 预写校验、摘要误判、草稿修复、审批折叠和恢复流程。
+- 阶段测试：`npx tsc --noEmit`、`npm run test:batch`、`npm run test:agent`、
+  `npm run test:st`、`npm run test:jev` 均通过；Agent 测试使用本地 mock gateway。
+- 边界扫描确认 `completionGate.ts`、`completionTypes.ts`、`deliveryContract.ts`、
+  `toolRegistry.ts` 和 `toolBuildContext.ts` 没有 ST 专用工具名、分析器或扩展名业务
+  判断。未修改 `src/analysis/*` 或 `st-analyze` 桥。

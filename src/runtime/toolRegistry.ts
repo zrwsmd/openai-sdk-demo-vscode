@@ -1,5 +1,6 @@
 import type { Tool } from "@openai/agents";
 import type { ToolRisk } from "../tools/toolContract";
+import type { DeliveryEvidence } from "./deliveryContract";
 import type { AgentConfig } from "./agentConfig";
 import {
   commandToolResult,
@@ -27,12 +28,14 @@ export type ToolProviderContext = ToolBuildContext;
 export interface ToolProvider {
   id: string;
   riskByTool?: Readonly<Record<string, ToolRisk>>;
+  evidenceByTool?: Readonly<Record<string, readonly DeliveryEvidence[]>>;
   createTools(context: ToolProviderContext): readonly Tool[];
 }
 
 export class ToolRegistry {
   private readonly providers = new Map<string, ToolProvider>();
   private readonly risks = new Map<string, ToolRisk>();
+  private readonly evidence = new Map<string, Set<DeliveryEvidence>>();
 
   constructor(initial: readonly ToolProvider[] = []) {
     this.registerMany(initial);
@@ -57,6 +60,11 @@ export class ToolRegistry {
     for (const [toolName, risk] of Object.entries(provider.riskByTool ?? {})) {
       this.risks.set(toolName, risk);
     }
+    for (const [toolName, evidence] of Object.entries(provider.evidenceByTool ?? {})) {
+      const registered = this.evidence.get(toolName) ?? new Set<DeliveryEvidence>();
+      for (const item of evidence) registered.add(item);
+      this.evidence.set(toolName, registered);
+    }
     return this;
   }
 
@@ -75,6 +83,18 @@ export class ToolRegistry {
 
   riskMap(): Readonly<Record<string, ToolRisk>> {
     return Object.fromEntries(this.risks);
+  }
+
+  evidenceMap(): Readonly<Record<string, readonly DeliveryEvidence[]>> {
+    return Object.fromEntries(
+      [...this.evidence].map(([name, evidence]) => [name, [...evidence]]),
+    );
+  }
+
+  toolsForEvidence(evidence: DeliveryEvidence): readonly string[] {
+    return [...this.evidence]
+      .filter(([, values]) => values.has(evidence))
+      .map(([name]) => name);
   }
 
   createTools(options: {

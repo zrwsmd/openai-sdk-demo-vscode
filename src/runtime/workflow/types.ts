@@ -1,6 +1,9 @@
 import type { AgentInputItem } from "@openai/agents";
 import type { Artifact, ToolResult } from "../../protocol/results";
-import type { CompletionGateResult } from "../completionGate";
+import type {
+  CompletionGateResult,
+  CompletionGateWorkflowAdapter,
+} from "../completionTypes";
 import type { DeliveryContract } from "../deliveryContract";
 import type { PipelineStagePlan } from "../pipeline/stagePlan";
 import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
@@ -61,7 +64,7 @@ export interface WorkflowToolPolicy {
   readonly parallelToolCalls: boolean;
 }
 
-export interface WorkflowCompletionAdapter {
+export interface WorkflowCompletionAdapter extends CompletionGateWorkflowAdapter {
   chooseRepairTool(
     gate: Exclude<CompletionGateResult, { passed: true }>,
     records: WorkflowToolRecord[],

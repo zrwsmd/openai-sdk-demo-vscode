@@ -55,6 +55,8 @@ assert(!coreToolNames.includes('validate_st_code'));
 assert(!coreToolNames.includes('st_dependency_map'));
 assert.equal(coreTools.getRisk('write_file'), 'write');
 assert.equal(coreTools.getRisk('validate_st_code'), undefined);
+assert.deepEqual(coreTools.toolsForEvidence('successful_write'), ['write_file']);
+assert.deepEqual(coreTools.toolsForEvidence('successful_export'), []);
 
 const appTools = createAppToolRegistry();
 const allTools = appTools.createTools({ cfg: toolConfig });
@@ -63,6 +65,7 @@ assert(allToolNames.includes('validate_st_code'));
 assert(allToolNames.includes('st_dependency_map'));
 assert.equal(appTools.getRisk('validate_st_code'), 'plan');
 assert.equal(appTools.getRisk('export_st_program'), 'write');
+assert(appTools.toolsForEvidence('successful_export').includes('export_st_program'));
 assert.throws(
   () => new ToolRegistry([createCoreToolProvider(), createStToolProvider(), createStToolProvider()]),
   /already registered/,
