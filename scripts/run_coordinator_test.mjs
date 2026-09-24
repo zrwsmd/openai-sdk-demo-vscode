@@ -274,6 +274,72 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A local Jev high-risk fallback must stop before delivery classification and
+// automatic Team/planner preparation just like a model-produced fallback.
+{
+  let deliveryClassifierCalls = 0;
+  let routeCalls = 0;
+  let planCalls = 0;
+  let executorCalls = 0;
+  const test = await fixture(async () => {
+    executorCalls += 1;
+    return {
+      status: 'completed',
+      output: 'blocked fallback completed',
+      usage,
+      result: completedAgentResult('blocked fallback completed'),
+    };
+  }, async () => {
+    planCalls += 1;
+    return undefined;
+  }, {
+    decisionService: {
+      taskHint: async () => ({
+        delivery: 'required',
+        deliveryConfidence: 0.95,
+        orchestration: 'single',
+        orchestrationConfidence: 0.95,
+        workflow: 'unknown',
+        workflowConfidence: 0,
+        toolNeeds: {
+          readFile: { value: 'no', confidence: 0.95 },
+          writeFile: { value: 'yes', confidence: 0.95 },
+          runCommand: { value: 'yes', confidence: 0.95 },
+        },
+        riskLevel: 'critical',
+        riskConfidence: 0.99,
+        needsApproval: { value: 'yes', confidence: 0.99 },
+        evaluation: { status: 'ok' },
+      }),
+    },
+    classifyDeliveryContract: async () => {
+      deliveryClassifierCalls += 1;
+      return undefined;
+    },
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      return undefined;
+    },
+  });
+  await test.coordinator.start(
+    '执行高风险系统操作',
+    { ...config, orchestration: 'auto' },
+    'key',
+  );
+  const completed = await test.store.getLast();
+  if (
+    deliveryClassifierCalls !== 0 ||
+    routeCalls !== 0 ||
+    planCalls !== 0 ||
+    executorCalls !== 1 ||
+    completed?.status !== 'completed'
+  ) {
+    throw new Error(
+      'local blocked_high_risk fallback did not suppress delivery, routing, and planning',
+    );
+  }
+}
+
 // If a simple request was misplanned and the executor never advances the
 // linear plan, fall back to the ordinary single-agent path instead of failing
 // the run with AgentActionVerificationError.
