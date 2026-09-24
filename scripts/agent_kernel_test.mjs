@@ -18,6 +18,7 @@ import {
   summarizeNonStreamChatCompletionResponse,
   projectNewTurnSessionHistory,
   isToolHistoryItem,
+  composeToolSet,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
@@ -67,6 +68,34 @@ setAgentLogger((line) => diagLines.push(line));
     throw new Error('字节请求体的工具参数没有被修复');
   }
   console.log('[0c] 字节请求体工具参数修复:通过');
+}
+
+// [0d] 业务工具白名单不能误删运行时控制工具。
+{
+  const businessTools = [{ name: 'read_file' }, { name: 'write_file' }];
+  const runtimeTools = [
+    { name: 'report_plan_progress' },
+    { name: 'deliver_artifact' },
+  ];
+  const restricted = composeToolSet(
+    businessTools,
+    runtimeTools,
+    ['read_file'],
+    (item) => item.name,
+  ).map((item) => item.name);
+  const unrestricted = composeToolSet(
+    businessTools,
+    runtimeTools,
+    undefined,
+    (item) => item.name,
+  ).map((item) => item.name);
+  if (restricted.join('|') !== 'read_file|report_plan_progress|deliver_artifact') {
+    throw new Error(`业务白名单错误过滤运行时工具: ${restricted.join('|')}`);
+  }
+  if (unrestricted.join('|') !== 'read_file|write_file|report_plan_progress|deliver_artifact') {
+    throw new Error(`无白名单时工具组装错误: ${unrestricted.join('|')}`);
+  }
+  console.log('[0d] 业务白名单与运行时工具隔离:通过');
 }
 
 // [0b] 非流式 Chat Completions 响应是普通 JSON,不能按 SSE 误判成空完成。
@@ -154,6 +183,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   });
   const r = await runTestTurn('交付物工具回归', noApproval, {
     deliveryContract: contract,
+    allowedToolNames: [],
   }, new JsonFileSession(path.join(dir, 'delivery-session.json')));
   const delivered = r.events.filter(
     (event) => event.type === 'tool.completed' && event.payload.toolName === 'deliver_artifact',

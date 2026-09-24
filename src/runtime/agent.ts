@@ -339,6 +339,29 @@ function toolNameOf(item: unknown): string | undefined {
   return typeof name === "string" && name.length > 0 ? name : undefined;
 }
 
+/**
+ * Apply a workflow/fallback allowlist only to provider-owned business tools.
+ *
+ * Runtime control tools are created by the agent runtime itself and must stay
+ * available whenever the current run requires them. Keeping the two groups
+ * separate prevents a narrow business-tool policy from disabling plan
+ * progress, artifact delivery, or future runtime controls.
+ */
+export function composeToolSet<T>(
+  businessTools: readonly T[],
+  runtimeTools: readonly T[],
+  allowedToolNames: readonly string[] | undefined,
+  getName: (item: T) => string | undefined = (item) => toolNameOf(item),
+): T[] {
+  const visibleBusinessTools = allowedToolNames
+    ? businessTools.filter((item) => {
+        const name = getName(item);
+        return typeof name === "string" && allowedToolNames.includes(name);
+      })
+    : [...businessTools];
+  return [...visibleBusinessTools, ...runtimeTools];
+}
+
 function renderAvailableToolsPrompt(toolNames: readonly string[]): string {
   if (toolNames.length === 0) {
     return "\n\n当前没有可调用工具。不要尝试调用任何工具，只能用文字回答或说明阻塞原因。";
@@ -2017,15 +2040,14 @@ export async function runAgent(
     const name = toolNameOf(item);
     return typeof name === "string" && workflowToolNames.has(name);
   });
-  const tools = [
-    ...registeredTools,
-    ...(planProgressTool ? [planProgressTool] : []),
-    ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
-  ].filter((item) => {
-    if (!options.allowedToolNames) return true;
-    const name = toolNameOf(item);
-    return typeof name === "string" && options.allowedToolNames.includes(name);
-  });
+  const tools = composeToolSet(
+    registeredTools,
+    [
+      ...(planProgressTool ? [planProgressTool] : []),
+      ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
+    ],
+    options.allowedToolNames,
+  );
   const availableToolNameList = tools
     .map(toolNameOf)
     .filter((name): name is string => typeof name === "string");
