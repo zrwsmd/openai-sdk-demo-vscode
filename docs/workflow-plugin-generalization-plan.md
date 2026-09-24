@@ -38,7 +38,7 @@
 - [x] 4. 重构工具注册机制，公共层只认识通用 Tool Provider
 - [x] 5. 让 `write_file` 变成真正通用的文件工具
 - [x] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
-- [ ] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
+- [x] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
 - [ ] 8. 迁移 ST 功能为正式插件
 - [ ] 9. 用非 ST Workflow 验证通用性
 - [ ] 10. 清理兼容层并完成边界封锁
@@ -95,6 +95,28 @@ Completion Gate 只处理通用工具事实、交付契约证据和插件提供�
 
 Agent 和 Coordinator 只接收通用 Runtime Environment、服务容器、Registry 和
 Tool Provider。ST 分析器由宿主作为服务注入，公共层不读取或解释 ST 配置。
+
+本阶段已完成：
+
+- 新增 `src/runtime/services.ts`，公共层只提供不透明的 `RuntimeServiceContainer`。
+- `AgentConfig` 移除 `StAnalyzer` / `StAnalyzerToolOptions` 字段，改为通用 `services`。
+- `RunCoordinator` 移除 `createStAnalyzer` 和 ST 配置读取，改为注入
+  `createRuntimeServices(config)`。
+- `DurableRunConfig` 移除 ST 专用持久化字段，改为可 JSON 持久化的 `extensions`；
+  旧 `stAnalyzerSettings` 仅由宿主适配层兼容读取，不进入公共运行时判断。
+- `analyzerHost` 负责把当前 ST 分析器和工具配额装配成服务；`chatView` 只负责注册宿主
+  工厂和保存扩展配置。
+- `agent.ts` 的验证和成功回执兜底改为读取 workflow / 工具回执提供的通用信息，不再
+  判断 ST 工具名或 ST 文件类型。
+- `src/runtime` 核心边界扫描通过；未修改 `src/analysis/*` 或 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:batch` 通过。
+- `npm run test:agent` 通过（含 mock gateway、断点恢复和工具回执兜底）。
+- `npm run test:st`、`npm run test:workflow`、`npm run test:jev` 通过。
 
 ## 8. ST 正式插件
 

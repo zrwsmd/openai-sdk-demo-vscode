@@ -429,7 +429,7 @@ await test('[13] 工具配额投影', async () => {
   assert.equal(projected.maxDiagnostics, 7);
 });
 
-// [14] 持久化守卫:合法设置可读、旧记录兼容、非法设置被拒
+// [14] 持久化守卫:通用扩展设置可读、旧记录兼容、非法结构被拒
 await test('[14] 持久化守卫', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-run-store-st-'));
   const file = path.join(dir, 'runs.json');
@@ -454,38 +454,71 @@ await test('[14] 持久化守卫', async () => {
       model: 'm',
       exportDir: 'exports',
       workspaceRoot: 'ws',
-      ...(settings === undefined ? {} : { stAnalyzerSettings: settings }),
+      ...(settings === undefined ? {} : { extensions: settings }),
     },
   });
   const writeStore = (active) =>
     fs.writeFile(file, JSON.stringify({ schemaVersion: 1, active, effects: {}, effectAttempts: {} }));
 
   try {
-    // 合法:候选链 + 配额都应原样保留
+    // 合法:插件扩展设置应原样保留
     await writeStore(
       withSettings({
-        launches: [{ exe: 'node.exe', args: ['bridge.cjs'], cwd: 'vendor' }],
-        timeoutMs: 20000,
-        loadWorkspaceContext: true,
-        maxContextFiles: 200,
+        stAnalyzer: {
+          launches: [{ exe: 'node.exe', args: ['bridge.cjs'], cwd: 'vendor' }],
+          timeoutMs: 20000,
+          loadWorkspaceContext: true,
+          maxContextFiles: 200,
+        },
       }),
     );
     const active = await new JsonRunStore(file).getActive();
     assert.ok(active, '合法记录应能读取');
-    assert.equal(active.config.stAnalyzerSettings.timeoutMs, 20000);
-    assert.equal(active.config.stAnalyzerSettings.launches[0].exe, 'node.exe');
+    assert.equal(active.config.extensions.stAnalyzer.timeoutMs, 20000);
+    assert.equal(active.config.extensions.stAnalyzer.launches[0].exe, 'node.exe');
 
     // 兼容:不带该字段的历史记录必须仍可读(升级不能锁死旧状态)
     await writeStore(withSettings(undefined));
     assert.ok(await new JsonRunStore(file).getActive(), '旧记录(无该字段)必须仍可读');
 
-    // 非法:类型不对必须被拒,避免带着坏配置继续跑
-    await writeStore(withSettings({ launches: 'not-an-array' }));
+    // 兼容:旧版本字段是未知扩展,仍允许恢复,由宿主边界自行解释
+    await writeStore({
+      ...baseRecord,
+      config: {
+        baseUrl: 'https://gateway/v1',
+        model: 'm',
+        exportDir: 'exports',
+        workspaceRoot: 'ws',
+        stAnalyzerSettings: { launches: 'legacy-shape' },
+      },
+    });
+    assert.ok(await new JsonRunStore(file).getActive(), '旧版未知字段不应阻塞恢复');
+
+    // 非法:扩展容器不是对象必须被拒
+    await writeStore({
+      ...baseRecord,
+      config: {
+        baseUrl: 'https://gateway/v1',
+        model: 'm',
+        exportDir: 'exports',
+        workspaceRoot: 'ws',
+        extensions: [],
+      },
+    });
     await assert.rejects(() => new JsonRunStore(file).getActive(), /运行状态存储损坏/);
 
-    // 非法:配额写成非数字同样被拒
-    await writeStore(withSettings({ timeoutMs: 'soon' }));
-    await assert.rejects(() => new JsonRunStore(file).getActive(), /运行状态存储损坏/);
+    // 通用层不解释插件字段:具体字段校验留给插件宿主边界
+    await writeStore({
+      ...baseRecord,
+      config: {
+        baseUrl: 'https://gateway/v1',
+        model: 'm',
+        exportDir: 'exports',
+        workspaceRoot: 'ws',
+        extensions: { stAnalyzer: { timeoutMs: 'soon' } },
+      },
+    });
+    assert.ok(await new JsonRunStore(file).getActive(), '插件字段格式由插件边界负责校验');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

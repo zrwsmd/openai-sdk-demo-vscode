@@ -10,6 +10,9 @@ import {
 import type { ToolBuildContext } from "../tools/toolBuildContext";
 import type { WorkflowRuntime } from "../workflow/types";
 
+export const ST_ANALYZER_SERVICE = "st.analyzer";
+export const ST_ANALYZER_OPTIONS_SERVICE = "st.analyzerOptions";
+
 export interface StToolBuildContext extends ToolBuildContext {
   deliveryWorkflow?: WorkflowRuntime;
   stAnalyzer: StAnalyzer;
@@ -28,12 +31,18 @@ export function createStToolBuildContext(
     | StValidationState
     | undefined;
   const stValidationState = state ?? { hashes: new Set<string>() };
+  const stAnalyzer =
+    context.services.get(ST_ANALYZER_SERVICE) as StAnalyzer | undefined;
+  const stToolOptions =
+    context.services.get(ST_ANALYZER_OPTIONS_SERVICE) as
+      | StAnalyzerToolOptions
+      | undefined;
 
   return {
     ...context,
     deliveryWorkflow: context.workflow,
-    stAnalyzer: context.cfg.stAnalyzer ?? new FallbackStAnalyzer(),
-    stToolOptions: context.cfg.stAnalyzerOptions ?? {},
+    stAnalyzer: stAnalyzer ?? new FallbackStAnalyzer(),
+    stToolOptions: stToolOptions ?? {},
     requiresStValidation:
       context.workflowContract?.deliverables.some(
         (deliverable) =>

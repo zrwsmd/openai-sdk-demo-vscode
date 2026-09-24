@@ -481,6 +481,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           file,
           bytes: Buffer.byteLength(code, "utf8"),
           contentHash: hashStContent(code),
+          summary: `已导出 ${file}。`,
         }, "write", "filesystem");
       }),
   });

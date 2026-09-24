@@ -16,6 +16,10 @@ import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/wo
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
 import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
 import type { Diagnostic } from "../../protocol/results";
+import {
+  EMPTY_RUNTIME_SERVICES,
+  type RuntimeServiceContainer,
+} from "../services";
 
 export type ToolEffect = "none" | "filesystem" | "process" | "device";
 
@@ -58,6 +62,7 @@ export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
 export interface ToolBuildContext {
   cfg: AgentConfig;
+  services: RuntimeServiceContainer;
   policy: ToolPolicy;
   plc: PlcAdapter;
   workspace: WorkspaceScope;
@@ -284,6 +289,7 @@ export function createToolBuildContext(
 
   return {
     cfg,
+    services: cfg.services ?? EMPTY_RUNTIME_SERVICES,
     policy,
     plc,
     workspace,

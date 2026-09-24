@@ -4,12 +4,9 @@ import type {
 } from "../tools/toolContract";
 import type { ActionPolicy } from "../policy/actionPolicy";
 import type { PlcAdapter } from "../plc/plcAdapter";
-import type {
-  StAnalyzer,
-  StAnalyzerToolOptions,
-} from "../analysis/stAnalyzer";
 import type { AuditEvent } from "../observability/audit";
 import type { IndustrialAgentMode } from "../orchestration/agentRoles";
+import type { RuntimeServiceContainer } from "./services";
 import type {
   AgentApiFormat,
   AgentProvider,
@@ -28,7 +25,7 @@ export interface AgentConfig {
   provider?: AgentProvider;
   /** Explicit API wire format; omitted/auto preserves the historical route. */
   apiFormat?: AgentApiFormat | "auto";
-  /** export_st_program 工具的落盘目录 */
+  /** 文件导出工具的落盘目录 */
   exportDir: string;
   /** 当前工作区根目录(文件类工具的作用域边界),空 = 未打开工作区 */
   workspaceRoot: string;
@@ -44,12 +41,8 @@ export interface AgentConfig {
   policy?: ToolPolicy;
   policyContext?: ToolPolicyOverrides;
   plcAdapter?: PlcAdapter;
-  /**
-   * ST 校验端口。宿主注入;缺省用内置简易校验,
-   * 这样内核脱离宿主(CLI/边缘/单测)仍然可运行。
-   */
-  stAnalyzer?: StAnalyzer;
-  stAnalyzerOptions?: StAnalyzerToolOptions;
+  /** Host-provided opaque capabilities consumed by workflow plugins. */
+  services?: RuntimeServiceContainer;
   audit?: (event: Omit<AuditEvent, "id" | "timestamp">) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
   actionPolicy?: ActionPolicy;

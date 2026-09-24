@@ -20,9 +20,20 @@ import type {
   StAnalyzerLaunch,
   StAnalyzerSettings,
 } from '../analysis/stAnalyzer';
+import { toolOptionsFromSettings } from '../analysis/stAnalyzer';
+import {
+  createRuntimeServiceContainer,
+  type RuntimeServiceContainer,
+} from '../runtime/services';
+import {
+  ST_ANALYZER_OPTIONS_SERVICE,
+  ST_ANALYZER_SERVICE,
+} from '../runtime/workflows/stToolContext';
+import type { DurableRunConfig } from '../runtime/runStore';
 
 const VENDOR_DIR_NAME = 'st-analyzer';
 const BRIDGE_FILE_NAME = 'bridge.cjs';
+const ST_ANALYZER_EXTENSION_KEY = 'stAnalyzer';
 
 function configSection(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration('plcAgent');
@@ -107,5 +118,75 @@ export function createStAnalyzerFactory(
       maxDiagnostics: effective.maxDiagnostics,
     });
     return new ResilientStAnalyzer(primary, new FallbackStAnalyzer());
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStAnalyzerSettings(value: unknown): value is StAnalyzerSettings {
+  if (!isRecord(value)) return false;
+  if (value.launches !== undefined) {
+    if (!Array.isArray(value.launches)) return false;
+    for (const launch of value.launches) {
+      if (
+        !isRecord(launch) ||
+        typeof launch.exe !== 'string' ||
+        !launch.exe ||
+        !Array.isArray(launch.args) ||
+        launch.args.some((arg) => typeof arg !== 'string') ||
+        typeof launch.cwd !== 'string' ||
+        (launch.env !== undefined &&
+          (!isRecord(launch.env) ||
+            Object.values(launch.env).some((item) => typeof item !== 'string')))
+      ) {
+        return false;
+      }
+    }
+  }
+  for (const key of ['timeoutMs', 'maxDiagnostics', 'maxContextFiles', 'maxFileBytes'] as const) {
+    if (value[key] !== undefined &&
+      (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) {
+      return false;
+    }
+  }
+  return value.loadWorkspaceContext === undefined ||
+    typeof value.loadWorkspaceContext === 'boolean';
+}
+
+function stAnalyzerSettingsFromConfig(
+  config: DurableRunConfig,
+): StAnalyzerSettings | undefined {
+  const extensions = config.extensions?.[ST_ANALYZER_EXTENSION_KEY];
+  if (isStAnalyzerSettings(extensions)) return extensions;
+
+  // Read-only compatibility for runs written before generic extensions were
+  // introduced. The legacy field is interpreted only at this host boundary.
+  const legacy = (config as DurableRunConfig & {
+    stAnalyzerSettings?: unknown;
+  }).stAnalyzerSettings;
+  return isStAnalyzerSettings(legacy) ? legacy : undefined;
+}
+
+export function createStAnalyzerConfigExtension(
+  context: vscode.ExtensionContext,
+): Record<string, unknown> {
+  return {
+    [ST_ANALYZER_EXTENSION_KEY]: readStAnalyzerSettings(context),
+  };
+}
+
+export function createStRuntimeServicesFactory(
+  context: vscode.ExtensionContext,
+  log: (line: string) => void,
+): (config: DurableRunConfig) => RuntimeServiceContainer {
+  const createAnalyzer = createStAnalyzerFactory(context, log);
+  return (config) => {
+    const settings = stAnalyzerSettingsFromConfig(config);
+    return createRuntimeServiceContainer([
+      [ST_ANALYZER_SERVICE, createAnalyzer(settings)],
+      [ST_ANALYZER_OPTIONS_SERVICE, toolOptionsFromSettings(settings)],
+    ]);
   };
 }

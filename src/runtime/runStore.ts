@@ -15,7 +15,6 @@ import {
 import { parseTaskPlan, type TaskPlan } from './taskPlan';
 import { parseTeamTask, type TeamTask } from '../orchestration/teamTask';
 import type { IndustrialAgentMode } from '../orchestration/agentRoles';
-import type { StAnalyzerSettings } from '../analysis/stAnalyzer';
 import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
 import type { JevDecisionSettings } from './decision/agentDecision';
 import type { WorkflowId } from './workflow/types';
@@ -43,8 +42,8 @@ export interface DurableRunConfig {
   /** Host-configured policy limits persisted with the run for safe resume/retry. */
   policyContext?: ToolPolicyOverrides;
   orchestration?: IndustrialAgentMode;
-  /** 纯数据 ST 校验设置,随 run 持久化,重试/续跑用同一套校验器配置。 */
-  stAnalyzerSettings?: StAnalyzerSettings;
+  /** Host/plugin-owned JSON settings persisted with the run for resume/retry. */
+  extensions?: Record<string, unknown>;
   /** Internal Jev settings; apiKey is intentionally not persisted here. */
   jev?: Omit<JevDecisionSettings, 'apiKey'>;
 }
@@ -185,37 +184,23 @@ export interface RunStore {
  * checkpoint is execution state, while a Session is user-visible memory. The
  * serialized write queue also gives the UI host a single consistency boundary.
  */
-/**
- * 只做类型校验,放行未知字段:旧版本 runs.json 反序列化不能因为
- * 新增可选字段而被拒(读不出来等于"运行状态损坏",会阻塞恢复)。
- */
-function isStAnalyzerSettings(value: unknown): boolean {
+function isJsonValue(value: unknown, depth = 0): boolean {
+  if (depth > 32) return false;
+  if (value === null) return true;
+  if (
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return true;
+  }
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1));
   if (!isRecord(value)) return false;
-  if (value.launches !== undefined) {
-    if (!Array.isArray(value.launches)) return false;
-    for (const launch of value.launches) {
-      if (
-        !isRecord(launch) ||
-        typeof launch.exe !== 'string' ||
-        !launch.exe ||
-        !Array.isArray(launch.args) ||
-        launch.args.some((arg) => typeof arg !== 'string') ||
-        typeof launch.cwd !== 'string' ||
-        (launch.env !== undefined && !isRecord(launch.env))
-      ) {
-        return false;
-      }
-    }
-  }
-  for (const key of ['timeoutMs', 'maxDiagnostics', 'maxContextFiles', 'maxFileBytes'] as const) {
-    if (value[key] !== undefined && (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) {
-      return false;
-    }
-  }
-  if (value.loadWorkspaceContext !== undefined && typeof value.loadWorkspaceContext !== 'boolean') {
-    return false;
-  }
-  return true;
+  return Object.values(value).every((item) => isJsonValue(item, depth + 1));
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.values(value).every((item) => isJsonValue(item, 1));
 }
 
 function isJevSettings(value: unknown): boolean {
@@ -316,7 +301,7 @@ export class JsonRunStore implements RunStore {
               run.config.policyContext.allowedDevices.some((device) => typeof device !== 'string'))) ||
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
-      (run.config.stAnalyzerSettings !== undefined && !isStAnalyzerSettings(run.config.stAnalyzerSettings)) ||
+      (run.config.extensions !== undefined && !isJsonObject(run.config.extensions)) ||
       (run.config.jev !== undefined && !isJevSettings(run.config.jev)) ||
       !Number.isSafeInteger(run.sessionItemCountBefore) ||
       (run.state !== undefined && typeof run.state !== 'string') ||

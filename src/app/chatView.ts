@@ -6,7 +6,10 @@ import {
   planTask,
   setAgentLogger,
 } from '../runtime/agent';
-import { createStAnalyzerFactory, readStAnalyzerSettings } from './analyzerHost';
+import {
+  createStAnalyzerConfigExtension,
+  createStRuntimeServicesFactory,
+} from './analyzerHost';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
@@ -166,7 +169,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       planTask,
       classifyWorkflowDecision,
       classifyDeliveryContract,
-      createStAnalyzer: createStAnalyzerFactory(this.context, (line) => this.log.appendLine(line)),
+      createRuntimeServices: createStRuntimeServicesFactory(
+        this.context,
+        (line) => this.log.appendLine(line),
+      ),
       audit,
     });
   }
@@ -415,7 +421,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       workspaceRoots,
       policyContext: live.policyContext,
       orchestration: live.orchestration,
-      stAnalyzerSettings: readStAnalyzerSettings(this.context),
+      extensions: createStAnalyzerConfigExtension(this.context),
       jev: {
         enabled: live.jev.enabled,
         ...(live.jev.endpoint ? { endpoint: live.jev.endpoint } : {}),

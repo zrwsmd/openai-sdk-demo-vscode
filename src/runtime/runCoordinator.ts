@@ -23,11 +23,7 @@ import type { AgentConfig } from './agentConfig';
 import type { DeliveryContract } from './deliveryContract';
 import { AgentDecisionService } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
-import {
-  toolOptionsFromSettings,
-  type StAnalyzer,
-  type StAnalyzerSettings,
-} from '../analysis/stAnalyzer';
+import type { RuntimeServiceContainer } from './services';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 import {
@@ -158,6 +154,10 @@ export type DeliveryContractClassifier = (
   decisionSignals?: WorkflowDecisionSignals,
 ) => Promise<DeliveryContract | undefined>;
 
+export type RuntimeServiceFactory = (
+  config: DurableRunConfig,
+) => RuntimeServiceContainer | undefined;
+
 export interface RunCoordinatorDependencies {
   session: RecoverableSession;
   store: RunStore;
@@ -170,8 +170,8 @@ export interface RunCoordinatorDependencies {
   classifyWorkflowDecision?: WorkflowModelClassifier;
   /** Optional deliverable classifier. Hosts opt in to runtime delivery contracts. */
   classifyDeliveryContract?: DeliveryContractClassifier;
-  /** ST 校验端口工厂:按 run 的持久化设置产出实例;缺省内核走内置降级。 */
-  createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
+  /** Host-provided capabilities for workflow plugins, built from persisted config. */
+  createRuntimeServices?: RuntimeServiceFactory;
   /** Shared semantic decision service; omitted by embedders to use a local instance. */
   decisionService?: AgentDecisionService;
   /** Workflow plugins supplied by the host composition root. */
@@ -278,7 +278,7 @@ export class RunCoordinator {
   private readonly verifyTeamTask?: typeof verifyTeamTask;
   private readonly auditSink?: AuditSink;
   private readonly compactContext: ContextCompactor;
-  private readonly createStAnalyzer?: (settings?: StAnalyzerSettings) => StAnalyzer;
+  private readonly createRuntimeServices?: RuntimeServiceFactory;
   private readonly decisionService: AgentDecisionService;
   private readonly workflowRegistry: WorkflowRegistry;
   private readonly toolRegistry: ToolRegistry;
@@ -318,7 +318,7 @@ export class RunCoordinator {
     this.verifyTeamTask = dependencies.verifyTeamTask ?? verifyTeamTask;
     this.auditSink = dependencies.audit;
     this.compactContext = dependencies.compactContext ?? ensureContextCompacted;
-    this.createStAnalyzer = dependencies.createStAnalyzer;
+    this.createRuntimeServices = dependencies.createRuntimeServices;
     this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
     this.workflowRegistry = dependencies.workflowRegistry ?? getDefaultWorkflowRegistry();
     this.toolRegistry = dependencies.toolRegistry ?? getDefaultToolRegistry();
@@ -334,6 +334,7 @@ export class RunCoordinator {
       ...config,
       apiKey,
       decisionService: this.decisionService,
+      services: this.createRuntimeServices?.(config),
     };
   }
 
@@ -1367,8 +1368,6 @@ export class RunCoordinator {
         this.executeAgent(
           {
             ...this.agentConfig(run.config, apiKey),
-            stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
-            stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
             executeEffect: (toolName, input, invoke) =>
               this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
             audit: async (event) => {
@@ -1862,8 +1861,6 @@ export class RunCoordinator {
           const result = await this.executeAgent(
             {
               ...this.agentConfig(run.config, apiKey),
-              stAnalyzer: this.createStAnalyzer?.(run.config.stAnalyzerSettings),
-              stAnalyzerOptions: toolOptionsFromSettings(run.config.stAnalyzerSettings),
               policyContext: safeNode ? { ...run.config.policyContext, dryRun: true } : run.config.policyContext,
               executeEffect: (toolName, input, invoke) => this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
               audit: async (event) => {

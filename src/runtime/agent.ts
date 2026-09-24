@@ -302,7 +302,8 @@ const GENERAL_WORKSPACE_PROMPT =
   "\n\n普通任务工具使用规则：" +
   "如果当前可用工具列表中包含 get_io_table，且你需要依据真实 I/O 表编写 PLC 程序，可以先调用它查询变量表；" +
   "如果用户明确允许模拟变量，或该工具不可用，不要为了查询 I/O 表阻塞。" +
-  "生成或修改 ST 代码时，如果 validate_st_code 可用，必须校验；如有错误要自行修正后重新校验，直到工具回执显示 errorCount=0 为止。" +
+  "生成或修改代码、配置或其他交付内容时，如果当前 workflow 或交付契约要求验证工具，必须先按其约束调用验证工具；" +
+  "如有错误要根据工具诊断修正后重新验证，直到达到该 workflow 声明的成功条件。" +
   "warning 不阻断交付，但要在最终答复里说明。" +
   '用户要求生成代码时，默认把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
   "当前工作区落盘时，如果 write_file 可用，必须调用 write_file；不要只用文字声称已经写入。" +
@@ -2250,7 +2251,7 @@ export async function runAgent(
     if (verificationTool === "write_file" && !verified.length) {
       throw new AgentActionVerificationError(
         deliveryWorkflow
-          ? "工具 write_file 返回成功，但写入回执的 contentHash 与最近一次 validate_st_code 通过的完整草稿不一致"
+          ? "工具 write_file 返回成功，但当前 workflow 要求的写入证据未通过校验"
           : "工具 write_file 返回成功，但本轮没有完成文件回读校验",
       );
     }
@@ -2335,9 +2336,6 @@ export async function runAgent(
         const pathValue = typeof args.path === "string" ? args.path : "目标文件";
         return `写入 ${pathValue} 失败：${error}`;
       }
-      if (requiredTool === "export_st_program") {
-        return `导出失败：${error}`;
-      }
       if (requiredTool === "run_command") {
         const data = call.result.data && typeof call.result.data === "object"
           ? call.result.data as Record<string, unknown>
@@ -2352,6 +2350,13 @@ export async function runAgent(
     const data = call.result.data && typeof call.result.data === "object"
       ? call.result.data as Record<string, unknown>
       : {};
+    const toolSummary =
+      typeof data.summary === "string" && data.summary.trim()
+        ? data.summary.trim()
+        : typeof data.message === "string" && data.message.trim()
+          ? data.message.trim()
+          : undefined;
+    if (toolSummary) return toolSummary;
     if (requiredTool === "read_file") {
       const pathValue = typeof args.path === "string" ? args.path : "目标文件";
       const totalLines = typeof data.totalLines === "number" ? ` · ${data.totalLines} 行` : "";
@@ -2368,10 +2373,6 @@ export async function runAgent(
       const bytes = typeof data.bytes === "number" ? ` · ${data.bytes} 字节` : "";
       return `已写入 ${file}${bytes}。`;
     }
-    if (requiredTool === "export_st_program") {
-      const file = typeof data.file === "string" ? data.file : ".st 文件";
-      return `已导出 ${file}。`;
-    }
     if (requiredTool === "run_command") {
       const exitCode = typeof data.exitCode === "number" || data.exitCode === null
         ? `退出码 ${data.exitCode}`
@@ -2381,7 +2382,10 @@ export async function runAgent(
         : "";
       return `${exitCode}${commandOutput}`;
     }
-    return undefined;
+    const file = typeof data.file === "string" ? data.file : undefined;
+    return file
+      ? `${requiredTool} 已完成：${file}。`
+      : `${requiredTool} 已执行成功。`;
   };
 
   const isInternalToolArtifactComplaint = (message: string): boolean => {

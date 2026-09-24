@@ -7,6 +7,7 @@ import type {
 import type { DeliveryContract } from "../deliveryContract";
 import type { PipelineStagePlan } from "../pipeline/stagePlan";
 import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
+import type { RuntimeServiceContainer } from "../services";
 
 export type WorkflowId = string;
 
@@ -22,7 +23,7 @@ export type WorkflowState = DeliveryWorkflowRuntimeState;
 export interface WorkflowRuntimeContext {
   readonly contract?: WorkflowContract;
   readonly state: WorkflowState;
-  readonly services?: ReadonlyMap<string, unknown>;
+  readonly services?: RuntimeServiceContainer;
 }
 
 export type WorkflowToolRecord = {
@@ -79,7 +80,7 @@ export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionA
   readonly id: string;
   readonly title: string;
   readonly stages: WorkflowStage[];
-  readonly services?: ReadonlyMap<string, unknown>;
+  readonly services?: RuntimeServiceContainer;
   readonly validationInputMode?: "inline_code" | "path_or_code";
   readonly requiredActionTool?: string;
   initialTool(options: { isResume: boolean }): string | undefined;
