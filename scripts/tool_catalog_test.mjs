@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import {
   ToolCatalog,
   ToolRegistry,
+  AgentDecisionService,
+  WorkflowDecisionService,
+  WorkflowRegistry,
   createCoreToolProvider,
   createStToolProvider,
 } from './agent.testbundle.mjs';
@@ -14,6 +17,20 @@ assert.equal(coreCatalog.get('read_file')?.providerId, 'core');
 assert.equal(coreCatalog.get('read_file')?.risk, 'read');
 assert.equal(coreCatalog.get('write_file')?.risk, 'write');
 assert.equal(coreCatalog.get('write_file')?.requiresApproval, true);
+assert.deepEqual(coreCatalog.toolsForFallback('read_only'), [
+  'get_io_table',
+  'read_plc_variables',
+  'list_files',
+  'read_file',
+  'search_files',
+]);
+assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
+  'list_files',
+  'read_file',
+  'search_files',
+  'write_file',
+  'edit_file',
+]);
 assert.deepEqual(
   coreCatalog.findByTag('workspace').map((item) => item.name),
   ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'run_command'],
@@ -39,6 +56,17 @@ assert.deepEqual(
   appCatalog.find({ providerId: 'st', tags: ['analysis'] }).map((item) => item.name),
   ['validate_st_code', 'st_dependency_map', 'st_change_impact', 'st_symbol_references'],
 );
+assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
+  'get_io_table',
+  'read_plc_variables',
+  'list_files',
+  'read_file',
+  'search_files',
+  'validate_st_code',
+  'st_dependency_map',
+  'st_change_impact',
+  'st_symbol_references',
+]);
 
 const customCapability = {
   name: 'query_modbus_device',
@@ -55,6 +83,8 @@ assert.deepEqual(customCatalog.listByProvider('MODBUS').map((item) => item.name)
   'query_modbus_device',
 ]);
 assert.equal(customCatalog.findByIntent('查询 Modbus 状态')[0]?.name, 'query_modbus_device');
+assert.deepEqual(customCatalog.toolsForFallback('read_only'), ['query_modbus_device']);
+assert.deepEqual(customCatalog.toolsForFallback('file_edit'), ['query_modbus_device']);
 assert.throws(
   () => customCatalog.register('other', customCapability),
   /already registered/,
@@ -76,5 +106,64 @@ assert.throws(
   ]),
   /already registered/,
 );
+
+const dynamicRegistry = new ToolRegistry([{
+  id: 'modbus',
+  capabilities: [customCapability],
+  createTools: () => [],
+}]);
+const decisionService = new WorkflowDecisionService(
+  () => {},
+  new AgentDecisionService(() => {}),
+  new WorkflowRegistry(),
+  dynamicRegistry.getToolCatalog(),
+);
+const fallbackDecision = await decisionService.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: false },
+  },
+  '查询 Modbus 状态',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'read_only',
+      confidence: 0.91,
+      reason: 'test selected read-only fallback',
+    }),
+  },
+);
+assert.equal(fallbackDecision.kind, 'fallback');
+assert.deepEqual(fallbackDecision.allowedTools, ['query_modbus_device']);
+
+const explicitAllowlistDecision = await decisionService.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: false },
+  },
+  '执行旧 Provider 的自定义动作',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'file_edit',
+      confidence: 0.88,
+      reason: 'legacy provider supplied an explicit allowlist',
+      allowedTools: ['legacy_custom_tool'],
+    }),
+  },
+);
+assert.deepEqual(explicitAllowlistDecision.allowedTools, ['legacy_custom_tool']);
 
 console.log('tool catalog tests passed');

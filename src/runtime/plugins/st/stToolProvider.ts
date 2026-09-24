@@ -27,6 +27,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["校验 ST 代码", "检查 ST 语法", "分析 ST 诊断"],
     tags: ["structured_text", "validation", "analysis"],
     effect: "none",
+    fallbackModes: ["read_only"],
   },
   {
     name: "export_st_program",
@@ -35,6 +36,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["导出 ST 程序", "保存 ST 程序"],
     tags: ["structured_text", "write", "export"],
     effect: "filesystem",
+    fallbackModes: ["file_edit"],
   },
   {
     name: "st_dependency_map",
@@ -43,6 +45,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["分析 ST 依赖", "查看文件依赖", "分析引用关系"],
     tags: ["structured_text", "analysis", "dependencies"],
     effect: "none",
+    fallbackModes: ["read_only"],
   },
   {
     name: "st_change_impact",
@@ -51,6 +54,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["分析 ST 变更影响", "查看影响范围", "评估修改影响"],
     tags: ["structured_text", "analysis", "impact"],
     effect: "none",
+    fallbackModes: ["read_only"],
   },
   {
     name: "st_symbol_references",
@@ -59,6 +63,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["查找 ST 符号引用", "查看符号定义", "分析符号使用"],
     tags: ["structured_text", "analysis", "references"],
     effect: "none",
+    fallbackModes: ["read_only"],
   },
 ];
 

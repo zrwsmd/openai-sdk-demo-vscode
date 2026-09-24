@@ -24,6 +24,7 @@ export type {
   ToolCapability,
   ToolCapabilityQuery,
   ToolCapabilityRegistrationDefaults,
+  ToolFallbackMode,
 } from "./toolCatalog";
 export type {
   BeforeEffectContext,

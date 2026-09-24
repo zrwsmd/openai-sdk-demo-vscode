@@ -23,7 +23,14 @@ export interface ToolCapability {
   effect?: ToolEffect;
   requiresApproval?: boolean;
   evidence?: readonly DeliveryEvidence[];
+  /**
+   * Ordinary fallback surfaces where the tool may be offered when no
+   * registered Workflow owns the request. Omit to use the risk-based default.
+   */
+  fallbackModes?: readonly ToolFallbackMode[];
 }
+
+export type ToolFallbackMode = "read_only" | "file_edit";
 
 export interface RegisteredToolCapability extends ToolCapability {
   providerId: string;
@@ -66,6 +73,15 @@ function evidenceList(
   ]);
 }
 
+function defaultFallbackModes(
+  risk: ToolRisk | undefined,
+): readonly ToolFallbackMode[] {
+  if (risk === "read") return ["read_only", "file_edit"];
+  if (risk === "plan") return ["read_only"];
+  if (risk === "write") return ["file_edit"];
+  return [];
+}
+
 function overlaps(
   requested: readonly string[] | undefined,
   available: readonly string[] | undefined,
@@ -89,6 +105,7 @@ function freezeCapability(
   const requiresApproval =
     capability.requiresApproval ??
     (risk === "write" || risk === "execute" ? true : undefined);
+  const fallbackModes = capability.fallbackModes ?? defaultFallbackModes(risk);
   return Object.freeze({
     ...capability,
     name,
@@ -101,14 +118,15 @@ function freezeCapability(
     ...(capability.effect ? { effect: capability.effect } : {}),
     ...(requiresApproval !== undefined ? { requiresApproval } : {}),
     ...(evidence.length ? { evidence } : {}),
+    fallbackModes: normalizedList(fallbackModes) as readonly ToolFallbackMode[],
   });
 }
 
 /**
- * Read-only catalog of capabilities declared by registered ToolProviders.
+ * Catalog of capabilities declared by registered ToolProviders.
  *
- * This class is intentionally passive in phase 1: registering or querying
- * capabilities never changes which tools are exposed in a run.
+ * The catalog never executes tools. Runtime policy may use its fallback
+ * selection results to build an ordinary-turn allowlist.
  */
 export class ToolCatalog {
   private readonly capabilities = new Map<string, RegisteredToolCapability>();
@@ -224,5 +242,11 @@ export class ToolCatalog {
 
   findByTag(tag: string): readonly RegisteredToolCapability[] {
     return this.find({ tags: [tag] });
+  }
+
+  toolsForFallback(mode: ToolFallbackMode): readonly string[] {
+    return this.list()
+      .filter((capability) => capability.fallbackModes?.includes(mode))
+      .map((capability) => capability.name);
   }
 }

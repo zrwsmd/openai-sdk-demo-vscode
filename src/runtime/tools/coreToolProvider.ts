@@ -26,6 +26,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["查询 I/O", "查看变量表", "读取 PLC 项目变量"],
     tags: ["plc", "read", "io"],
     effect: "none",
+    fallbackModes: ["read_only"],
   },
   {
     name: "read_plc_variables",
@@ -34,6 +35,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["读取 PLC 变量", "查询变量当前值", "查看设备变量"],
     tags: ["plc", "read", "variables"],
     effect: "device",
+    fallbackModes: ["read_only"],
   },
   {
     name: "list_files",
@@ -42,6 +44,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["列出文件", "查看工作区文件", "浏览目录"],
     tags: ["workspace", "read", "files"],
     effect: "none",
+    fallbackModes: ["read_only", "file_edit"],
   },
   {
     name: "read_file",
@@ -50,6 +53,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["读取文件", "查看文件内容", "打开文件"],
     tags: ["workspace", "read", "files"],
     effect: "none",
+    fallbackModes: ["read_only", "file_edit"],
   },
   {
     name: "search_files",
@@ -58,6 +62,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["搜索文件", "查找文本", "查找引用"],
     tags: ["workspace", "read", "search"],
     effect: "none",
+    fallbackModes: ["read_only", "file_edit"],
   },
   {
     name: "write_file",
@@ -66,6 +71,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["写入文件", "创建文件", "保存文件"],
     tags: ["workspace", "write", "files"],
     effect: "filesystem",
+    fallbackModes: ["file_edit"],
   },
   {
     name: "edit_file",
@@ -74,6 +80,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["编辑文件", "修改文件", "替换文本"],
     tags: ["workspace", "write", "diff"],
     effect: "filesystem",
+    fallbackModes: ["file_edit"],
   },
   {
     name: "run_command",

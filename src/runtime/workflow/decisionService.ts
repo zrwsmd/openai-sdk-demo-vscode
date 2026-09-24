@@ -8,6 +8,7 @@ import {
   getDefaultWorkflowRegistry,
   type WorkflowRegistry,
 } from "./registry";
+import type { ToolCatalog } from "../toolCatalog";
 import { createWorkflowContract } from "./types";
 import type {
   WorkflowDecision,
@@ -30,6 +31,7 @@ export class WorkflowDecisionService {
     private readonly log: (line: string) => void = () => {},
     private readonly decisionService: AgentDecisionService = new AgentDecisionService(log),
     private readonly registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+    private readonly toolCatalog?: ToolCatalog,
   ) {}
 
   async decide(
@@ -157,8 +159,12 @@ export class WorkflowDecisionService {
         ...(contract ? { deliveryContract: contract } : {}),
       };
     }
+    const allowedTools = decision.allowedTools
+      ? [...new Set(decision.allowedTools)]
+      : this.allowedToolsForFallback(decision.mode);
     this.log(
-      `[workflow] model fallback ${decision.mode}(${decision.confidence.toFixed(2)}): ${decision.reason}`,
+      `[workflow] model fallback ${decision.mode}(${decision.confidence.toFixed(2)}): ${decision.reason}` +
+        (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
     );
     return {
       kind: "fallback",
@@ -167,14 +173,18 @@ export class WorkflowDecisionService {
       confidence: decision.confidence,
       reason: decision.reason,
       signals: signalsFromHint(hint),
-      allowedTools: decision.allowedTools ?? allowedToolsForFallback(decision.mode),
+      allowedTools,
     };
   }
 
   private fallbackFromHint(hint: TaskDecisionHint): WorkflowDecision {
     const mode = fallbackModeFromHint(hint);
     const reason = fallbackReason(mode, hint);
-    this.log(`[workflow] fallback ${mode}: ${reason}`);
+    const allowedTools = this.allowedToolsForFallback(mode);
+    this.log(
+      `[workflow] fallback ${mode}: ${reason}` +
+        (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
+    );
     return {
       kind: "fallback",
       mode,
@@ -182,8 +192,17 @@ export class WorkflowDecisionService {
       confidence: 0,
       reason,
       signals: signalsFromHint(hint),
-      allowedTools: allowedToolsForFallback(mode),
+      allowedTools,
     };
+  }
+
+  private allowedToolsForFallback(
+    mode: WorkflowFallbackMode,
+  ): readonly string[] | undefined {
+    if (this.toolCatalog && (mode === "read_only" || mode === "file_edit")) {
+      return this.toolCatalog.toolsForFallback(mode);
+    }
+    return allowedToolsForFallback(mode);
   }
 }
 

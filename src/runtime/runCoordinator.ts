@@ -326,6 +326,7 @@ export class RunCoordinator {
       this.writeLog,
       this.decisionService,
       this.workflowRegistry,
+      this.toolRegistry.getToolCatalog(),
     );
   }
 
