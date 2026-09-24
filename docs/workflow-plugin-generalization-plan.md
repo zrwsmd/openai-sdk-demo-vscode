@@ -40,7 +40,7 @@
 - [x] 6. 重构 Completion Gate，移除所有 ST 完成逻辑
 - [x] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
 - [x] 8. 迁移 ST 功能为正式插件
-- [ ] 9. 用非 ST Workflow 验证通用性
+- [x] 9. 用非 ST Workflow 验证通用性
 - [ ] 10. 清理兼容层并完成边界封锁
 
 ## 0. 基线与边界
@@ -147,6 +147,29 @@ Adapter 收拢到 `src/runtime/plugins/st/`。`src/analysis/*` 和桥实现保�
 
 增加只读的 `generic_file_inspection` 测试插件，验证不修改公共核心也能注册、
 路由、执行、验收和恢复。
+
+本阶段已完成：
+
+- 新增 `src/runtime/plugins/testing/genericFileInspectionWorkflow.ts`，作为非 ST、只读、
+  领域中立的测试 workflow 插件。
+- 插件只声明 `list_files`、`read_file`、`search_files` 三个可见工具，不注册任何 ST
+  工具，也不依赖 ST 插件。
+- 新增 `scripts/generic_workflow_test.mjs`，验证：
+  - 注入式 `WorkflowRegistry` 可选择非 ST workflow。
+  - workflow 可见工具被限制为三个只读文件工具。
+  - Completion Gate 能基于通用工具回执完成验收。
+  - 通用 workflow state 可通过 `createRuntime` / `hydrate` 恢复。
+- `npm run test:workflow` 已包含该非 ST workflow 回归。
+- 本阶段未修改 `agent.ts`、`completionGate.ts`、`toolRegistry.ts` 的业务逻辑。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:batch` 通过。
+- `npm run test:agent` 通过（含 mock gateway）。
+- `npm run test:st`、`npm run test:jev` 通过。
 
 ## 10. 清理与封锁
 
