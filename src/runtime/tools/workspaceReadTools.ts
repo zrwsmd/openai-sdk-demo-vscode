@@ -116,10 +116,10 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
   const searchFilesTool = tool({
     name: "search_files",
     description:
-      '在工作区文件里做文本搜索,返回 "相对路径:行号: 内容"。支持 glob 文件名过滤(如 *.st)与 isRegex 正则。',
+      '在工作区文件里做文本搜索,返回 "相对路径:行号: 内容"。支持 glob 文件名过滤(如 *.ts)与 isRegex 正则。',
     parameters: z.object({
       text: z.string().describe("要搜索的字面量或正则"),
-      glob: z.string().optional().describe("按文件名过滤,如 *.st"),
+      glob: z.string().optional().describe("按文件名过滤,如 *.ts"),
       isRegex: z.boolean().optional().describe("是否按正则解析 text"),
     }),
     inputGuardrails: guardrails.input,

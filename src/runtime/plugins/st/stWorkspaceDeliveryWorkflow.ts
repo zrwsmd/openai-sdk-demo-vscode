@@ -26,6 +26,7 @@ import {
   isStCodeDeliveryContract,
   isStWorkspaceDeliveryContract,
 } from "./stDeliveryContract";
+import { ST_TOOL_EVIDENCE_EXTRACTORS } from "./stCompletionEvidence";
 
 export type StValidatedDraft = {
   hash: string;
@@ -131,6 +132,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly validationInputMode = "inline_code" as const;
   readonly requiredActionTool = "write_file";
   readonly services: ReadonlyMap<string, unknown>;
+  readonly evidenceExtractors = ST_TOOL_EVIDENCE_EXTRACTORS;
 
   constructor(
     private readonly contract: DeliveryContract | undefined,

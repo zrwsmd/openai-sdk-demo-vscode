@@ -8,6 +8,7 @@ import type { DeliveryContract } from "../deliveryContract";
 import type { PipelineStagePlan } from "../pipeline/stagePlan";
 import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
 import type { RuntimeServiceContainer } from "../services";
+import type { ToolEvidenceExtractor } from "../decision/completionEvidence";
 
 export type WorkflowId = string;
 
@@ -81,6 +82,7 @@ export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionA
   readonly title: string;
   readonly stages: WorkflowStage[];
   readonly services?: RuntimeServiceContainer;
+  readonly evidenceExtractors?: readonly ToolEvidenceExtractor[];
   readonly validationInputMode?: "inline_code" | "path_or_code";
   readonly requiredActionTool?: string;
   initialTool(options: { isResume: boolean }): string | undefined;

@@ -1,5 +1,6 @@
 import {
   buildCompletionEvidenceSummaries,
+  ST_TOOL_EVIDENCE_EXTRACTORS,
 } from './agent.testbundle.mjs';
 
 const hash = 'abc1234567890abcdef';
@@ -72,27 +73,30 @@ const summary = buildCompletionEvidenceSummaries({
       requiredVerificationTools: ['validate_st_code'],
     }],
   },
-  extractors: [{
-    id: 'compile.custom',
-    toolNames: ['compile_st'],
-    extract: (record, context) => {
-      const data = context.helpers.data(record.result);
-      return [
-        {
-          key: 'compile.succeeded',
-          value: record.result.ok === true,
-          scope: 'domain',
-          sourceTool: record.name,
-        },
-        {
-          key: 'compile.binaryPath',
-          value: String(data.binaryPath ?? ''),
-          scope: 'domain',
-          sourceTool: record.name,
-        },
-      ];
+  extractors: [
+    ...ST_TOOL_EVIDENCE_EXTRACTORS,
+    {
+      id: 'compile.custom',
+      toolNames: ['compile_st'],
+      extract: (record, context) => {
+        const data = context.helpers.data(record.result);
+        return [
+          {
+            key: 'compile.succeeded',
+            value: record.result.ok === true,
+            scope: 'domain',
+            sourceTool: record.name,
+          },
+          {
+            key: 'compile.binaryPath',
+            value: String(data.binaryPath ?? ''),
+            scope: 'domain',
+            sourceTool: record.name,
+          },
+        ];
+      },
     },
-  }],
+  ],
 });
 
 function hasFact(key, value) {

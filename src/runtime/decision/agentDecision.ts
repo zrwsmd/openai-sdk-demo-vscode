@@ -358,7 +358,7 @@ export interface TaskDecisionHint {
   deliveryConfidence: number;
   orchestration: 'single' | 'team' | 'unknown';
   orchestrationConfidence: number;
-  workflow: AgentWorkflowRoute;
+  workflow: string;
   workflowConfidence: number;
   toolNeeds: ToolNeedDecisionHint;
   riskLevel: AgentRiskLevel;
@@ -375,19 +375,11 @@ export interface BinaryDecisionHint {
   confidence: number;
 }
 
-export type AgentWorkflowRoute =
-  | 'st_delivery'
-  | 'st_inspection'
-  | 'file_read'
-  | 'file_edit'
-  | 'general_chat'
-  | 'team_candidate'
-  | 'unknown';
+export type AgentWorkflowRoute = string;
 
 export interface ToolNeedDecisionHint {
   readFile: BinaryDecisionHint;
   writeFile: BinaryDecisionHint;
-  validateStCode: BinaryDecisionHint;
   runCommand: BinaryDecisionHint;
 }
 
@@ -439,12 +431,42 @@ export interface DiagnosticRecoveryDecisionHint {
   evaluation: JevEvaluation;
 }
 
+export interface TaskWorkflowChoice {
+  route: string;
+  title: string;
+  description: string;
+}
+
+export interface TaskHintOptions {
+  workflowChoices?: readonly TaskWorkflowChoice[];
+}
+
 interface CachedTaskDecision {
   expiresAt: number;
   promise: Promise<TaskDecisionHint>;
 }
 
-const TASK_QUESTIONS: Record<string, JevQuestion> = {
+const FALLBACK_WORKFLOW_CRITERIA: Record<string, JevInstructions> = {
+  file_read:
+    'Read, list, search, or summarize workspace files without modifying them.',
+  file_edit:
+    'Create, modify, save, or export workspace files when no registered workflow is a better fit.',
+  general_chat:
+    'Answer a normal question, explain a concept, or provide status with no tool workflow required.',
+  team_candidate:
+    'The request appears broad or high-risk enough that a planner/reviewer/executor/verifier split may be useful.',
+};
+
+function taskQuestions(options: TaskHintOptions = {}): Record<string, JevQuestion> {
+  const workflowCriteria: Record<string, JevInstructions> = {
+    ...FALLBACK_WORKFLOW_CRITERIA,
+  };
+  for (const workflow of options.workflowChoices ?? []) {
+    const route = workflow.route.trim();
+    if (!route || workflowCriteria[route]) continue;
+    workflowCriteria[route] = `${workflow.title}: ${workflow.description}`;
+  }
+  return {
   delivery: {
     type: 'noul',
     instructions:
@@ -465,20 +487,7 @@ const TASK_QUESTIONS: Record<string, JevQuestion> = {
   workflow: {
     type: 'choice',
     instructions: 'Which main product workflow should own this request?',
-    criteria: {
-      st_delivery:
-        'Generate, modify, repair, validate, save, export, compile, upload, or otherwise deliver IEC 61131-3 ST/PLC code or a PLC program artifact.',
-      st_inspection:
-        'Read, inspect, explain, or diagnose existing ST/PLC code without being asked to save or deliver a new artifact.',
-      file_read:
-        'Read, list, search, or summarize workspace files without modifying them.',
-      file_edit:
-        'Create, modify, save, or export workspace files that are not primarily an ST/PLC delivery workflow.',
-      general_chat:
-        'Answer a normal question, explain a concept, or provide status with no tool workflow required.',
-      team_candidate:
-        'The request appears broad or high-risk enough that a planner/reviewer/executor/verifier split may be useful.',
-    },
+    criteria: workflowCriteria,
   },
   needs_read_file: {
     type: 'noul',
@@ -494,14 +503,6 @@ const TASK_QUESTIONS: Record<string, JevQuestion> = {
     criteria: {
       true: 'The user asks to create, update, save, export, generate a file, or persist a deliverable in the workspace.',
       false: 'The user only asks for information, explanation, status, or read-only inspection.',
-    },
-  },
-  needs_validate_st_code: {
-    type: 'noul',
-    instructions: 'Does the request likely require validating ST code before it can be considered complete?',
-    criteria: {
-      true: 'The user asks for ST/PLC program generation, modification, repair, export, compile preparation, or delivery.',
-      false: 'The request is unrelated to ST code validation or only asks a general question/read-only status.',
     },
   },
   needs_run_command: {
@@ -531,6 +532,7 @@ const TASK_QUESTIONS: Record<string, JevQuestion> = {
     },
   },
 };
+}
 
 const COMPLETION_GATE_QUESTIONS: Record<string, JevQuestion> = {
   looks_complete: {
@@ -632,7 +634,20 @@ function choiceDecision<T extends string>(
   return { value: 'unknown', confidence };
 }
 
-function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDecisionHint {
+function workflowChoiceNames(options: TaskHintOptions = {}): readonly string[] {
+  return [
+    ...(options.workflowChoices ?? [])
+      .map((workflow) => workflow.route.trim())
+      .filter((route, index, routes) => route && routes.indexOf(route) === index),
+    ...Object.keys(FALLBACK_WORKFLOW_CRITERIA),
+  ];
+}
+
+function buildTaskHint(
+  evaluation: JevEvaluation,
+  minConfidence: number,
+  options: TaskHintOptions = {},
+): TaskDecisionHint {
   if (evaluation.status !== 'ok') {
     return {
       delivery: 'unknown',
@@ -644,7 +659,6 @@ function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDe
       toolNeeds: {
         readFile: { value: 'unknown', confidence: 0 },
         writeFile: { value: 'unknown', confidence: 0 },
-        validateStCode: { value: 'unknown', confidence: 0 },
         runCommand: { value: 'unknown', confidence: 0 },
       },
       riskLevel: 'unknown',
@@ -678,14 +692,7 @@ function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDe
     : 'unknown';
   const workflow = choiceDecision(
     evaluation.answers?.workflow,
-    [
-      'st_delivery',
-      'st_inspection',
-      'file_read',
-      'file_edit',
-      'general_chat',
-      'team_candidate',
-    ] as const,
+    workflowChoiceNames(options),
     minConfidence,
   );
   const risk = choiceDecision(
@@ -703,7 +710,6 @@ function buildTaskHint(evaluation: JevEvaluation, minConfidence: number): TaskDe
     toolNeeds: {
       readFile: binaryDecision(evaluation.answers?.needs_read_file, minConfidence),
       writeFile: binaryDecision(evaluation.answers?.needs_write_file, minConfidence),
-      validateStCode: binaryDecision(evaluation.answers?.needs_validate_st_code, minConfidence),
       runCommand: binaryDecision(evaluation.answers?.needs_run_command, minConfidence),
     },
     riskLevel: risk.value,
@@ -802,18 +808,20 @@ export class AgentDecisionService {
     settings: JevDecisionSettings | undefined,
     userText: string,
     signal?: AbortSignal,
+    options: TaskHintOptions = {},
   ): Promise<TaskDecisionHint> {
     const { provider, normalized, key } = this.providerFor(settings);
-    const cacheKey = `${key}|${userText}`;
+    const choicesKey = workflowChoiceNames(options).join(',');
+    const cacheKey = `${key}|${choicesKey}|${userText}`;
     const cached = this.taskCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.promise;
     if (cached) this.taskCache.delete(cacheKey);
     const promise = provider.evaluate({
       state: { request: userText },
-      questions: TASK_QUESTIONS,
+      questions: taskQuestions(options),
       signal,
     }).then((evaluation) => {
-      const hint = buildTaskHint(evaluation, normalized.minConfidence);
+      const hint = buildTaskHint(evaluation, normalized.minConfidence, options);
       this.logResult(hint);
       if (evaluation.status !== 'ok') this.taskCache.delete(cacheKey);
       return hint;
@@ -953,7 +961,6 @@ export class AgentDecisionService {
     return [
       `read_file:${this.formatBinary(value.readFile)}`,
       `write_file:${this.formatBinary(value.writeFile)}`,
-      `validate_st_code:${this.formatBinary(value.validateStCode)}`,
       `run_command:${this.formatBinary(value.runCommand)}`,
     ].join(',');
   }

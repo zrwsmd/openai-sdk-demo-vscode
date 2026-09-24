@@ -40,7 +40,14 @@ export class WorkflowDecisionService {
     options: { modelClassifier?: WorkflowModelClassifier } = {},
   ): Promise<WorkflowDecision> {
     const workflows = this.registry.list();
-    const jevHint = await this.decisionService.taskHint(cfg.jev, userText, signal);
+    const jevHint = await this.decisionService.taskHint(cfg.jev, userText, signal, {
+      workflowChoices: workflows
+        .map((workflow) => ({
+          route: workflow.workflowRoute ?? workflow.id,
+          title: workflow.title,
+          description: workflow.description,
+        })),
+    });
     const jevDecision = this.workflowFromJevHint(jevHint);
     if (jevDecision) return jevDecision;
 
@@ -62,7 +69,7 @@ export class WorkflowDecisionService {
   }
 
   private workflowFromJevHint(hint: TaskDecisionHint): WorkflowDecision | undefined {
-    const workflow = this.registry.getByRoute(hint.workflow);
+    const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
     if (!workflow) return undefined;
     const contract = createWorkflowContract(workflow, {
       source: "jev",

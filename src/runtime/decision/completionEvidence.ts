@@ -65,7 +65,6 @@ export interface EvidenceHelpers {
   stringField(value: Record<string, unknown>, keys: readonly string[]): string | undefined;
   numberField(value: Record<string, unknown>, keys: readonly string[]): number | undefined;
   shortHash(value: unknown): string | undefined;
-  successfulStValidationHashes(): Set<string>;
 }
 
 export function compactCompletionDecisionText(value: unknown, maxLength = 800): string {
@@ -131,7 +130,7 @@ function createToolEvidenceContext(input: CompletionEvidenceInput): ToolEvidence
 function createEvidenceHelpers(
   records: readonly CompletionEvidenceRecord[],
 ): EvidenceHelpers {
-  let stValidationHashes: Set<string> | undefined;
+  void records;
   return {
     args: (record) => recordArgsForDecision(record.args),
     data: recordDataForDecision,
@@ -139,10 +138,6 @@ function createEvidenceHelpers(
     stringField: stringFieldForDecision,
     numberField: numberFieldForDecision,
     shortHash: shortHashForDecision,
-    successfulStValidationHashes: () => {
-      stValidationHashes ??= successfulStValidationHashesForDecision(records);
-      return new Set(stValidationHashes);
-    },
   };
 }
 
@@ -171,7 +166,7 @@ const baseToolEvidenceExtractor: ToolEvidenceExtractor = {
 
 const fileEvidenceExtractor: ToolEvidenceExtractor = {
   id: "file.generic",
-  toolNames: ["write_file", "export_st_program", "read_file", "search_files", "list_files", "run_command"],
+  toolNames: ["write_file", "read_file", "search_files", "list_files", "run_command"],
   extract: (record, context) => {
     const { helpers } = context;
     const data = helpers.data(record.result);
@@ -185,9 +180,6 @@ const fileEvidenceExtractor: ToolEvidenceExtractor = {
     if (record.name === "write_file") {
       facts.push(fact("file.operation", "write", "file", record.name));
       facts.push(fact("file.write.persisted", record.result.ok === true, "file", record.name));
-    } else if (record.name === "export_st_program") {
-      facts.push(fact("file.operation", "export", "file", record.name));
-      facts.push(fact("file.export.persisted", record.result.ok === true, "file", record.name));
     } else if (record.name === "read_file") {
       facts.push(fact("file.operation", "read", "file", record.name));
       facts.push(fact("file.read.succeeded", record.result.ok === true, "file", record.name));
@@ -241,79 +233,10 @@ const artifactToolEvidenceExtractor: ToolEvidenceExtractor = {
   },
 };
 
-const stValidationEvidenceExtractor: ToolEvidenceExtractor = {
-  id: "st.validation",
-  toolNames: ["validate_st_code"],
-  extract: (record, context) => {
-    const { helpers } = context;
-    const data = helpers.data(record.result);
-    const target = helpers.objectField(data, "validationTarget");
-    const errorCount = helpers.numberField(data, ["errorCount"]);
-    const warningCount = helpers.numberField(data, ["warningCount"]);
-    const validatedHash = helpers.stringField(data, ["validatedContentHash"]) ??
-      validationTargetHashForDecision(data, helpers);
-    const facts: EvidenceFact[] = [
-      fact("st.validation.passed", errorCount === 0 && record.result.ok === true, "domain", record.name),
-    ];
-    addNumberFact(facts, "st.validation.errorCount", errorCount, "domain", record.name);
-    addNumberFact(facts, "st.validation.warningCount", warningCount, "domain", record.name);
-    if (target) {
-      addStringFact(facts, "st.validation.target", helpers.stringField(target, ["path"]), "domain", record.name);
-      const complete = target.complete;
-      if (typeof complete === "boolean") {
-        facts.push(fact("st.validation.completeInput", complete, "domain", record.name));
-      }
-      addNumberFact(facts, "st.validation.lines", helpers.numberField(target, ["totalLines"]), "domain", record.name);
-      addNumberFact(facts, "st.validation.bytes", helpers.numberField(target, ["totalBytes"]), "domain", record.name);
-    }
-    if (validatedHash) {
-      facts.push(fact("st.validation.hash", helpers.shortHash(validatedHash) ?? validatedHash, "domain", record.name));
-    }
-    return facts;
-  },
-};
-
-const stPersistenceEvidenceExtractor: ToolEvidenceExtractor = {
-  id: "st.persistence",
-  toolNames: ["write_file", "export_st_program"],
-  extract: (record, context) => {
-    const { helpers } = context;
-    const data = helpers.data(record.result);
-    const contentHash = helpers.stringField(data, ["contentHash"]);
-    const preWriteHash = preWriteValidationHashForDecision(data, helpers);
-    const validationHashes = helpers.successfulStValidationHashes();
-    const validationHashMatch = !!contentHash &&
-      (contentHash === preWriteHash || validationHashes.has(contentHash));
-    const facts: EvidenceFact[] = [];
-    if (contentHash) {
-      facts.push(fact("st.persistence.validationHashMatch", validationHashMatch, "domain", record.name));
-    }
-    const preWrite = helpers.objectField(data, "preWriteValidation");
-    if (preWrite) {
-      const errorCount = helpers.numberField(preWrite, ["errorCount"]);
-      facts.push(fact("st.preWriteValidation.passed", errorCount === 0, "domain", record.name));
-      addNumberFact(facts, "st.preWriteValidation.errorCount", errorCount, "domain", record.name);
-      addNumberFact(
-        facts,
-        "st.preWriteValidation.warningCount",
-        helpers.numberField(preWrite, ["warningCount"]),
-        "domain",
-        record.name,
-      );
-      if (preWriteHash) {
-        facts.push(fact("st.preWriteValidation.hash", helpers.shortHash(preWriteHash) ?? preWriteHash, "domain", record.name));
-      }
-    }
-    return facts;
-  },
-};
-
 export const DEFAULT_TOOL_EVIDENCE_EXTRACTORS: readonly ToolEvidenceExtractor[] = [
   baseToolEvidenceExtractor,
   fileEvidenceExtractor,
   artifactToolEvidenceExtractor,
-  stValidationEvidenceExtractor,
-  stPersistenceEvidenceExtractor,
 ];
 
 function extractWorkflowEvidenceFacts(input: CompletionEvidenceInput): EvidenceFact[] {
@@ -523,46 +446,6 @@ function shortHashForDecision(value: unknown): string | undefined {
   return typeof value === "string" && value
     ? value.length > 16 ? `${value.slice(0, 12)}...` : value
     : undefined;
-}
-
-function validationTargetHashForDecision(
-  data: Record<string, unknown>,
-  helpers: Pick<EvidenceHelpers, "objectField" | "stringField">,
-): string | undefined {
-  const target = helpers.objectField(data, "validationTarget");
-  return target ? helpers.stringField(target, ["contentHash"]) : undefined;
-}
-
-function preWriteValidationHashForDecision(
-  data: Record<string, unknown>,
-  helpers: Pick<EvidenceHelpers, "objectField" | "numberField" | "stringField">,
-): string | undefined {
-  const preWrite = helpers.objectField(data, "preWriteValidation");
-  if (!preWrite) return undefined;
-  if (helpers.numberField(preWrite, ["errorCount"]) !== 0) return undefined;
-  return helpers.stringField(preWrite, ["validatedContentHash"]);
-}
-
-function successfulStValidationHashesForDecision(
-  records: readonly CompletionEvidenceRecord[],
-): Set<string> {
-  const helpers = createEvidenceHelpers([]);
-  const hashes = new Set<string>();
-  for (const record of records) {
-    if (!record.result.ok) continue;
-    const data = recordDataForDecision(record.result);
-    const preWriteHash = preWriteValidationHashForDecision(data, helpers);
-    if (preWriteHash) {
-      hashes.add(preWriteHash);
-      continue;
-    }
-    if (record.name !== "validate_st_code") continue;
-    if (numberFieldForDecision(data, ["errorCount"]) !== 0) continue;
-    const hash = stringFieldForDecision(data, ["validatedContentHash"]) ??
-      validationTargetHashForDecision(data, helpers);
-    if (hash) hashes.add(hash);
-  }
-  return hashes;
 }
 
 function countDiagnostics(result: ToolResult): { error: number; warning: number } {

@@ -41,7 +41,7 @@
 - [x] 7. 移除 Agent 和 Coordinator 中的 ST 状态及 ST 配置
 - [x] 8. 迁移 ST 功能为正式插件
 - [x] 9. 用非 ST Workflow 验证通用性
-- [ ] 10. 清理兼容层并完成边界封锁
+- [x] 10. 清理兼容层并完成边界封锁
 
 ## 0. 基线与边界
 
@@ -175,6 +175,41 @@ Adapter 收拢到 `src/runtime/plugins/st/`。`src/analysis/*` 和桥实现保�
 
 删除无调用方的旧兼容接口，保留必要的外部兼容导出；边界扫描进入测试命令，
 确保公共核心永远不会重新引入 ST 业务耦合。
+
+本阶段已完成：
+
+- 删除旧 ST 兼容 re-export 文件：
+  - `src/runtime/workflows/stDeliveryContract.ts`
+  - `src/runtime/workflows/stInspectionWorkflow.ts`
+  - `src/runtime/workflows/stToolContext.ts`
+  - `src/runtime/workflows/stToolProvider.ts`
+  - `src/runtime/workflows/stWorkspaceDeliveryWorkflow.ts`
+  - `src/runtime/tools/validateStTool.ts`
+  - `src/runtime/tools/dependencyTools.ts`
+  - `src/runtime/pipeline/stWorkspaceDeliveryPlan.ts`
+  - `src/runtime/stContentHash.ts`
+- `scripts/test_entry.ts` 改为直接导出正式 ST 插件路径，不再经过公共层兼容路径。
+- 公共 completion evidence 移除 ST 校验和 ST 写入哈希提取逻辑；新增
+  `src/runtime/plugins/st/stCompletionEvidence.ts`，由 ST Workflow 通过通用
+  `evidenceExtractors` 扩展点注入。
+- Jev 任务 workflow 题目改为由当前注入的 Workflow Registry 动态生成；公共
+  `agentDecision.ts` 不再内置 `st_delivery`、`st_inspection` 或
+  `needs_validate_st_code`。
+- 公共读文件工具和通用计划提示中的领域示例已改为领域中立文案。
+- 新增 `scripts/runtime_boundary_test.mjs`，扫描公共 `src/runtime`（排除
+  `src/runtime/plugins`）并阻止 ST 工具名、ST 分析器字段、旧 shim 路径和 `.st`
+  业务判断重新进入公共核心。
+- `npm run test:workflow` 和 `npm run test:batch` 已纳入边界测试。
+
+阶段测试结果：
+
+- `node scripts/runtime_boundary_test.mjs` 通过。
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:batch` 通过。
+- `npm run test:agent` 通过（含 mock gateway、ST 交付、审批、兜底和断点恢复）。
+- `npm run test:st`、`npm run test:jev` 通过。
 
 ## 测试要求
 

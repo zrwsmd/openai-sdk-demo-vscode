@@ -1971,7 +1971,7 @@ export async function runAgent(
       availableToolsPrompt +
       "\n\n" +
       GENERIC_PLAN_SYSTEM_PROMPT +
-      "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种 PLC/ST 场景；以计划目标和用户原始要求为准。" +
+      "\n\n当前请求使用通用线性计划，不要把它强行改写成某一种领域场景；以计划目标和用户原始要求为准。" +
       "你正在执行一个已经批准的通用线性计划。必须严格按步骤顺序工作。" +
       "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
       "verification.evidence 必须具体说明观察到的证据；证据不足、工具失败或结果不符合标准时，填写 verdict=retry（继续修正）或 revise（换一种完成当前步骤的办法），并提供 issue 与 nextAction。" +
@@ -2474,6 +2474,7 @@ export async function runAgent(
         deliveryContract: options.deliveryContract,
         deliveryWorkflow,
         authoritativeMessage: authoritativeWorkflowMessage(),
+        extractors: deliveryWorkflow?.evidenceExtractors,
       });
       await decisionService.completionGateHint(
         cfg.jev,
@@ -2597,6 +2598,7 @@ export async function runAgent(
       deliveryContract: options.deliveryContract,
       deliveryWorkflow,
       authoritativeMessage: authoritativeWorkflowMessage(),
+      extractors: deliveryWorkflow?.evidenceExtractors,
     });
     const finalized = await runFinalOutputFinalizer({
       model,
