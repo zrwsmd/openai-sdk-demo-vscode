@@ -6,7 +6,7 @@ import {
   searchText,
 } from "../../tools/workspaceTools";
 import {
-  optionalIntParam,
+  defaultedIntParam,
   parseOptionalInt,
   type ToolBuildContext,
 } from "./toolBuildContext";
@@ -76,16 +76,17 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
   const readFileTool = tool({
     name: "read_file",
     description:
-      "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。可用 startLine/endLine 分段读大文件(缺省读全文)。" +
+      "读取已授权工作区内一个文本文件的内容。相对路径默认使用当前工作区，也可使用其他已授权工作区的绝对路径。" +
+      "读取全文时传 startLine=1、endLine=0;需要分段读取大文件时传起止行号。" +
       "结果 data.complete/data.truncated 明确表示是否完整读取；data.fileContentHash 是完整文件哈希。" +
       "界面可能只展示 content 的摘要，摘要省略不代表文件被截断。",
     parameters: z.object({
       path: z.string().describe("相对工作区的文件路径"),
-      startLine: optionalIntParam.describe(
-        "起始行(1 起),整数;不需要分段时省略,不要传 null/None",
+      startLine: defaultedIntParam(1).describe(
+        "起始行(1 起),整数;读取全文时传 1,分段读取时传正整数",
       ),
-      endLine: optionalIntParam.describe(
-        "结束行(含),整数;不需要分段时省略,不要传 null/None",
+      endLine: defaultedIntParam(0).describe(
+        "结束行(含),整数;读取全文时传 0 表示读到文件末尾,分段读取时传正整数",
       ),
     }),
     inputGuardrails: guardrails.input,

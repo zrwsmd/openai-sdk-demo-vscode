@@ -47,9 +47,8 @@ const toolConfig = {
   workspaceRoot: process.cwd(),
 };
 const coreTools = new ToolRegistry([createCoreToolProvider()]);
-const coreToolNames = coreTools
-  .createTools({ cfg: toolConfig })
-  .map((tool) => tool.name);
+const coreToolSet = coreTools.createTools({ cfg: toolConfig });
+const coreToolNames = coreToolSet.map((tool) => tool.name);
 assert(coreToolNames.includes('write_file'));
 assert(coreToolNames.includes('edit_file'));
 assert(!coreToolNames.includes('validate_st_code'));
@@ -59,6 +58,26 @@ assert.equal(coreTools.getRisk('edit_file'), 'write');
 assert.equal(coreTools.getRisk('validate_st_code'), undefined);
 assert.deepEqual(coreTools.toolsForEvidence('successful_write'), ['write_file', 'edit_file']);
 assert.deepEqual(coreTools.toolsForEvidence('successful_export'), []);
+
+// @openai/agents strict tool schemas mark every property as required. The
+// read_file descriptions must therefore provide concrete sentinel values while
+// retaining the parser's backward-compatible path-only input handling.
+const readFileTool = coreToolSet.find((tool) => tool.name === 'read_file');
+assert(readFileTool, 'core provider should expose read_file');
+assert.deepEqual(
+  [...(readFileTool.parameters.required ?? [])].sort(),
+  ['endLine', 'path', 'startLine'],
+);
+assert.equal(readFileTool.parameters.properties.startLine.default, 1);
+assert.equal(readFileTool.parameters.properties.endLine.default, 0);
+assert.match(
+  readFileTool.parameters.properties.startLine.description,
+  /读取全文时传 1/u,
+);
+assert.match(
+  readFileTool.parameters.properties.endLine.description,
+  /读取全文时传 0 表示读到文件末尾/u,
+);
 
 const appTools = createAppToolRegistry();
 const allTools = appTools.createTools({ cfg: toolConfig });

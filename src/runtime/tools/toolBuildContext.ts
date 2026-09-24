@@ -92,6 +92,15 @@ export const optionalIntParam = z.union([z.number(), z.string(), z.null()]).opti
 export const optionalStringParam = z.union([z.string(), z.null()]).optional();
 export const optionalBooleanParam = z.union([z.boolean(), z.string(), z.null()]).optional();
 
+/**
+ * @openai/agents strict tool schemas expose optional object properties as
+ * required. A default keeps the outgoing schema unambiguous while preserving
+ * compatibility with omitted or null legacy inputs.
+ */
+export function defaultedIntParam(defaultValue: number) {
+  return optionalIntParam.default(defaultValue);
+}
+
 export function parseOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
