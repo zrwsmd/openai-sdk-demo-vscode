@@ -432,6 +432,29 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:boundary`、`npm run test:workflow`、`npm run test:batch` 通过。
 - `npm run test:agent`、`npm run test:st`、`npm run test:jev` 通过。
 
+### 5.4 Jev 高置信度命令查询 fallback（当前增量阶段）
+
+- 新增通用 `command_query` fallback；它不是普通 `read_only` 的别名，而是由工具能力
+  显式声明是否参与。
+- Jev 已高置信度判断 `run_command=yes` 且没有命中已注册 Workflow 时，决策链直接
+  进入 `command_query`，不再被后续模型分类降级为 `read_only`。
+- Core Provider 的 `run_command` 声明 `fallbackModes: ["command_query"]`；后续其他
+  领域的受控命令工具可以用同一能力元数据接入，不需要修改决策服务。
+- `command_query` 仍沿用 `run_command` 的用户审批、命令白名单、危险命令拦截、干运行
+  和工具策略；普通问答、普通只读 fallback 和高风险阻断不会自动获得命令工具。
+- 命令查询 fallback 跳过无意义的交付契约、Team 路由和通用规划，直接进入单 Agent
+  工具执行。
+- 未修改 `src/analysis/*`、`src/runtime/plugins/st/*` 或 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit`、`npm run compile` 通过。
+- `npm run test:workflow`、`npm run test:batch`、`npm run test:agent`、`npm run test:jev`
+  通过。
+- `npm run test:st` 通过；ST/analysis 相关改动来自已提交的独立阶段，本次未修改。
+- 新增 ToolCatalog 与 Coordinator 回归，确认高置信度 `run_command` 能进入命令白名单，
+  普通读请求和交付写入请求不会因此暴露命令工具。
+
 ### 5.4 只读领域工具的直接接入（当前增量阶段）
 
 本阶段新增 `st_library_symbol`（IEC 61131-3 标准库符号查询），用来验证 5.2 的结论：

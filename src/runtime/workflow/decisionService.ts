@@ -72,23 +72,50 @@ export class WorkflowDecisionService {
 
   private workflowFromJevHint(hint: TaskDecisionHint): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
-    if (!workflow) return undefined;
-    const contract = createWorkflowContract(workflow, {
-      source: "jev",
-      reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
-    });
-    this.log(
-      `[workflow] Jev 命中 ${workflow.id}(${hint.workflowConfidence.toFixed(2)})，启用 workflow 路由`,
-    );
-    return {
-      kind: "workflow",
-      workflow,
-      source: "jev",
-      confidence: hint.workflowConfidence,
-      reason: `Jev 高置信度识别为 ${workflow.title}`,
-      signals: signalsFromHint(hint),
-      ...(contract ? { deliveryContract: contract } : {}),
-    };
+    if (workflow) {
+      const contract = createWorkflowContract(workflow, {
+        source: "jev",
+        reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
+      });
+      this.log(
+        `[workflow] Jev 命中 ${workflow.id}(${hint.workflowConfidence.toFixed(2)})，启用 workflow 路由`,
+      );
+      return {
+        kind: "workflow",
+        workflow,
+        source: "jev",
+        confidence: hint.workflowConfidence,
+        reason: `Jev 高置信度识别为 ${workflow.title}`,
+        signals: signalsFromHint(hint),
+        ...(contract ? { deliveryContract: contract } : {}),
+      };
+    }
+
+    // A high-confidence Jev action signal must not be discarded just because
+    // the broad workflow label is a fallback such as general_chat. Keep the
+    // command surface narrow: only capabilities explicitly classified for
+    // command_query become visible, while tool approval/policy still applies.
+    if (isSafeCommandQueryHint(hint)) {
+      const mode: WorkflowFallbackMode = "command_query";
+      const allowedTools = this.allowedToolsForFallback(mode);
+      const confidence = hint.toolNeeds.runCommand.confidence;
+      const reason = "Jev 高置信度判断需要执行受控命令，进入命令/环境查询 fallback";
+      this.log(
+        `[workflow] Jev 命中 ${mode}(${confidence.toFixed(2)}): ${reason}` +
+          (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
+      );
+      return {
+        kind: "fallback",
+        mode,
+        source: "jev",
+        confidence,
+        reason,
+        signals: signalsFromHint(hint),
+        allowedTools,
+      };
+    }
+
+    return undefined;
   }
 
   private workflowFromLocalDetectors(
@@ -223,8 +250,19 @@ function fallbackModeFromHint(hint: TaskDecisionHint): WorkflowFallbackMode {
   }
   if (hint.toolNeeds.writeFile.value === "yes") return "file_edit";
   if (hint.toolNeeds.readFile.value === "yes") return "read_only";
+  if (isSafeCommandQueryHint(hint)) return "command_query";
   if (hint.delivery === "required") return "needs_clarification";
   return "general_chat";
+}
+
+function isSafeCommandQueryHint(hint: TaskDecisionHint): boolean {
+  return (
+    (hint.workflow === "command_query" || hint.toolNeeds.runCommand.value === "yes") &&
+    hint.delivery !== "required" &&
+    hint.toolNeeds.writeFile.value === "no" &&
+    hint.riskLevel !== "high" &&
+    hint.riskLevel !== "critical"
+  );
 }
 
 function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): string {
@@ -233,6 +271,9 @@ function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): str
   }
   if (mode === "needs_clarification") {
     return "未命中已注册 workflow，但请求可能需要交付物，需要先澄清交付类型";
+  }
+  if (mode === "command_query") {
+    return "未命中已注册 workflow，但请求需要执行受控命令查询环境或工具状态";
   }
   if (mode === "file_edit") return "未命中已注册 workflow，降级为普通文件修改";
   if (mode === "read_only") return "未命中已注册 workflow，降级为只读工具任务";

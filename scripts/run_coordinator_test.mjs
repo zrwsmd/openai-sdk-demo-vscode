@@ -344,6 +344,68 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A high-confidence Jev command need must survive fallback selection and reach
+// the single-agent tool allowlist without exposing file-write tools.
+{
+  let receivedAllowlist;
+  let deliveryClassifierCalls = 0;
+  let routeCalls = 0;
+  let planCalls = 0;
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    receivedAllowlist = options.allowedToolNames;
+    return {
+      status: 'completed',
+      output: 'environment versions complete',
+      usage,
+      result: completedAgentResult('environment versions complete'),
+    };
+  }, async () => {
+    planCalls += 1;
+    return undefined;
+  }, {
+    decisionService: {
+      taskHint: async () => ({
+        delivery: 'not_required',
+        deliveryConfidence: 0.94,
+        orchestration: 'single',
+        orchestrationConfidence: 0.96,
+        workflow: 'general_chat',
+        workflowConfidence: 0.82,
+        toolNeeds: {
+          readFile: { value: 'no', confidence: 0.9 },
+          writeFile: { value: 'no', confidence: 0.9 },
+          runCommand: { value: 'yes', confidence: 0.92 },
+        },
+        riskLevel: 'unknown',
+        riskConfidence: 0.2,
+        needsApproval: { value: 'yes', confidence: 0.85 },
+        evaluation: { status: 'ok', elapsedMs: 1 },
+      }),
+    },
+    classifyDeliveryContract: async () => {
+      deliveryClassifierCalls += 1;
+      return undefined;
+    },
+    routeTeamTask: async () => {
+      routeCalls += 1;
+      return undefined;
+    },
+  });
+  await test.coordinator.start('看看 java、git、nodejs、powershell 版本', config, 'key');
+  const completed = await test.store.getLast();
+  if (
+    !receivedAllowlist?.includes('run_command') ||
+    receivedAllowlist.includes('write_file') ||
+    receivedAllowlist.includes('edit_file') ||
+    deliveryClassifierCalls !== 0 ||
+    routeCalls !== 0 ||
+    planCalls !== 0 ||
+    completed?.status !== 'completed'
+  ) {
+    throw new Error('high-confidence Jev command query did not produce a safe command-only allowlist');
+  }
+}
+
 // If a simple request was misplanned and the executor never advances the
 // linear plan, fall back to the ordinary single-agent path instead of failing
 // the run with AgentActionVerificationError.

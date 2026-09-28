@@ -1445,6 +1445,7 @@ const workflowFallbackModeSchema = z.enum([
   "general_chat",
   "read_only",
   "file_edit",
+  "command_query",
   "needs_clarification",
   "blocked_high_risk",
 ]);
@@ -1479,7 +1480,7 @@ export async function classifyWorkflowDecision(
       "你必须在已注册 workflow 和 fallback mode 之间选择一个。" +
       "只有用户目标明确属于某个已注册 workflow 时才选择 workflow；不确定时选择 fallback。" +
       "不要根据某个具体行业词硬猜 workflow，必须看用户是否在请求该 workflow 的交付或操作。" +
-      "fallbackMode 可选: general_chat 普通问答；read_only 只读文件/状态；file_edit 普通文件修改；" +
+      "fallbackMode 可选: general_chat 普通问答；read_only 只读文件/状态；file_edit 普通文件修改；command_query 执行受控命令查询环境或工具状态；" +
       "needs_clarification 有交付倾向但交付类型不明确；blocked_high_risk 高风险副作用需先停止或审批。" +
       "已注册 workflow:\n" +
       workflowList +

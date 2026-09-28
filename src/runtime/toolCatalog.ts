@@ -34,6 +34,7 @@ export type ToolFallbackMode =
   | "general_chat"
   | "read_only"
   | "file_edit"
+  | "command_query"
   | "needs_clarification"
   | "blocked_high_risk";
 

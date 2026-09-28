@@ -87,6 +87,7 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     tags: ["workspace", "execute", "command"],
     risk: "execute",
     effect: "process",
+    fallbackModes: ["command_query"],
   },
 ];
 

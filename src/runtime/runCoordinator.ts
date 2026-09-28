@@ -132,6 +132,7 @@ function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): b
   if (decision?.kind === 'workflow' && decision.workflow.runtimeManaged) return true;
   return decision?.kind === 'fallback' &&
     (decision.mode === 'blocked_high_risk' ||
+      decision.mode === 'command_query' ||
       (decision.source === 'model' &&
         (decision.mode === 'general_chat' || decision.mode === 'read_only')));
 }
@@ -142,7 +143,9 @@ function shouldSuppressAutoPreparation(
 ): boolean {
   return orchestration !== 'team' &&
     decision?.kind === 'fallback' &&
-    (decision.mode === 'blocked_high_risk' || decision.source === 'model');
+    (decision.mode === 'blocked_high_risk' ||
+      decision.mode === 'command_query' ||
+      decision.source === 'model');
 }
 
 export type DeliveryContractClassifier = (

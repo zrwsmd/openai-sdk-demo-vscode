@@ -451,6 +451,8 @@ const FALLBACK_WORKFLOW_CRITERIA: Record<string, JevInstructions> = {
     'Read, list, search, or summarize workspace files without modifying them.',
   file_edit:
     'Create, modify, save, or export workspace files when no registered workflow is a better fit.',
+  command_query:
+    'Run a bounded, approved local command to inspect environment or tool status when no registered workflow is a better fit.',
   general_chat:
     'Answer a normal question, explain a concept, or provide status with no tool workflow required.',
   team_candidate:

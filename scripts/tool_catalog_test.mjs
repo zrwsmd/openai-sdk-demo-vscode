@@ -47,6 +47,7 @@ assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
   'write_file',
   'edit_file',
 ]);
+assert.deepEqual(coreCatalog.toolsForFallback('command_query'), ['run_command']);
 assert.deepEqual(
   coreCatalog.findByTag('workspace').map((item) => item.name),
   ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'run_command'],
@@ -117,6 +118,7 @@ assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
 assert(!appCatalog.toolsForFallback('general_chat').includes('write_file'));
 assert(!appCatalog.toolsForFallback('general_chat').includes('export_st_program'));
 assert(!appCatalog.toolsForFallback('blocked_high_risk').includes('run_command'));
+assert.deepEqual(appCatalog.toolsForFallback('command_query'), ['run_command']);
 
 const customCapability = {
   name: 'query_modbus_device',
@@ -278,6 +280,100 @@ assert.deepEqual(safeFallbackDecision.allowedTools, [
   'query_modbus_device',
   'library_symbol',
 ]);
+
+let modelClassifierCalledForJevCommand = false;
+const jevCommandDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'not_required',
+      deliveryConfidence: 0.9,
+      orchestration: 'single',
+      orchestrationConfidence: 0.95,
+      workflow: 'general_chat',
+      workflowConfidence: 0.82,
+      toolNeeds: {
+        readFile: { value: 'no', confidence: 0.9 },
+        writeFile: { value: 'no', confidence: 0.9 },
+        runCommand: { value: 'yes', confidence: 0.92 },
+      },
+      riskLevel: 'unknown',
+      riskConfidence: 0.2,
+      needsApproval: { value: 'yes', confidence: 0.85 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: true },
+  },
+  '查看 java、git、nodejs 和 powershell 版本',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      modelClassifierCalledForJevCommand = true;
+      return {
+        kind: 'fallback',
+        mode: 'read_only',
+        confidence: 0.99,
+        reason: 'incorrectly selected read-only fallback',
+      };
+    },
+  },
+);
+assert.equal(jevCommandDecision.kind, 'fallback');
+assert.equal(jevCommandDecision.mode, 'command_query');
+assert.equal(jevCommandDecision.source, 'jev');
+assert.deepEqual(jevCommandDecision.allowedTools, ['run_command']);
+assert.equal(modelClassifierCalledForJevCommand, false);
+
+const unsafeJevCommandDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'required',
+      deliveryConfidence: 0.92,
+      orchestration: 'single',
+      orchestrationConfidence: 0.95,
+      workflow: 'general_chat',
+      workflowConfidence: 0.82,
+      toolNeeds: {
+        readFile: { value: 'no', confidence: 0.9 },
+        writeFile: { value: 'yes', confidence: 0.92 },
+        runCommand: { value: 'yes', confidence: 0.92 },
+      },
+      riskLevel: 'medium',
+      riskConfidence: 0.8,
+      needsApproval: { value: 'yes', confidence: 0.9 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: true },
+  },
+  '运行检查并保存报告',
+  undefined,
+  [],
+);
+assert.equal(unsafeJevCommandDecision.kind, 'fallback');
+assert.equal(unsafeJevCommandDecision.mode, 'file_edit');
+assert(!unsafeJevCommandDecision.allowedTools?.includes('run_command'));
 
 const explicitAllowlistDecision = await decisionService.decide(
   {
