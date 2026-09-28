@@ -486,3 +486,25 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:batch`、`npm run test:workflow` 通过；`scripts/tool_catalog_test.mjs`
   中依赖 ST 工具清单的断言已同步更新。
 - 新增 `scripts/st_library_test.mjs`：响应解析、降级可见、能力收录、桥端到端。
+
+### 5.5 通用工具能力提示（当前增量阶段）
+
+本阶段先补齐“工具意图筛选”的基础输入，不改变现有 Workflow 路由和工具白名单：
+
+- `ToolCatalog` 新增通用 `renderToolCapabilityPrompt()`，把本轮实际可用工具的
+  `description`、`intents`、`domain`、`risk`、`effect` 和审批要求渲染为模型可读提示。
+- `agent.ts` 不再只告诉模型工具名称；模型现在能看到每个工具适合处理的用户意图，
+  以及它是只读、计划、写入还是执行类能力。
+- 提示只描述能力，不承担授权职责；真正的工具集合仍由 Workflow/fallback 白名单、
+  审批、策略和运行时工具回执共同约束。
+- 未登记在 `ToolCatalog` 中的运行时控制工具仍按名称保留，不要求插件为运行时控制
+  逻辑补业务元数据。
+- 本阶段未移除 `st_inspection`，也未修改 `src/analysis/*`、`src/runtime/plugins/st/*`
+  或 `st-analyze` 桥；下一阶段再基于这个通用提示验证按意图收窄工具集合。
+
+阶段测试结果：
+
+- `npx tsc --noEmit`、`npm run compile` 通过。
+- `npm run test:workflow`、`npm run test:batch`、`npm run test:agent`、
+  `npm run test:st`、`npm run test:jev` 通过。
+- `ToolCatalog` 回归覆盖了普通工具能力说明和未登记运行时控制工具的兼容展示。

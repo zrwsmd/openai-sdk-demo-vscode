@@ -64,6 +64,22 @@ assert.deepEqual(
   coreCatalog.toolsForQuery({ risks: ['read', 'plan'] }),
   ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
 );
+const coreCapabilityPrompt = coreCatalog.renderToolCapabilityPrompt([
+  'read_file',
+  'write_file',
+  'report_plan_progress',
+]);
+assert.match(coreCapabilityPrompt, /- read_file: 读取授权工作区内文本文件的内容/u);
+assert.match(coreCapabilityPrompt, /适用意图：读取文件、查看文件内容、打开文件/u);
+assert.match(coreCapabilityPrompt, /风险：read/u);
+assert.match(coreCapabilityPrompt, /- write_file: 向授权工作区文件写入完整文本内容/u);
+assert.match(coreCapabilityPrompt, /风险：write/u);
+assert.match(coreCapabilityPrompt, /副作用：filesystem/u);
+assert.match(coreCapabilityPrompt, /需要审批：是/u);
+assert.match(
+  coreCapabilityPrompt,
+  /- report_plan_progress$/,
+);
 for (const mode of ['general_chat', 'needs_clarification', 'blocked_high_risk']) {
   assert.deepEqual(
     coreCatalog.toolsForFallback(mode),

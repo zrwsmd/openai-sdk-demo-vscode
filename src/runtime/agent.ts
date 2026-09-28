@@ -100,6 +100,7 @@ import {
   type RuntimeToolCallGuard,
   type ToolRegistry,
 } from "./toolRegistry";
+import type { ToolCatalog } from "./toolCatalog";
 import type { AgentConfig } from "./agentConfig";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
 import { AgentDecisionService } from "./decision/agentDecision";
@@ -364,13 +365,19 @@ export function composeToolSet<T>(
   return [...visibleBusinessTools, ...runtimeControlTools];
 }
 
-function renderAvailableToolsPrompt(toolNames: readonly string[]): string {
+function renderAvailableToolsPrompt(
+  toolNames: readonly string[],
+  toolCatalog: ToolCatalog,
+): string {
   if (toolNames.length === 0) {
     return "\n\n当前没有可调用工具。不要尝试调用任何工具，只能用文字回答或说明阻塞原因。";
   }
-  return "\n\n当前可用工具仅限以下列表：\n" +
-    toolNames.map((name) => `- ${name}`).join("\n") +
-    "\n只能调用上面列出的工具；不要调用未列出的工具名。";
+  return (
+    "\n\n当前可用工具及其用途（只能调用下面列出的工具；用途和风险说明仅用于选择，" +
+    "实际权限仍由运行时审批、策略和工具回执决定）：\n" +
+    toolCatalog.renderToolCapabilityPrompt(toolNames) +
+    "\n只能调用上面列出的工具；不要调用未列出的工具名。"
+  );
 }
 
 const TOOL_HISTORY_ITEM_TYPES = new Set([
@@ -2084,7 +2091,10 @@ export async function runAgent(
     .map(toolNameOf)
     .filter((name): name is string => typeof name === "string");
   const availableToolNames = new Set(availableToolNameList);
-  const availableToolsPrompt = renderAvailableToolsPrompt(availableToolNameList);
+  const availableToolsPrompt = renderAvailableToolsPrompt(
+    availableToolNameList,
+    toolRegistry.getToolCatalog(),
+  );
   const isolateHistoricalToolChain =
     !options.initialState && !options.preserveToolHistory;
   const executionInstructions = (

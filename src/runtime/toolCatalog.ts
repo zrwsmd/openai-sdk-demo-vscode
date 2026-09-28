@@ -234,6 +234,40 @@ export class ToolCatalog {
     return [...this.capabilities.values()];
   }
 
+  /**
+   * Render generic capability metadata for the model-facing tool prompt.
+   *
+   * The catalog is not an authorization boundary: the caller supplies the
+   * already-filtered tool names, and unknown runtime-control tools remain
+   * visible by name without requiring a catalog entry.
+   */
+  renderToolCapabilityPrompt(toolNames: readonly string[]): string {
+    return toolNames
+      .map((toolName) => {
+        const capability = this.get(toolName);
+        if (!capability) return `- ${toolName}`;
+
+        const details = [`- ${capability.name}: ${capability.description}`];
+        if (capability.intents?.length) {
+          details.push(`适用意图：${capability.intents.join("、")}`);
+        }
+        if (capability.domain) {
+          details.push(`领域：${capability.domain}`);
+        }
+        if (capability.risk) {
+          details.push(`风险：${capability.risk}`);
+        }
+        if (capability.effect) {
+          details.push(`副作用：${capability.effect}`);
+        }
+        if (capability.requiresApproval !== undefined) {
+          details.push(`需要审批：${capability.requiresApproval ? "是" : "否"}`);
+        }
+        return details.join("；");
+      })
+      .join("\n");
+  }
+
   listByProvider(providerId: string): readonly RegisteredToolCapability[] {
     const normalizedProviderId = normalized(providerId);
     return this.list().filter(
