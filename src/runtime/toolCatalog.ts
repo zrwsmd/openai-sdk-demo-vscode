@@ -282,12 +282,50 @@ function freezeCapability(
 }
 
 const INTENT_FRAGMENT_SEPARATOR =
-  /(?:[，,；;、]+|\b(?:and|also|then|plus|as\s+well\s+as)\b|并且|同时|以及|另外|然后|还要|还需要|并|和|与|及)/giu;
+  /(?:[，,；;、]+|\b(?:and|also|then|plus|as\s+well\s+as)\b|并且|同时|以及|另外|然后|还要|还需要)/giu;
+const SINGLE_CHARACTER_INTENT_CONNECTORS = new Set(["并", "和", "与", "及"]);
+
+type WordSegment = {
+  segment: string;
+};
+
+type WordSegmenter = {
+  segment(input: string): Iterable<WordSegment>;
+};
+
+type WordSegmenterConstructor = new (
+  locales?: string | readonly string[],
+  options?: { granularity?: "grapheme" | "word" | "sentence" },
+) => WordSegmenter;
+
+function splitStandaloneIntentConnectors(text: string): readonly string[] {
+  const segmenterConstructor = (
+    Intl as unknown as { Segmenter?: WordSegmenterConstructor }
+  ).Segmenter;
+  // If the host does not provide word segmentation, do not guess at single
+  // character boundaries. Keeping the phrase intact is the safer fallback.
+  if (!segmenterConstructor) return [text];
+
+  const segments = [...new segmenterConstructor("zh", { granularity: "word" }).segment(text)];
+  const fragments: string[] = [];
+  let current = "";
+  for (const segment of segments) {
+    if (SINGLE_CHARACTER_INTENT_CONNECTORS.has(segment.segment)) {
+      if (current.trim()) fragments.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += segment.segment;
+  }
+  if (current.trim()) fragments.push(current.trim());
+  return fragments;
+}
 
 export function splitToolCapabilityIntentText(text: string): readonly string[] {
   const fragments = text
     .replace(/[。！？!?]+/gu, "；")
     .split(INTENT_FRAGMENT_SEPARATOR)
+    .flatMap((fragment) => splitStandaloneIntentConnectors(fragment))
     .map((fragment) => fragment.trim())
     .filter((fragment) => compactSearchText(fragment).length >= 2);
   return Object.freeze([...new Set(fragments)]);
@@ -604,6 +642,18 @@ export class ToolCatalog {
     // result from one or more intent fragments is allowed to narrow the
     // ordinary fallback surface.
     if (selected.length === 0 || selected.length > 4) {
+      return baseTools;
+    }
+    // A file-edit fallback may be selected after an uncertain or conflicting
+    // intent judgment. Never let a read-only match hide every write-capable
+    // tool from a surface that originally exposed write capabilities.
+    const baseHasWriteCapability = baseTools.some(
+      (name) => this.get(name)?.risk === "write",
+    );
+    const selectedHasWriteCapability = selected.some(
+      (name) => this.get(name)?.risk === "write",
+    );
+    if (baseHasWriteCapability && !selectedHasWriteCapability) {
       return baseTools;
     }
     return selected;

@@ -567,6 +567,11 @@ node scripts/run_coordinator_test.mjs
 - 公共层只使用 `ToolCapability` 的描述、意图、标签、领域和风险元数据；新增领域
   工具仍只需注册能力，不需要修改 `agent.ts`、`WorkflowDecisionService` 或
   `src/analysis/*`。
+- 修正单字连接词边界：`并`、`和`、`与`、`及` 只有在被中文分词识别为独立连接词时
+  才会拆分，避免“合并文件”被切成“文件”并误选领域工具。
+- 修正编辑 fallback 的保守收窄：基础 `file_edit` 工具集包含写能力时，如果当前
+  意图只命中只读工具，则放弃收窄并保留完整编辑工具集，避免模型拿不到
+  `write_file` / `edit_file`。
 - 未修改 `st-analyze`、`src/analysis/*` 和现有 ST 工具实现。
 
 阶段测试结果：
@@ -576,4 +581,5 @@ node scripts/run_coordinator_test.mjs
   `npm run test:st` 和 `npm run test:jev` 通过。
 - `npm run test:agent` 通过（使用仓库要求的本地 mock gateway）。
 - `npm run test:generate` 通过。
-- `scripts/tool_catalog_test.mjs` 新增多意图拆分、能力并集、去重和短片段消歧回归。
+- `scripts/tool_catalog_test.mjs` 新增多意图拆分、能力并集、去重、短片段消歧、
+  词内连接词和编辑工具保留回归。

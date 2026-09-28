@@ -73,6 +73,20 @@ assert.deepEqual(
   ['读取文件', '搜索文本'],
 );
 assert.deepEqual(
+  splitToolCapabilityIntentText('合并文件'),
+  ['合并文件'],
+);
+assert.deepEqual(
+  coreCatalog.toolsForFallback('read_only', '合并文件'),
+  [
+    'get_io_table',
+    'read_plc_variables',
+    'list_files',
+    'read_file',
+    'search_files',
+  ],
+);
+assert.deepEqual(
   coreCatalog.toolsForFallback('read_only', '读取文件并搜索文本'),
   ['read_file', 'search_files'],
 );
@@ -152,6 +166,25 @@ assert.deepEqual(
     '分析依赖、影响范围并查找符号引用',
   ),
   ['st_dependency_map', 'st_change_impact', 'st_symbol_references'],
+);
+const appFileEditTools = [
+  'list_files',
+  'read_file',
+  'search_files',
+  'write_file',
+  'edit_file',
+  'export_st_program',
+];
+assert.deepEqual(
+  appCatalog.toolsForFallback(
+    'file_edit',
+    '分析 ST 文件依赖关系，并查找符号声明和引用',
+  ),
+  appFileEditTools,
+);
+assert.deepEqual(
+  appCatalog.toolsForFallback('file_edit', '分析依赖并查找相关符号'),
+  appFileEditTools,
 );
 const genericCompoundIntents = appCatalog.findByTextIntents('查看文件和符号引用');
 assert.deepEqual(
