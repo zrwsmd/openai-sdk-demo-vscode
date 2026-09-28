@@ -148,6 +148,12 @@ export interface EditFileTextResult {
   diff: string;
 }
 
+export interface PreparedFileEdit {
+  originalContent: string;
+  content: string;
+  result: EditFileTextResult;
+}
+
 function countOccurrences(text: string, needle: string): number {
   let count = 0;
   let offset = 0;
@@ -328,11 +334,11 @@ function renderUnifiedDiff(
   ].join('\n');
 }
 
-export async function editFileText(
+export async function prepareFileEdit(
   root: string,
   rel: string,
   edits: readonly FileEditOperation[],
-): Promise<EditFileTextResult> {
+): Promise<PreparedFileEdit> {
   const abs = resolveInWorkspace(root, rel);
   if (!edits.length) throw new ToolError('至少需要提供一个文件编辑操作');
   const stat = await fs.stat(abs).catch(() => {
@@ -364,19 +370,45 @@ export async function editFileText(
   }
 
   const changed = content !== original;
-  if (changed) await fs.writeFile(abs, content, 'utf8');
   const relativePath = path.relative(root, abs).split(path.sep).join('/');
   const diff = renderUnifiedDiff(original, content, relativePath);
   return {
-    file: abs,
-    bytes: Buffer.byteLength(content, 'utf8'),
-    oldBytes: Buffer.byteLength(original, 'utf8'),
-    changed,
-    editsApplied,
-    oldContentHash: contentHash(original),
-    contentHash: contentHash(content),
-    diff: diff.length > 24_000 ? `${diff.slice(0, 24_000)}\n…(diff 已截断)` : diff,
+    originalContent: original,
+    content,
+    result: {
+      file: abs,
+      bytes: Buffer.byteLength(content, 'utf8'),
+      oldBytes: Buffer.byteLength(original, 'utf8'),
+      changed,
+      editsApplied,
+      oldContentHash: contentHash(original),
+      contentHash: contentHash(content),
+      diff: diff.length > 24_000 ? `${diff.slice(0, 24_000)}\n…(diff 已截断)` : diff,
+    },
   };
+}
+
+export async function applyPreparedFileEdit(
+  prepared: PreparedFileEdit,
+): Promise<EditFileTextResult> {
+  const current = await fs.readFile(prepared.result.file, 'utf8').catch(() => {
+    throw new ToolError(`文件不存在:${prepared.result.file}`);
+  });
+  if (contentHash(current) !== prepared.result.oldContentHash) {
+    throw new ToolError('文件在编辑预览后发生变化，请重新生成编辑操作');
+  }
+  if (prepared.result.changed) {
+    await fs.writeFile(prepared.result.file, prepared.content, 'utf8');
+  }
+  return prepared.result;
+}
+
+export async function editFileText(
+  root: string,
+  rel: string,
+  edits: readonly FileEditOperation[],
+): Promise<EditFileTextResult> {
+  return applyPreparedFileEdit(await prepareFileEdit(root, rel, edits));
 }
 
 /** glob 只支持 * 与 ?(按文件名匹配),够用且无依赖 */

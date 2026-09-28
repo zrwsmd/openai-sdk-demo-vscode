@@ -21,6 +21,7 @@ import {
   type DiagnosticRepairPacket,
 } from "../../../diagnosticCompression";
 import {
+  beforeEffectFailureResult,
   optionalBooleanParam,
   optionalStringParam,
   parseOptionalBoolean,
@@ -62,6 +63,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     guardrails,
     inlineStValidation,
     requiresStValidation,
+    runBeforeEffects,
     stAnalyzer,
     stToolOptions,
     stValidationCache,
@@ -457,33 +459,50 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     needsApproval: true,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
-    execute: ({ code }) =>
-      withEffect("export_st_program", { code }, "write", async () => {
-        if (requiresStValidation && !validatedStContent.has(hashStContent(code))) {
-          return toolResult({
-            ok: false,
-            error: "ST 代码在导出前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
-            diagnostics: [{
-              code: "st_validation_required",
-              message: "未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。",
-              severity: "error",
-            }],
-            effect: "none",
-            risk: "plan",
-          });
-        }
-        const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
-        const name = m?.[1] ?? `program_${Date.now()}`;
+    execute: async ({ code }, _context, details) => {
+      const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
+      const name = m?.[1] ?? `program_${Date.now()}`;
+      const file = path.join(cfg.exportDir, `${name}.st`);
+      if (requiresStValidation && !validatedStContent.has(hashStContent(code))) {
+        return toolResult({
+          ok: false,
+          error: "ST 代码在导出前必须先通过 validate_st_code，且必须校验当前这份完整代码。",
+          diagnostics: [{
+            code: "st_validation_required",
+            message: "未找到当前代码对应的 validate_st_code 成功回执(errorCount=0)。",
+            severity: "error",
+          }],
+          effect: "none",
+          risk: "plan",
+        });
+      }
+      const beforeEffect = await runBeforeEffects({
+        toolName: "export_st_program",
+        input: {
+          path: file,
+          workspaceRoot: cfg.exportDir,
+          content: code,
+        },
+        workspace,
+        effect: "filesystem",
+        resourceKind: "file",
+        signal: details?.signal,
+      });
+      if (!beforeEffect.ok && beforeEffect.failure) {
+        return beforeEffectFailureResult(beforeEffect.failure);
+      }
+      return withEffect("export_st_program", { code }, "write", async () => {
         await fs.mkdir(cfg.exportDir, { recursive: true });
-        const file = path.join(cfg.exportDir, `${name}.st`);
         await fs.writeFile(file, code, "utf8");
         return contract({
           file,
           bytes: Buffer.byteLength(code, "utf8"),
           contentHash: hashStContent(code),
           summary: `已导出 ${file}。`,
+          ...beforeEffect.receiptData,
         }, "write", "filesystem");
-      }),
+      });
+    },
   });
 
   return {

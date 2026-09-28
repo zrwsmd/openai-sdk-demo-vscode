@@ -1,8 +1,11 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { editFileText } from "../../tools/workspaceTools";
-import { toolResult } from "../../tools/toolContract";
+import {
+  applyPreparedFileEdit,
+  prepareFileEdit,
+} from "../../tools/workspaceTools";
 import type { ToolBuildContext } from "./toolBuildContext";
+import { beforeEffectFailureResult } from "./toolBuildContext";
 
 const editOperationSchema = z.object({
   oldText: z.string().min(1).describe("要精确匹配的原文片段"),
@@ -13,8 +16,9 @@ const editOperationSchema = z.object({
 export function createEditFileTool(ctx: ToolBuildContext) {
   const {
     contract,
-    guard,
     guardrails,
+    guard,
+    runBeforeEffects,
     workspace,
     withEffect,
   } = ctx;
@@ -35,6 +39,29 @@ export function createEditFileTool(ctx: ToolBuildContext) {
         async () => {
           details?.signal?.throwIfAborted();
           const target = workspace.resolve(p);
+          const prepared = await prepareFileEdit(
+            target.root,
+            target.relativePath,
+            edits,
+          );
+          const beforeEffect = await runBeforeEffects({
+            toolName: "edit_file",
+            input: {
+              path: target.relativePath,
+              workspaceRoot: target.root,
+              edits,
+              content: prepared.content,
+              previousContent: prepared.originalContent,
+              diff: prepared.result.diff,
+            },
+            workspace,
+            effect: "filesystem",
+            resourceKind: "file",
+            signal: details?.signal,
+          });
+          if (!beforeEffect.ok && beforeEffect.failure) {
+            return beforeEffectFailureResult(beforeEffect.failure);
+          }
           return withEffect(
             "edit_file",
             {
@@ -45,7 +72,10 @@ export function createEditFileTool(ctx: ToolBuildContext) {
             "write",
             async () =>
               contract(
-                await editFileText(target.root, target.relativePath, edits),
+                {
+                  ...(await applyPreparedFileEdit(prepared)),
+                  ...beforeEffect.receiptData,
+                },
                 "write",
                 "filesystem",
               ),

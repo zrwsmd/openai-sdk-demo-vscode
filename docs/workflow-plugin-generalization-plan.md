@@ -83,8 +83,9 @@ ST 校验、导出、依赖图、影响面和符号引用工具由 ST Provider �
 
 ## 5. 通用文件写入
 
-`write_file` 只负责路径边界、审批、写入、哈希和通用回执。领域验证通过通用
-`beforeEffect` 钩子注入，不在公共工具中判断文件类型。
+文件写入工具只负责路径边界、审批、写入、哈希和通用回执。领域验证通过通用
+`beforeEffect` 钩子注入，不在公共工具中判断文件类型；钩子既可以按具体工具注册，
+也可以按通用 `resourceKind: "file"` + `effect: "filesystem"` 注册。
 
 ## 6. 通用 Completion Gate
 
@@ -332,15 +333,40 @@ node scripts/run_coordinator_test.mjs
 
 ### 5. 通用 `write_file` 与前置副作用钩子
 
-- `write_file` 只处理工作区路径解析、通用前置钩子、审批保护、写入、内容哈希和通用
-  回执，不再判断文件扩展名或 ST 校验状态。
-- Tool Provider 可为指定工具注册多个异步 `beforeEffect` 钩子；钩子可阻止副作用并
+- 文件写入工具只处理路径解析、通用前置钩子、审批保护、写入、内容哈希和通用回执，
+  不再判断文件扩展名或领域校验状态。
+- Tool Provider 可按具体工具，或按通用 `resourceKind: "file"` +
+  `effect: "filesystem"` 注册多个异步 `beforeEffect` 钩子；钩子可阻止副作用并
   返回通用错误、诊断和元数据，也可在成功写入回执中附加领域证据。
-- ST Provider 将原有 ST 预写校验、内容哈希一致性检查和校验摘要迁入 `write_file`
-  的前置钩子，交付校验和审批行为由既有 ST/Agent 回归测试覆盖。
+- `write_file`、`edit_file` 和 `export_st_program` 都经过同一套文件级前置钩子；
+  `edit_file` 在执行钩子前生成待写入完整内容和 diff，供任意领域 Provider 检查。
+- ST Provider 将原有 ST 预写校验、内容哈希一致性检查和校验摘要迁入文件级前置钩子，
+  交付校验和审批行为由既有 ST/Agent 回归测试覆盖。
 - 阶段测试：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
   `npm run test:batch`、`npm run test:agent`、`npm run test:st`、`npm run test:jev`
   均通过；Agent 测试使用本地 mock gateway。
+
+### 5.1 文件级 `beforeEffect` 扩展（当前增量阶段）
+
+- 公共 `BeforeEffectContext` 增加通用 `effect` 和 `resourceKind`，并提供
+  `BeforeEffectSelector`、`runBeforeEffects` 和统一失败回执转换。
+- `ToolRegistry` 从“按工具名 Map”改为通用 selector 注册和匹配；仍兼容旧的工具名
+  selector，新增文件工具不需要在 Registry 里增加领域分支。
+- `edit_file` 使用通用的 `prepareFileEdit` / `applyPreparedFileEdit` 两阶段接口：
+  前置钩子可以看到最终完整内容、原内容和 diff，文件在钩子期间发生变化时会拒绝覆盖。
+- `export_st_program` 也通过同一通用文件副作用入口，避免插件自有写入工具绕过前置检查。
+- 新增 `scripts/before_effect_test.mjs`，用不包含 ST 逻辑的测试 Provider 验证三个文件
+  写入工具的覆盖、回执传递和拒绝不落盘。
+- 未修改 `src/analysis/*` 或 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:batch` 通过。
+- `npm run test:agent` 通过（使用本地 `127.0.0.1:8790` mock gateway）。
+- `npm run test:st`、`npm run test:jev` 通过。
 
 ### 6. 通用 Completion Gate
 

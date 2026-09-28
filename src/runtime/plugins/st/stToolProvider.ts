@@ -64,7 +64,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   },
 ];
 
-function writeFileBeforeEffect(
+function fileBeforeEffect(
   context: ReturnType<typeof createStToolBuildContext>,
   validateStContentBeforeWrite: ReturnType<typeof createValidateStTools>["validateStContentBeforeWrite"],
 ): (request: BeforeEffectContext) => Promise<BeforeEffectResult | undefined> {
@@ -139,8 +139,11 @@ export function createStToolProvider(): ToolProvider {
       const validationTools = createValidateStTools(stContext);
       const graphTools = createStGraphTools(stContext);
       context.registerBeforeEffect(
-        "write_file",
-        writeFileBeforeEffect(
+        {
+          effect: "filesystem",
+          resourceKind: "file",
+        },
+        fileBeforeEffect(
           stContext,
           validationTools.validateStContentBeforeWrite,
         ),

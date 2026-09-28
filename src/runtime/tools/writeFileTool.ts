@@ -1,14 +1,14 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import { writeFileText } from "../../tools/workspaceTools";
-import { toolResult } from "../../tools/toolContract";
 import { hashContent } from "../contentHash";
 import type { ToolBuildContext } from "./toolBuildContext";
+import { beforeEffectFailureResult } from "./toolBuildContext";
 
 export function createWriteFileTool(ctx: ToolBuildContext) {
   const {
     contract,
-    beforeEffectsFor,
+    runBeforeEffects,
     guard,
     guardrails,
     workspace,
@@ -30,35 +30,20 @@ export function createWriteFileTool(ctx: ToolBuildContext) {
       guard(
         async () => {
           const target = workspace.resolve(p);
-          const receiptData: Record<string, unknown> = {};
-          for (const beforeEffect of beforeEffectsFor("write_file")) {
-            const result = await beforeEffect({
-              toolName: "write_file",
-              input: {
-                path: target.relativePath,
-                workspaceRoot: target.root,
-                content,
-              },
-              workspace,
-              signal: details?.signal,
-            });
-            if (!result) continue;
-            if (!result.ok) {
-              return toolResult({
-                ok: false,
-                error: result.error ?? "写入前检查未通过。",
-                ...(result.failureData !== undefined
-                  ? { data: result.failureData }
-                  : {}),
-                ...(result.diagnostics
-                  ? { diagnostics: [...result.diagnostics] }
-                  : {}),
-                ...(result.metadata ? { metadata: result.metadata } : {}),
-                effect: "none",
-                risk: result.risk ?? "plan",
-              });
-            }
-            Object.assign(receiptData, result.receiptData ?? {});
+          const beforeEffect = await runBeforeEffects({
+            toolName: "write_file",
+            input: {
+              path: target.relativePath,
+              workspaceRoot: target.root,
+              content,
+            },
+            workspace,
+            effect: "filesystem",
+            resourceKind: "file",
+            signal: details?.signal,
+          });
+          if (!beforeEffect.ok && beforeEffect.failure) {
+            return beforeEffectFailureResult(beforeEffect.failure);
           }
           return withEffect(
             "write_file",
@@ -77,7 +62,7 @@ export function createWriteFileTool(ctx: ToolBuildContext) {
                     content,
                   )),
                   contentHash: hashContent(content),
-                  ...receiptData,
+                  ...beforeEffect.receiptData,
                 },
                 "write",
                 "filesystem",

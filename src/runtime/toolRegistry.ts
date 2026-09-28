@@ -10,6 +10,9 @@ import {
   commandToolResult,
   createToolBuildContext,
   type BeforeEffectHook,
+  matchesBeforeEffect,
+  type BeforeEffectContext,
+  type BeforeEffectRegistration,
   type DiagnosticSideReporter,
   type RuntimeToolCallGuard,
   type ToolBuildContext,
@@ -29,10 +32,18 @@ export type {
 export type {
   BeforeEffectContext,
   BeforeEffectHook,
+  BeforeEffectRegistration,
   BeforeEffectResult,
+  BeforeEffectRunResult,
+  BeforeEffectSelector,
+  BeforeEffectResourceKind,
   DiagnosticSideReporter,
   RuntimeDiagnosticReport,
   RuntimeToolCallGuard,
+} from "./tools/toolBuildContext";
+export {
+  beforeEffectFailureResult,
+  matchesBeforeEffect,
 } from "./tools/toolBuildContext";
 
 export type ToolProviderContext = ToolBuildContext;
@@ -148,12 +159,19 @@ export class ToolRegistry {
     diagnosticReporter?: DiagnosticSideReporter;
     runtimeToolGuard?: RuntimeToolCallGuard;
   }): Tool[] {
-    const hooks = new Map<string, BeforeEffectHook[]>();
-    const beforeEffectsFor = (toolName: string) => hooks.get(toolName) ?? [];
-    const registerBeforeEffect = (toolName: string, hook: BeforeEffectHook) => {
-      const registered = hooks.get(toolName) ?? [];
-      registered.push(hook);
-      hooks.set(toolName, registered);
+    const hooks: Array<{
+      selector: BeforeEffectRegistration;
+      hook: BeforeEffectHook;
+    }> = [];
+    const beforeEffectsFor = (request: BeforeEffectContext) =>
+      hooks
+        .filter(({ selector }) => matchesBeforeEffect(selector, request))
+        .map(({ hook }) => hook);
+    const registerBeforeEffect = (
+      selector: BeforeEffectRegistration,
+      hook: BeforeEffectHook,
+    ) => {
+      hooks.push({ selector, hook });
     };
     const context = createToolBuildContext(options.cfg, {
       workflowContract: options.workflowContract,

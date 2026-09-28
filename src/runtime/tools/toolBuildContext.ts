@@ -22,6 +22,13 @@ import {
 } from "../services";
 
 export type ToolEffect = "none" | "filesystem" | "process" | "device";
+export type BeforeEffectResourceKind =
+  | "file"
+  | "directory"
+  | "workspace"
+  | "command"
+  | "device"
+  | (string & {});
 
 export interface RuntimeDiagnosticReport {
   summary: string;
@@ -41,6 +48,8 @@ export interface BeforeEffectContext {
   toolName: string;
   input: unknown;
   workspace: WorkspaceScope;
+  effect: ToolEffect;
+  resourceKind: BeforeEffectResourceKind;
   signal?: AbortSignal;
 }
 
@@ -58,6 +67,56 @@ export type BeforeEffectHook = (
   context: BeforeEffectContext,
 ) => Promise<BeforeEffectResult | undefined>;
 
+/**
+ * A provider can target a concrete tool or a generic effect surface.
+ *
+ * `resourceKind: "file"` is deliberately domain-neutral: it lets a provider
+ * protect every file-writing tool without making the common tool layer know
+ * which domain needs the protection.
+ */
+export interface BeforeEffectSelector {
+  toolName?: string;
+  effect?: ToolEffect;
+  resourceKind?: BeforeEffectResourceKind;
+}
+
+export type BeforeEffectRegistration = string | BeforeEffectSelector;
+
+export interface BeforeEffectRunResult {
+  ok: boolean;
+  receiptData: Record<string, unknown>;
+  failure?: BeforeEffectResult;
+}
+
+export function matchesBeforeEffect(
+  selector: BeforeEffectRegistration,
+  request: BeforeEffectContext,
+): boolean {
+  if (typeof selector === "string") return selector === request.toolName;
+  return (
+    (selector.toolName === undefined || selector.toolName === request.toolName) &&
+    (selector.effect === undefined || selector.effect === request.effect) &&
+    (selector.resourceKind === undefined ||
+      selector.resourceKind === request.resourceKind)
+  );
+}
+
+export function beforeEffectFailureResult(result: BeforeEffectResult): string {
+  return toolResult({
+    ok: false,
+    error: result.error ?? "副作用前置检查未通过。",
+    ...(result.failureData !== undefined
+      ? { data: result.failureData }
+      : {}),
+    ...(result.diagnostics
+      ? { diagnostics: [...result.diagnostics] }
+      : {}),
+    ...(result.metadata ? { metadata: result.metadata } : {}),
+    effect: "none",
+    risk: result.risk ?? "plan",
+  });
+}
+
 export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
 export interface ToolBuildContext {
@@ -70,8 +129,16 @@ export interface ToolBuildContext {
   workflowContract?: WorkflowContract;
   workflow?: WorkflowRuntime;
   diagnosticReporter?: DiagnosticSideReporter;
-  beforeEffectsFor: (toolName: string) => readonly BeforeEffectHook[];
-  registerBeforeEffect: (toolName: string, hook: BeforeEffectHook) => void;
+  beforeEffectsFor: (
+    request: BeforeEffectContext,
+  ) => readonly BeforeEffectHook[];
+  registerBeforeEffect: (
+    selector: BeforeEffectRegistration,
+    hook: BeforeEffectHook,
+  ) => void;
+  runBeforeEffects: (
+    request: BeforeEffectContext,
+  ) => Promise<BeforeEffectRunResult>;
   withEffect: <T>(
     toolName: string,
     input: unknown,
@@ -247,8 +314,13 @@ export function createToolBuildContext(
     diagnosticReporter?: DiagnosticSideReporter;
     runtimeToolGuard?: RuntimeToolCallGuard;
     riskByTool?: Readonly<Record<string, ToolRisk>>;
-    beforeEffectsFor: (toolName: string) => readonly BeforeEffectHook[];
-    registerBeforeEffect: (toolName: string, hook: BeforeEffectHook) => void;
+    beforeEffectsFor: (
+      request: BeforeEffectContext,
+    ) => readonly BeforeEffectHook[];
+    registerBeforeEffect: (
+      selector: BeforeEffectRegistration,
+      hook: BeforeEffectHook,
+    ) => void;
   },
 ): ToolBuildContext {
   const policy = cfg.policy ?? new DefaultToolPolicy(options.riskByTool);
@@ -295,6 +367,18 @@ export function createToolBuildContext(
       if (e instanceof EffectRecoveryRequiredError) throw e;
       return failed(e, risk, effect);
     });
+  const runBeforeEffects = async (
+    request: BeforeEffectContext,
+  ): Promise<BeforeEffectRunResult> => {
+    const receiptData: Record<string, unknown> = {};
+    for (const beforeEffect of options.beforeEffectsFor(request)) {
+      const result = await beforeEffect(request);
+      if (!result) continue;
+      if (!result.ok) return { ok: false, receiptData, failure: result };
+      Object.assign(receiptData, result.receiptData ?? {});
+    }
+    return { ok: true, receiptData };
+  };
 
   return {
     cfg,
@@ -308,6 +392,7 @@ export function createToolBuildContext(
     diagnosticReporter: options.diagnosticReporter,
     beforeEffectsFor: options.beforeEffectsFor,
     registerBeforeEffect: options.registerBeforeEffect,
+    runBeforeEffects,
     withEffect,
     contract,
     failed,
