@@ -7,6 +7,7 @@ import type {
 import type { ToolProvider } from "../../toolRegistry";
 import type { ToolCapability } from "../../toolCatalog";
 import { createStGraphTools } from "./tools/dependencyTools";
+import { createStLibraryTools } from "./tools/libraryTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createStToolBuildContext } from "./stToolContext";
 
@@ -58,6 +59,16 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     domain: "structured_text",
     intents: ["查找 ST 符号引用", "查看符号定义", "分析符号使用"],
     tags: ["structured_text", "analysis", "references"],
+    risk: "plan",
+    effect: "none",
+    fallbackModes: ["read_only"],
+  },
+  {
+    name: "st_library_symbol",
+    description: "查询 IEC 61131-3 标准库符号(功能块/函数/类型)的接口定义。",
+    domain: "structured_text",
+    intents: ["查询标准库符号", "查看功能块引脚", "查看函数接口"],
+    tags: ["structured_text", "library", "analysis"],
     risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
@@ -138,6 +149,7 @@ export function createStToolProvider(): ToolProvider {
       const stContext = createStToolBuildContext(context);
       const validationTools = createValidateStTools(stContext);
       const graphTools = createStGraphTools(stContext);
+      const libraryTools = createStLibraryTools(stContext);
       context.registerBeforeEffect(
         {
           effect: "filesystem",
@@ -154,6 +166,7 @@ export function createStToolProvider(): ToolProvider {
         graphTools.stDependencyMap,
         graphTools.stChangeImpact,
         graphTools.stSymbolReferences,
+        libraryTools.stLibrarySymbol,
       ];
     },
   };

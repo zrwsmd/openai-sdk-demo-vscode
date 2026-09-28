@@ -101,6 +101,11 @@ export interface StAnalyzer {
     request: StSymbolReferencesRequest,
     context?: { signal?: AbortSignal },
   ): Promise<StSymbolReferencesResult>;
+  /** 标准库符号详情:按名字查 IEC 61131-3 标准功能块 / 函数 / 类型的接口。 */
+  libraryLookup(
+    request: StLibraryRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StLibraryResult>;
 }
 
 /**
@@ -397,6 +402,68 @@ export interface StSymbolReferencesResult {
   elapsedMs: number;
 }
 
+// ---------- 标准库符号查询(action=library) ----------
+
+/**
+ * 标准库查询请求:按名字问"这个功能块 / 函数 / 类型长什么样"。
+ *
+ * 与工作区那三个动作的根本区别:它不读工作区文件、不需要语言服务,
+ * 查的是随引擎分发的标准符号表。名字按大小写不敏感做精确匹配,不做模糊搜索:
+ * 查不到就返回空,由上层决定要不要换个名字再问一次。
+ */
+export interface StLibraryRequest {
+  /** 要查询的符号名(大小写不敏感,如 ADD / TON / MC_Power) */
+  symbol: string;
+}
+
+/** 一个形参或返回值。edge 只在有边沿限定时出现(rising/falling)。 */
+export interface StLibraryPort {
+  name: string;
+  type: string;
+  edge?: string;
+  /** struct 成员等场景下的字段说明 */
+  comment?: string;
+}
+
+/**
+ * 一条库符号详情。
+ *
+ * 同名符号可能有多条(如 ADD 在数值加法与时间加法下各有一条),
+ * 靠 inputs/outputs 的类型签名区分用途,因此结果是数组。
+ * 分组名(如 "Standard function blocks")只是符号表的内部组织方式,不对外暴露。
+ */
+export interface StLibraryEntry {
+  name: string;
+  /** functionBlock / function / enum / struct / derived */
+  kind: string;
+  comment?: string;
+  inputs?: StLibraryPort[];
+  outputs?: StLibraryPort[];
+  /** 形如 "(BOOL:IN, TIME:PT) => (BOOL:Q, TIME:ET)" 的签名摘要 */
+  usage?: string;
+  /** 可变参数:可继续追加输入(基准个数见 baseInputCount) */
+  extensible?: boolean;
+  baseInputCount?: number;
+  /** 类型转换函数的适用过滤串(如 ANY_TO_ANY) */
+  typeFilter?: string;
+  /** enum 的枚举值 */
+  values?: string[];
+  /** struct 的成员 */
+  elements?: StLibraryPort[];
+  /** derived 的基类型 */
+  baseType?: string;
+}
+
+export interface StLibraryResult {
+  engine: StAnalyzerEngineInfo;
+  /** 查询用的符号名(原样回传) */
+  symbol: string;
+  /** 命中条数。为 0 表示标准库里没有这个名字 */
+  matchCount: number;
+  entries: StLibraryEntry[];
+  elapsedMs: number;
+}
+
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
@@ -584,6 +651,70 @@ export function parseStSymbolReferencesResponse(raw: string): StSymbolReferences
       })
       .filter((declaration) => declaration.file),
     truncated: references.truncated === true,
+    elapsedMs: asNumber(parsed.elapsedMs),
+  };
+}
+
+function parseStLibraryPorts(value: unknown): StLibraryPort[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ports = value
+    .map((entry): StLibraryPort | undefined => {
+      const record = (entry ?? {}) as Record<string, unknown>;
+      const name = asString(record.name);
+      if (!name) return undefined;
+      const edge = asString(record.edge);
+      const comment = asString(record.comment);
+      return {
+        name,
+        type: asString(record.type, 'ANY'),
+        ...(edge ? { edge } : {}),
+        ...(comment ? { comment } : {}),
+      };
+    })
+    .filter((port): port is StLibraryPort => port !== undefined);
+  return ports.length ? ports : undefined;
+}
+
+/** 解析 action=library 的响应。结构异常归为协议错误(可降级),绝不返回假的"库里没有这个名字"。 */
+export function parseStLibraryResponse(raw: string): StLibraryResult {
+  const parsed = parseBridgeEnvelope(raw);
+  const library = (parsed.library ?? {}) as Record<string, unknown>;
+  const rawEntries = Array.isArray(library.entries) ? library.entries : [];
+  return {
+    engine: parseStEngine(parsed.engine),
+    symbol: asString(library.symbol),
+    matchCount: asNumber(library.matchCount),
+    entries: rawEntries
+      .map((entry): StLibraryEntry | undefined => {
+        const record = (entry ?? {}) as Record<string, unknown>;
+        const name = asString(record.name);
+        if (!name) return undefined;
+        const comment = asString(record.comment);
+        const usage = asString(record.usage);
+        const typeFilter = asString(record.typeFilter);
+        const baseType = asString(record.baseType);
+        const inputs = parseStLibraryPorts(record.inputs);
+        const outputs = parseStLibraryPorts(record.outputs);
+        const elements = parseStLibraryPorts(record.elements);
+        const values = asStringArray(record.values);
+        return {
+          name,
+          kind: asString(record.kind, 'unknown'),
+          ...(comment ? { comment } : {}),
+          ...(inputs ? { inputs } : {}),
+          ...(outputs ? { outputs } : {}),
+          ...(usage ? { usage } : {}),
+          ...(record.extensible === true ? { extensible: true } : {}),
+          ...(typeof record.baseInputCount === 'number'
+            ? { baseInputCount: asNumber(record.baseInputCount) }
+            : {}),
+          ...(typeFilter ? { typeFilter } : {}),
+          ...(values.length ? { values } : {}),
+          ...(elements ? { elements } : {}),
+          ...(baseType ? { baseType } : {}),
+        };
+      })
+      .filter((entry): entry is StLibraryEntry => entry !== undefined),
     elapsedMs: asNumber(parsed.elapsedMs),
   };
 }

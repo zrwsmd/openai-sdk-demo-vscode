@@ -392,6 +392,121 @@ function buildSymbolReferences(shared, created, request) {
   };
 }
 
+// ---- 标准库符号查询(action=library) ----
+//
+// 数据源是同目录 data.json(IEC 61131-3 标准符号表),不需要引擎,因此入口处提前返回。
+// 只按名字做大小写不敏感的精确匹配,不做模糊搜索:查不到就如实说查不到,
+// 由上层决定要不要换个名字再问一次。
+//
+// 分组名(如 "Standard function blocks")只是 data.json 的组织方式,不返回给调用方。
+// 同名符号在不同用途下各有一条(如 ADD 有 ANY_NUM / TIME / TOD / DT 四种),
+// 因此返回数组,靠 inputs/outputs 的类型签名区分 —— 签名本身就说明了用途。
+
+let libraryIndexCache = null;
+
+// gettext 形态的注释要还原:`_("Addition")` -> "Addition";
+// `_("Time-of-day addition")+" "+_("DEPRECATED")` -> "Time-of-day addition DEPRECATED"。
+// 抽取不到片段时按原文返回(部分条目的注释是纯英文自然语言)。
+function commentText(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  if (!text) return '';
+  const parts = [];
+  const pattern = /_\("((?:[^"\\]|\\.)*)"\)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) parts.push(match[1]);
+  if (!parts.length) return text.replace(/\s+/g, ' ').trim();
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function libraryIndex() {
+  if (libraryIndexCache) return libraryIndexCache;
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'));
+  const index = new Map();
+  for (const group of Array.isArray(raw) ? raw : []) {
+    for (const item of (group && group.list) || []) {
+      if (!item || typeof item.name !== 'string' || !item.name.trim()) continue;
+      const key = item.name.trim().toUpperCase();
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(item);
+    }
+  }
+  libraryIndexCache = index;
+  return index;
+}
+
+// 端口统一成 { name, type, edge? };第三项是边沿限定(none/rising/falling),
+// none 表示无限制,不必占位。struct 的成员带注释,一并保留。
+function libraryPorts(raw) {
+  if (!Array.isArray(raw)) return [];
+  const ports = [];
+  for (const entry of raw) {
+    if (Array.isArray(entry)) {
+      const [name, type, edge] = entry;
+      if (typeof name !== 'string' || !name) continue;
+      ports.push({
+        name,
+        type: typeof type === 'string' && type ? type : 'ANY',
+        ...(typeof edge === 'string' && edge && edge !== 'none' ? { edge } : {}),
+      });
+      continue;
+    }
+    if (entry && typeof entry === 'object' && typeof entry.name === 'string' && entry.name) {
+      const comment = commentText(entry.comment);
+      ports.push({
+        name: entry.name,
+        type: typeof entry.type === 'string' && entry.type ? entry.type : 'ANY',
+        ...(comment ? { comment } : {}),
+      });
+    }
+  }
+  return ports;
+}
+
+function libraryEntry(item) {
+  const entry = {
+    name: String(item.name || ''),
+    kind: typeof item.type === 'string' && item.type ? item.type : 'unknown',
+  };
+  const comment = commentText(item.comment);
+  if (comment) entry.comment = comment;
+  const inputs = libraryPorts(item.inputs);
+  const outputs = libraryPorts(item.outputs);
+  if (inputs.length) entry.inputs = inputs;
+  if (outputs.length) entry.outputs = outputs;
+  if (typeof item.usage === 'string' && item.usage.trim()) {
+    entry.usage = item.usage.replace(/\s+/g, ' ').trim();
+  }
+  if (item.extensible === true) {
+    entry.extensible = true;
+    if (typeof item.baseinputnumber === 'number') entry.baseInputCount = item.baseinputnumber;
+  }
+  if (typeof item.filter === 'string' && item.filter.trim()) entry.typeFilter = item.filter.trim();
+  if (Array.isArray(item.values) && item.values.length) entry.values = item.values.slice(0, 50);
+  if (Array.isArray(item.elements) && item.elements.length) {
+    entry.elements = item.elements.slice(0, 50).map((element) => {
+      const member = {
+        name: String((element && element.name) || ''),
+        type: String((element && element.type) || 'ANY'),
+      };
+      const elementComment = commentText(element && element.comment);
+      if (elementComment) member.comment = elementComment;
+      return member;
+    });
+  }
+  if (typeof item.base_type === 'string' && item.base_type) entry.baseType = item.base_type;
+  return entry;
+}
+
+function buildLibraryLookup(request) {
+  const symbol = typeof request.symbol === 'string' ? request.symbol.trim() : '';
+  if (!symbol) return { error: 'library action requires a non-empty "symbol" field' };
+  const hits = libraryIndex().get(symbol.toUpperCase()) || [];
+  return {
+    symbol,
+    matchCount: hits.length,
+    entries: hits.slice(0, 20).map(libraryEntry),
+  };
+}
 
 (async () => {
   let request;
@@ -400,6 +515,33 @@ function buildSymbolReferences(shared, created, request) {
   } catch (error) {
     emit(JSON.stringify({ protocolVersion: 1, error: 'bad_request', message: String(error) }));
     process.exit(3);
+  }
+
+  const action = typeof request.action === 'string' && request.action ? request.action : 'validate';
+
+  // 库查询只读 data.json,不碰引擎:在这里提前返回,省掉加载 main.cjs(Langium)的开销。
+  if (action === 'library') {
+    let payload = null;
+    let exitCode = 0;
+    try {
+      const library = buildLibraryLookup(request);
+      if (library.error) {
+        process.stderr.write(library.error + '\n');
+        exitCode = 3;
+      } else {
+        payload = {
+          protocolVersion: 1,
+          engine: engineInfo(),
+          library,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+    } catch (error) {
+      process.stderr.write('library lookup failed: ' + ((error && error.stack) || error) + '\n');
+      exitCode = 4;
+    }
+    if (payload) emit(JSON.stringify(payload));
+    process.exit(exitCode);
   }
 
   let shared;
@@ -428,7 +570,6 @@ function buildSymbolReferences(shared, created, request) {
     return uri.toString();
   };
 
-  const action = typeof request.action === 'string' && request.action ? request.action : 'validate';
   let exitCode = 0;
   let payload = null;
   try {

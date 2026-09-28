@@ -42,6 +42,7 @@
 - [x] 8. 迁移 ST 功能为正式插件
 - [x] 9. 用非 ST Workflow 验证通用性
 - [x] 10. 清理兼容层并完成边界封锁
+- [x] 11. 增量阶段：文件级 `beforeEffect`、`ToolCatalog` 全覆盖 fallback、动态边界扫描、只读领域工具接入
 
 ## 0. 基线与边界
 
@@ -430,3 +431,35 @@ node scripts/run_coordinator_test.mjs
 - `npm run compile` 通过。
 - `npm run test:boundary`、`npm run test:workflow`、`npm run test:batch` 通过。
 - `npm run test:agent`、`npm run test:st`、`npm run test:jev` 通过。
+
+### 5.4 只读领域工具的直接接入（当前增量阶段）
+
+本阶段新增 `st_library_symbol`（IEC 61131-3 标准库符号查询），用来验证 5.2 的结论：
+新增只读领域工具不需要新建 Workflow，也不需要改 `WorkflowDecisionService`。
+
+- 桥新增 `action=library`：只读同目录 `data.json`（14 组 539 条标准符号），
+  按符号名做大小写不敏感的精确匹配，不做模糊搜索 —— 查不到就返回 0 条，
+  由模型换个名字再问，而不是给出"最接近的几条"把模型带偏。
+- 分组名（如 `Standard function blocks`）只是 `data.json` 的组织方式，不返回给调用方；
+  同名多用途的符号（如 ADD 的数值加法 / 时间加法 / TOD / DT）靠 `inputs` / `outputs`
+  的类型签名区分，返回的是数组而非单条。
+- 注释在符号表里是 gettext 表达式（`_("Addition")`、`_("Time-of-day addition")+" "+_("DEPRECATED")`），
+  桥负责还原成可读文本；`inputs` 的第三项是边沿限定，`none` 不占位。
+- 该动作在桥 `require` 引擎之前返回，不需要语言服务，实测耗时 7ms。
+- 分析层新增 `StLibraryRequest` / `StLibraryResult` / `parseStLibraryResponse` 与
+  `StAnalyzer.libraryLookup`；`SpawnStAnalyzer` 实现，`FallbackStAnalyzer` 与
+  `ResilientStAnalyzer` 提供降级（降级时标注不可用，而不是假装"库里没有这个符号"）。
+- 工具声明 `risk: "plan"`、`effect: "none"`，因此自动进入 `general_chat` /
+  `needs_clarification` / `blocked_high_risk` 三个安全 fallback 工具集，
+  决策服务与 `ToolCatalog` 的查询逻辑均未改动。
+- 未新建 Workflow；`stWorkspaceDeliveryWorkflow` 的白名单仍只有 `validate_st_code` 与
+  `write_file`（该白名单过窄是既有问题，与本次改动无关，另行处理）。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:st` 通过（端口层 18 项 + 库查询 11 项）。
+- `npm run test:batch`、`npm run test:workflow` 通过；`scripts/tool_catalog_test.mjs`
+  中依赖 ST 工具清单的断言已同步更新。
+- 新增 `scripts/st_library_test.mjs`：响应解析、降级可见、能力收录、桥端到端。

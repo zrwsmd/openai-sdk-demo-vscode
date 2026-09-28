@@ -82,7 +82,13 @@ assert.equal(appCatalog.get('export_st_program')?.evidence?.includes('successful
 assert.deepEqual(appRegistry.toolsForEvidence('successful_export'), ['export_st_program']);
 assert.deepEqual(
   appCatalog.find({ providerId: 'st', tags: ['analysis'] }).map((item) => item.name),
-  ['validate_st_code', 'st_dependency_map', 'st_change_impact', 'st_symbol_references'],
+  [
+    'validate_st_code',
+    'st_dependency_map',
+    'st_change_impact',
+    'st_symbol_references',
+    'st_library_symbol',
+  ],
 );
 assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'get_io_table',
@@ -94,6 +100,7 @@ assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'st_dependency_map',
   'st_change_impact',
   'st_symbol_references',
+  'st_library_symbol',
 ]);
 assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
   'get_io_table',
@@ -105,6 +112,7 @@ assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
   'st_dependency_map',
   'st_change_impact',
   'st_symbol_references',
+  'st_library_symbol',
 ]);
 assert(!appCatalog.toolsForFallback('general_chat').includes('write_file'));
 assert(!appCatalog.toolsForFallback('general_chat').includes('export_st_program'));

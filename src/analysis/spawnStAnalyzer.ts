@@ -8,6 +8,7 @@ import {
   parseStAnalyzerResponse,
   parseStGraphResponse,
   parseStImpactResponse,
+  parseStLibraryResponse,
   parseStSymbolReferencesResponse,
   ST_ANALYZER_PROTOCOL_VERSION,
   StAnalyzerUnavailableError,
@@ -17,6 +18,8 @@ import {
   type StGraphResult,
   type StImpactRequest,
   type StImpactResult,
+  type StLibraryRequest,
+  type StLibraryResult,
   type StSymbolReferencesRequest,
   type StSymbolReferencesResult,
   type StValidationRequest,
@@ -105,7 +108,20 @@ export class SpawnStAnalyzer implements StAnalyzer {
   }
 
   /**
-   * 执行一次桥动作(validate/graph/impact/symbol 共用)。
+   * 标准库查询:桥在加载引擎之前就返回,因此这条路径比其余动作快一个量级。
+   */
+  async libraryLookup(
+    request: StLibraryRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StLibraryResult> {
+    const startedAt = this.now();
+    const raw = await this.runAction('library', { symbol: request.symbol }, context);
+    const parsed = parseStLibraryResponse(raw);
+    return { ...parsed, elapsedMs: parsed.elapsedMs || this.now() - startedAt };
+  }
+
+  /**
+   * 执行一次桥动作(validate/graph/impact/symbol/library 共用)。
    * 按候选链依次尝试;不可用错误换下一个候选;取消原样上抛。
    */
   private async runAction(

@@ -12,6 +12,8 @@ import {
   type StGraphRequest,
   type StImpactRequest,
   type StImpactResult,
+  type StLibraryRequest,
+  type StLibraryResult,
   type StSymbolReferencesRequest,
   type StSymbolReferencesResult,
   type StTarget,
@@ -107,6 +109,20 @@ export class FallbackStAnalyzer implements StAnalyzer {
       elapsedMs: 0,
     };
   }
+
+  /**
+   * 标准库查询同样"给不出就别说":符号表随引擎分发,降级实现读不到它,
+   * 因此返回空结果 + fallbackReason,由工具层如实告知模型,而不是假装"库里没有这个符号"。
+   */
+  async libraryLookup(request: StLibraryRequest): Promise<StLibraryResult> {
+    return {
+      engine: { id: 'fallback', fallbackReason: this.reason },
+      symbol: request.symbol,
+      matchCount: 0,
+      entries: [],
+      elapsedMs: 0,
+    };
+  }
 }
 
 /**
@@ -196,6 +212,28 @@ export class ResilientStAnalyzer implements StAnalyzer {
     } catch (error) {
       if (error instanceof StAnalyzerUnavailableError) {
         const result = await this.fallback.findSymbolReferences(request, context);
+        return {
+          ...result,
+          engine: {
+            ...result.engine,
+            fallbackReason: error.code,
+            ...(error.detail ? { detail: error.detail } : {}),
+          },
+        };
+      }
+      throw error;
+    }
+  }
+
+  async libraryLookup(
+    request: StLibraryRequest,
+    context?: { signal?: AbortSignal },
+  ): Promise<StLibraryResult> {
+    try {
+      return await this.primary.libraryLookup(request, context);
+    } catch (error) {
+      if (error instanceof StAnalyzerUnavailableError) {
+        const result = await this.fallback.libraryLookup(request, context);
         return {
           ...result,
           engine: {

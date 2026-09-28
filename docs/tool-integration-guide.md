@@ -421,8 +421,21 @@ vendoring 脚本必须遵守：
 | `src/analysis/fallbackStAnalyzer.ts` | 兜底实现 + 降级组合器 |
 | `src/analysis/workspaceStContext.ts` | 上下文文件收集（配额受控、走工作区边界） |
 | `src/app/analyzerHost.ts` | 宿主装配（唯一 import vscode；产物路径、运行时候选、配置读取） |
-| `scripts/st_analyzer_bridge.cjs` | 桥脚本（噪声隔离、零依赖 URI、显式退出） |
+| `scripts/st_analyzer_bridge.cjs` | 桥脚本（噪声隔离、零依赖 URI、显式退出）；动作 `validate` / `graph` / `impact` / `symbol` / `library` |
 | `scripts/vendor_st_analyzer.mjs` | vendoring（复制产物 + sha256 + commit + 幂等提示） |
-| `vendor/st-analyzer/` | 交付物（main.cjs + data.json + bridge.cjs + vendor.json，不入库） |
+| `vendor/st-analyzer/` | 交付物（main.cjs + data.json + bridge.cjs + vendor.json，不入库）；`data.json` 是标准库符号表 |
+| `src/runtime/plugins/st/tools/libraryTools.ts` | 标准库查询工具（只读、不依赖工作区，数据来自 `data.json`） |
 | `scripts/st_analyzer_cli.mjs` | 独立 CLI（最小宿主范例：脱离 VSCode，用同一套端口层跑真实校验；`--version` 输出 vendor 追溯信息） |
 | `scripts/st_analyzer_test.mjs` | 端口层回归测试（假执行器 + 真实进程 + 真实端到端） |
+| `scripts/st_library_test.mjs` | 库查询回归测试（解析 / 降级 / 能力收录 / 桥端到端） |
+
+### 附注：不需要引擎的桥动作走快速路径
+
+桥在 `require(main.cjs)` 之前就分派动作。凡是只读"随产物分发的数据文件"、不需要语言服务的动作
+（本例 `action=library` 读 `data.json`），应当在加载引擎之前直接返回：
+
+- 省掉加载引擎的开销（本例实测 7ms，与加载语言服务的量级差一个数量级）；
+- 引擎缺失时这类查询仍然可用，只有真正依赖语义分析的动作用不了。
+
+代价是拿不到引擎内部的解析结果，因此只适合"查表"型能力。
+判断标准很简单：如果这个动作只用产物里的静态资源就能回答，就不要 `require` 引擎。
