@@ -50,6 +50,13 @@
 - [x] 16. 增量阶段：收紧 Delivery Facade，迁移内部兼容实现
 - [x] 17. 增量阶段：自动封锁公共层对旧 Delivery Facade 的依赖
 - [x] 18. 增量阶段：非 ST Workflow 脱离 Delivery 兼容接口
+- [ ] 19. 删除无用的 ST Inspection Workflow
+- [ ] 20. 建立 ST 私有运行时服务
+- [ ] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
+- [ ] 22. 让 Agent 彻底移除 Delivery 适配调用
+- [ ] 23. 删除旧 Delivery 兼容层
+- [ ] 24. 清理协议中的旧 Delivery 兼容字段
+- [ ] 25. 强化最终 Workflow 边界测试
 
 ## 0. 基线与边界
 
@@ -441,6 +448,126 @@ Delivery Workflow。
 - `npm run compile` 通过。
 - `npm run test:boundary`、`npm run test:workflow`、`npm run test:st` 和
   `npm run test:batch` 通过。
+
+## 后续实施顺序
+
+当前项目仍处于开发阶段，暂无外部调用方依赖旧 Delivery 接口，因此后续直接
+按最终通用协议迁移，不再为旧 Delivery 保留长期兼容实现。实施顺序固定如下：
+
+### 19. 删除无用的 ST Inspection Workflow
+
+- 删除 `src/runtime/plugins/st/stInspectionWorkflow.ts`。
+- 删除测试入口中的 `ST_INSPECTION_WORKFLOW` 导出。
+- 删除测试中对 `StInspectionWorkflow` 和 `st_inspection` Workflow 的依赖。
+- 清理 Jev/Workflow 测试中旧的 `st_inspection` 路由预期。
+- 保留 `st_dependency_map`、`st_change_impact` 和
+  `st_symbol_references` 工具。
+- ST 分析统一通过 `read_only + ToolCatalog` 选择工具。
+
+### 20. 建立 ST 私有运行时服务
+
+在 ST 插件内部整理 `StValidationRuntimeService`，集中管理：
+
+- `validationInputMode`。
+- `recordSuccessfulValidation`。
+- `canWriteContent`。
+- ST 校验哈希。
+- 最近一次成功校验内容。
+- 历史校验状态恢复。
+
+该服务只属于 ST 插件，通过通用 `WorkflowRuntime.services` 传递给
+`stToolContext`、`validateStTool` 和 `stToolProvider`，公共 Workflow 协议不声明
+这些 ST 能力。
+
+### 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
+
+将 `StWorkspaceDeliveryWorkflow` 改为：
+
+```ts
+implements WorkflowRuntime
+```
+
+同时完成能力迁移：
+
+- `chooseRepairTool` -> `completionAdapter.selectRepairTool`。
+- `collectArtifacts` -> `completionAdapter.collectArtifacts`。
+- `resolveIssue` -> `completionAdapter.resolveIssue`。
+- `hasSuccessfulVerification` -> Completion Adapter。
+- `authoritativeMessage` -> `completionAdapter.finalMessage`。
+- `hydrate` -> `completionAdapter.restore`。
+- `verifyRequiredAction` -> `completionAdapter.collectActionArtifact`。
+
+Descriptor 从 `matchesDeliveryContract`、`createDeliveryContract` 迁移到通用的
+`matchesContract`、`createContract`。ST 专用校验状态继续由
+`StValidationRuntimeService` 管理。
+
+### 22. 让 Agent 彻底移除 Delivery 适配调用
+
+删除 Agent 中的：
+
+```ts
+adaptDeliveryWorkflow(...)
+```
+
+Agent 直接消费通用 `WorkflowRuntime`。ST 工具需要的专用能力通过
+`WorkflowRuntime.services` 获取，Agent 不解释 ST 业务语义。
+
+### 23. 删除旧 Delivery 兼容层
+
+确认 ST Workflow 已迁移并且所有测试通过后，删除：
+
+- `src/runtime/workflow/deliveryCompatibility.ts`。
+- `src/runtime/deliveryWorkflow.ts`。
+- `DeliveryWorkflow`。
+- `AdaptedWorkflowRuntime`。
+- `DeliveryWorkflowDescriptor`。
+- `createDeliveryWorkflowRuntime`。
+- `adaptDeliveryWorkflow`。
+- `DeliveryWorkflowRuntimeState` 及其创建函数兼容别名。
+
+同步清理测试入口和历史兼容导出。
+
+### 24. 清理协议中的旧 Delivery 兼容字段
+
+删除确认无调用方的：
+
+- `createDeliveryContract`。
+- `matchesDeliveryContract`。
+- 其他 Delivery 专用兼容字段。
+
+保留真正通用的 `WorkflowRuntime`、`WorkflowDescriptor`、
+`WorkflowContract`、`WorkflowCompletionAdapter`、`WorkflowRuntimeState` 和
+`WorkflowRuntimeContext`。`DeliveryContract` 是否继续保留，单独作为交付约束
+数据评估，不与旧 `DeliveryWorkflow` 接口删除混为一谈。
+
+### 25. 强化最终 Workflow 边界测试
+
+最终边界测试必须确保：
+
+- 公共层不出现 `DeliveryWorkflow`。
+- 公共层不导入 `deliveryWorkflow.ts`。
+- 旧兼容文件已删除。
+- 非 ST Workflow 不依赖 ST 或 Delivery 类型。
+- ST 私有服务只存在于 ST 插件目录。
+- 不修改 `st-analyze` 和 `src/analysis/*` 的实现。
+
+每个阶段完成后执行：
+
+```text
+npx tsc --noEmit
+npm run compile
+npm run test:workflow
+npm run test:st
+```
+
+全部阶段完成后执行：
+
+```text
+npm run test:batch
+node scripts/run_store_test.mjs
+node scripts/run_coordinator_test.mjs
+npm run test:jev
+```
 
 ### 0. 基线记录
 
