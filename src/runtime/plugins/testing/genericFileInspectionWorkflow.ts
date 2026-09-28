@@ -1,17 +1,14 @@
-import type { Artifact } from "../../../protocol/results";
-import type { CompletionGateResult } from "../../completionTypes";
 import {
   getWorkflowStateSlot,
-  type DeliveryWorkflowRuntimeState,
+  type WorkflowRuntimeState,
 } from "../../workflow/runtimeState";
 import type {
-  DeliveryWorkflow,
-  DeliveryWorkflowDescriptor,
-} from "../../workflow/deliveryCompatibility";
-import type {
+  WorkflowCompletionAdapter,
   WorkflowDecisionContext,
+  WorkflowDescription,
   WorkflowDescriptor,
   WorkflowLocalMatch,
+  WorkflowRuntime,
   WorkflowToolRecord,
 } from "../../workflow/types";
 
@@ -34,7 +31,7 @@ export function createGenericFileInspectionState(): GenericFileInspectionState {
 }
 
 export function getGenericFileInspectionState(
-  state: DeliveryWorkflowRuntimeState,
+  state: WorkflowRuntimeState,
 ): GenericFileInspectionState {
   return getWorkflowStateSlot(
     state,
@@ -43,7 +40,7 @@ export function getGenericFileInspectionState(
   );
 }
 
-function describeGenericFileInspection(): DeliveryWorkflowDescriptor {
+function describeGenericFileInspection(): WorkflowDescription {
   return {
     id: GENERIC_FILE_INSPECTION_WORKFLOW_ID,
     title: "Generic file inspection",
@@ -89,13 +86,12 @@ export const GENERIC_FILE_INSPECTION_WORKFLOW: WorkflowDescriptor = {
   workflowRoute: GENERIC_FILE_INSPECTION_WORKFLOW_ID,
   businessToolNames: GENERIC_FILE_INSPECTION_TOOL_NAMES,
   describe: describeGenericFileInspection,
-  createDeliveryContract: () => undefined,
   localMatch,
   createRuntime: (_contract, state) =>
     new GenericFileInspectionWorkflow(getGenericFileInspectionState(state)),
 };
 
-export class GenericFileInspectionWorkflow implements DeliveryWorkflow {
+export class GenericFileInspectionWorkflow implements WorkflowRuntime {
   readonly id = GENERIC_FILE_INSPECTION_WORKFLOW_ID;
   readonly title = GENERIC_FILE_INSPECTION_WORKFLOW.title;
   readonly stages = describeGenericFileInspection().stages;
@@ -125,38 +121,29 @@ export class GenericFileInspectionWorkflow implements DeliveryWorkflow {
     );
   }
 
-  chooseRepairTool(
-    _gate: Exclude<CompletionGateResult, { passed: true }>,
-    records: WorkflowToolRecord[],
-    availableToolNames: Set<string>,
-  ): string | undefined {
-    if (!availableToolNames.has("read_file")) return undefined;
-    const hasSuccessfulRead = records.some((record) =>
-      record.name === "read_file" && record.result.ok,
-    );
-    return hasSuccessfulRead ? undefined : "read_file";
-  }
-
-  authoritativeMessage(_records: WorkflowToolRecord[]): string | undefined {
-    return undefined;
-  }
-
-  hydrate(records: WorkflowToolRecord[]): void {
-    for (const record of records) {
-      if (!record.result.ok) continue;
-      this.state.inspectedTargets.add(record.name);
-      const data = record.result.data;
-      if (!data || typeof data !== "object" || Array.isArray(data)) continue;
-      for (const key of ["path", "file", "relativePath"] as const) {
-        const value = (data as Record<string, unknown>)[key];
-        if (typeof value === "string" && value.trim()) {
-          this.state.inspectedTargets.add(value.trim());
+  readonly completionAdapter: WorkflowCompletionAdapter = {
+    selectRepairTool: (_gate, records, availableToolNames) => {
+      if (!availableToolNames.has("read_file")) return undefined;
+      const hasSuccessfulRead = records.some((record) =>
+        record.name === "read_file" && record.result.ok,
+      );
+      return hasSuccessfulRead ? undefined : "read_file";
+    },
+    finalMessage: () => undefined,
+    restore: (records: WorkflowToolRecord[]) => {
+      for (const record of records) {
+        if (!record.result.ok) continue;
+        this.state.inspectedTargets.add(record.name);
+        const data = record.result.data;
+        if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+        for (const key of ["path", "file", "relativePath"] as const) {
+          const value = (data as Record<string, unknown>)[key];
+          if (typeof value === "string" && value.trim()) {
+            this.state.inspectedTargets.add(value.trim());
+          }
         }
       }
-    }
-  }
-
-  verifyRequiredAction(_call: WorkflowToolRecord): Artifact | undefined {
-    return undefined;
-  }
+    },
+    collectActionArtifact: () => undefined,
+  };
 }

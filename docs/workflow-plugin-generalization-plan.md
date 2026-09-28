@@ -49,6 +49,7 @@
 - [x] 15. 增量阶段：通用运行时入口与 Delivery 兼容 Facade 分离
 - [x] 16. 增量阶段：收紧 Delivery Facade，迁移内部兼容实现
 - [x] 17. 增量阶段：自动封锁公共层对旧 Delivery Facade 的依赖
+- [x] 18. 增量阶段：非 ST Workflow 脱离 Delivery 兼容接口
 
 ## 0. 基线与边界
 
@@ -414,6 +415,32 @@ Delivery Workflow。
 - `npm run compile` 通过。
 - `npm run test:boundary` 通过。
 - `npm run test:workflow`、`npm run test:st` 和 `npm run test:batch` 通过。
+
+### 18. 非 ST Workflow 脱离 Delivery 兼容接口
+
+本阶段把测试用的 `genericFileInspectionWorkflow` 迁移为纯通用
+`WorkflowRuntime`，用它验证非 ST Workflow 不需要实现旧 Delivery 方法。
+
+本阶段已完成：
+
+- `GenericFileInspectionWorkflow` 改为实现通用 `WorkflowRuntime`。
+- 通用状态改用 `WorkflowRuntimeState`，不再依赖
+  `DeliveryWorkflowRuntimeState` 别名。
+- 通用描述器改用 `WorkflowDescription`，不再要求 Delivery 契约钩子。
+- `chooseRepairTool`、`hydrate`、`authoritativeMessage` 和
+  `verifyRequiredAction` 迁移到通用 `completionAdapter`。
+- `WorkflowDescriptor.createDeliveryContract` 修正为真正可选，纯通用 Workflow
+  可以不声明任何 Delivery 契约。
+- 回归测试确认通用 Workflow 没有旧 Delivery 方法，但仍能完成状态恢复、
+  完成判定和修复工具选择。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:boundary`、`npm run test:workflow`、`npm run test:st` 和
+  `npm run test:batch` 通过。
 
 ### 0. 基线记录
 

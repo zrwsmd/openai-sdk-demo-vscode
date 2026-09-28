@@ -12,7 +12,7 @@ import {
   WorkflowDecisionService,
   WorkflowRegistry,
   createCoreToolProvider,
-  createDeliveryWorkflowRuntimeState,
+  createWorkflowRuntimeState,
   createWorkflowRuntime,
   createLegacyDeliveryWorkflowRuntime,
   adaptDeliveryWorkflow,
@@ -52,7 +52,7 @@ try {
   assert.equal(decision.workflow.id, 'generic_file_inspection');
   assert.equal(decision.source, 'local');
 
-  const runtimeState = createDeliveryWorkflowRuntimeState();
+  const runtimeState = createWorkflowRuntimeState();
   const runtime = GENERIC_FILE_INSPECTION_WORKFLOW.createRuntime?.(
     undefined,
     runtimeState,
@@ -94,7 +94,10 @@ try {
     result: readResult,
     order: 1,
   };
-  runtime.hydrate([record]);
+  assert(runtime.completionAdapter);
+  assert.equal('hydrate' in runtime, false);
+  assert.equal('chooseRepairTool' in runtime, false);
+  runtime.completionAdapter.restore?.([record]);
   assert(runtime.state.inspectedTargets.has('read_file'));
   assert(runtime.state.inspectedTargets.has('sample.txt'));
 
@@ -186,7 +189,7 @@ try {
     },
   );
 
-  const stState = createDeliveryWorkflowRuntimeState();
+  const stState = createWorkflowRuntimeState();
   const stRuntime = ST_INSPECTION_WORKFLOW.createRuntime?.(
     undefined,
     stState,
@@ -221,7 +224,7 @@ try {
   const genericStRuntime = createWorkflowRuntime(
     'st_inspection',
     undefined,
-    createDeliveryWorkflowRuntimeState(),
+    createWorkflowRuntimeState(),
     new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
     { userText: '分析这个 ST 文件的变更影响面' },
   );
@@ -245,7 +248,7 @@ try {
   const legacyFacadeRuntime = createLegacyDeliveryWorkflowRuntime(
     'st_inspection',
     undefined,
-    createDeliveryWorkflowRuntimeState(),
+    createWorkflowRuntimeState(),
     new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
     { userText: '分析这个 ST 文件的变更影响面' },
   );

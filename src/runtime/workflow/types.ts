@@ -213,7 +213,7 @@ export interface WorkflowDescriptor {
   }): WorkflowContract | undefined;
   /** Compatibility hooks used by the current delivery runtime. */
   matchesDeliveryContract?(contract: DeliveryContract | undefined): boolean;
-  createDeliveryContract(options?: {
+  createDeliveryContract?(options?: {
     reason?: string;
     source?: WorkflowDecisionSource;
   }): DeliveryContract | undefined;
