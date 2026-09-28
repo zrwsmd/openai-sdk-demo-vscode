@@ -411,3 +411,22 @@ node scripts/run_coordinator_test.mjs
 - 边界扫描确认 `completionGate.ts`、`completionTypes.ts`、`deliveryContract.ts`、
   `toolRegistry.ts` 和 `toolBuildContext.ts` 没有 ST 专用工具名、分析器或扩展名业务
   判断。未修改 `src/analysis/*` 或 `st-analyze` 桥。
+
+### 5.3 动态公共层边界扫描（当前增量阶段）
+
+- `scripts/runtime_boundary_test.mjs` 不再手写 ST 工具名黑名单；静态列表只保留架构
+  耦合关键词，例如分析器类型、领域判断函数和 ST 扩展名模式。
+- 边界测试会加载宿主测试装配生成的 `ToolRegistry`，从非 Core Provider 的
+  `ToolCapability` 自动收集领域工具名，再检查这些工具名是否泄漏到公共
+  `src/runtime` 核心。新增 ST、JSON、数据库或其他插件工具时不需要修改扫描脚本。
+- `npm run test:boundary` 先重新生成测试 bundle，再执行扫描，避免使用过期的注册表
+  快照；直接执行脚本时如果 bundle 不存在也会自动生成。
+- 动态发现不到任何插件能力时测试直接失败，避免边界检查因装配异常而静默失效。
+- 未修改 `src/analysis/*` 或 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:boundary`、`npm run test:workflow`、`npm run test:batch` 通过。
+- `npm run test:agent`、`npm run test:st`、`npm run test:jev` 通过。
