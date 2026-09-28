@@ -56,6 +56,17 @@ assert.deepEqual(
   coreCatalog.findByIntent('读取文件').map((item) => item.name),
   ['read_file'],
 );
+assert.deepEqual(coreCatalog.toolsForText('写入文件', { minScore: 0.74 }), [
+  'write_file',
+]);
+assert.deepEqual(
+  coreCatalog.toolsForFallback('file_edit', '编辑文件'),
+  ['edit_file'],
+);
+assert.deepEqual(
+  coreCatalog.toolsForFallback('file_edit', '这是一个完全没有匹配意图的请求'),
+  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file'],
+);
 assert.deepEqual(
   coreCatalog.find({ risks: ['read'] }).map((item) => item.name),
   ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
@@ -106,6 +117,17 @@ assert.deepEqual(
     'st_symbol_references',
     'st_library_symbol',
   ],
+);
+assert.deepEqual(
+  appCatalog.toolsForFallback(
+    'read_only',
+    '分析一下当前工作区里这些 st 文件之间的依赖关系',
+  ),
+  ['st_dependency_map'],
+);
+assert.deepEqual(
+  appCatalog.toolsForFallback('read_only', '查看某个 ST 文件的变更影响范围'),
+  ['st_change_impact'],
 );
 assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'get_io_table',
@@ -267,7 +289,6 @@ const fallbackDecision = await decisionService.decide(
 assert.equal(fallbackDecision.kind, 'fallback');
 assert.deepEqual(fallbackDecision.allowedTools, [
   'query_modbus_device',
-  'library_symbol',
 ]);
 
 const safeFallbackDecision = await decisionService.decide(

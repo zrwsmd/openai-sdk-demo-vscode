@@ -508,3 +508,22 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:workflow`、`npm run test:batch`、`npm run test:agent`、
   `npm run test:st`、`npm run test:jev` 通过。
 - `ToolCatalog` 回归覆盖了普通工具能力说明和未登记运行时控制工具的兼容展示。
+
+### 5.6 通用工具意图筛选（当前增量阶段）
+
+- `ToolCatalog` 新增通用文本意图匹配：只读取插件声明的 `name`、`description`、
+  `intents`、`tags` 和 `domain`，不包含任何 ST 判断。
+- fallback 先按原有风险/模式得到基础工具集，再对用户文本进行可解释的能力匹配；
+  只有高置信度且候选数量有限时才收窄工具集。
+- 没有命中、命中太弱、候选过多或意图相近时，保留原基础工具集，不因为一次本地
+  匹配误删工具。
+- 因此新增一个领域工具只需在 Provider 的 `ToolCapability` 中声明用途和意图，
+  不需要修改 `WorkflowDecisionService` 或 `agent.ts` 的领域业务逻辑。
+- 本阶段仍保留 `st_inspection` 兼容路由；下一阶段可以在关闭该路由后，用同一套
+  `read_only + ToolCatalog` 验证 ST 依赖、影响面和符号查询。
+
+阶段测试结果：
+
+- `npx tsc --noEmit`、`npm run compile`、`npm run test:workflow` 通过。
+- `ToolCatalog` 回归覆盖了普通文件编辑意图、未命中保守回退，以及 ST 工具作为
+  外部 Provider 被通用筛选的行为。

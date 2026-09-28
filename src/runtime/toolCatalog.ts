@@ -56,6 +56,19 @@ export interface ToolCapabilityQuery {
   risks?: readonly ToolRisk[];
 }
 
+export interface ToolCapabilityTextQuery {
+  names?: readonly string[];
+  minScore?: number;
+  limit?: number;
+}
+
+export interface ToolCapabilityTextMatch {
+  capability: RegisteredToolCapability;
+  score: number;
+  matchedIntents: readonly string[];
+  matchedFields: readonly ("name" | "description" | "intent" | "tag" | "domain")[];
+}
+
 /**
  * Fallback surfaces that may inspect context without creating a new side
  * effect. Their tool set is derived from capability risk metadata rather than
@@ -78,6 +91,89 @@ export function capabilityQueryForFallback(
 
 function normalized(value: string): string {
   return value.trim().toLocaleLowerCase();
+}
+
+function compactSearchText(value: string): string {
+  return normalized(value).replace(/[^\p{L}\p{N}_]+/gu, "");
+}
+
+function longestCommonSubstringLength(left: string, right: string): number {
+  if (!left || !right) return 0;
+  const previous = new Array<number>(right.length + 1).fill(0);
+  let longest = 0;
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      if (left[leftIndex - 1] !== right[rightIndex - 1]) continue;
+      current[rightIndex] = previous[rightIndex - 1] + 1;
+      if (current[rightIndex] > longest) longest = current[rightIndex];
+    }
+    for (let rightIndex = 0; rightIndex <= right.length; rightIndex += 1) {
+      previous[rightIndex] = current[rightIndex];
+    }
+  }
+  return longest;
+}
+
+function textMatchScore(query: string, value: string, weight: number): number {
+  const compactQuery = compactSearchText(query);
+  const compactValue = compactSearchText(value);
+  if (!compactQuery || !compactValue) return 0;
+  if (
+    compactQuery.includes(compactValue) ||
+    compactValue.includes(compactQuery)
+  ) {
+    return weight;
+  }
+  const commonLength = longestCommonSubstringLength(compactQuery, compactValue);
+  if (commonLength >= 5) return weight * 0.92;
+  if (commonLength >= 4) return weight * 0.82;
+  if (commonLength >= 3) return weight * 0.68;
+  if (commonLength >= 2) return weight * 0.42;
+  return 0;
+}
+
+function matchCapabilityText(
+  query: string,
+  capability: RegisteredToolCapability,
+): ToolCapabilityTextMatch {
+  const candidates: Array<{
+    field: ToolCapabilityTextMatch["matchedFields"][number];
+    value: string;
+    weight: number;
+  }> = [
+    { field: "name", value: capability.name, weight: 0.82 },
+    { field: "description", value: capability.description, weight: 0.9 },
+    ...(capability.intents ?? []).map((value) => ({
+      field: "intent" as const,
+      value,
+      weight: 1,
+    })),
+    ...(capability.tags ?? []).map((value) => ({
+      field: "tag" as const,
+      value,
+      weight: 0.58,
+    })),
+    ...(capability.domain
+      ? [{ field: "domain" as const, value: capability.domain, weight: 0.58 }]
+      : []),
+  ];
+  let score = 0;
+  const matchedFields = new Set<ToolCapabilityTextMatch["matchedFields"][number]>();
+  const matchedIntents: string[] = [];
+  for (const candidate of candidates) {
+    const candidateScore = textMatchScore(query, candidate.value, candidate.weight);
+    if (candidateScore <= 0) continue;
+    score = Math.max(score, candidateScore);
+    matchedFields.add(candidate.field);
+    if (candidate.field === "intent") matchedIntents.push(candidate.value);
+  }
+  return {
+    capability,
+    score,
+    matchedIntents,
+    matchedFields: [...matchedFields],
+  };
 }
 
 function normalizedList(values: readonly string[] | undefined): readonly string[] {
@@ -304,6 +400,28 @@ export class ToolCatalog {
     return this.find({ tags: [tag] });
   }
 
+  findByText(
+    text: string,
+    query: ToolCapabilityTextQuery = {},
+  ): readonly ToolCapabilityTextMatch[] {
+    const names = query.names?.map(normalized);
+    const minScore = query.minScore ?? 0.5;
+    const limit = query.limit && query.limit > 0 ? Math.floor(query.limit) : undefined;
+    const matches = this.list()
+      .filter((capability) => !names?.length || names.includes(normalized(capability.name)))
+      .map((capability) => matchCapabilityText(text, capability))
+      .filter((match) => match.score >= minScore)
+      .sort((left, right) => right.score - left.score);
+    return limit ? matches.slice(0, limit) : matches;
+  }
+
+  toolsForText(
+    text: string,
+    query: ToolCapabilityTextQuery = {},
+  ): readonly string[] {
+    return this.findByText(text, query).map((match) => match.capability.name);
+  }
+
   toolsForQuery(query: ToolCapabilityQuery = {}): readonly string[] {
     return this.find(query).map((capability) => capability.name);
   }
@@ -336,11 +454,29 @@ export class ToolCatalog {
       .map((capability) => capability.name);
   }
 
-  toolsForFallback(mode: ToolFallbackMode): readonly string[] {
+  toolsForFallback(mode: ToolFallbackMode, userText?: string): readonly string[] {
     const query = capabilityQueryForFallback(mode);
-    if (query) return this.toolsForQuery(query);
-    return this.list()
+    const baseTools = query
+      ? this.toolsForQuery(query)
+      : this.list()
       .filter((capability) => capability.fallbackModes?.includes(mode))
       .map((capability) => capability.name);
+    if (!userText?.trim() || baseTools.length < 2) return baseTools;
+
+    const matches = this.findByText(userText, {
+      names: baseTools,
+      minScore: 0.74,
+    });
+    if (!matches.length) return baseTools;
+    const topScore = matches[0].score;
+    const selected = matches
+      .filter((match) => match.score >= topScore - 0.08)
+      .map((match) => match.capability.name);
+    // A weak or broad match must never hide tools. Only a strong, bounded
+    // result is allowed to narrow the ordinary fallback surface.
+    if (topScore < 0.82 || selected.length === 0 || selected.length > 4) {
+      return baseTools;
+    }
+    return selected;
   }
 }

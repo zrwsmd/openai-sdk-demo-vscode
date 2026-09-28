@@ -50,7 +50,7 @@ export class WorkflowDecisionService {
           description: workflow.description,
         })),
     });
-    const jevDecision = this.workflowFromJevHint(jevHint);
+    const jevDecision = this.workflowFromJevHint(jevHint, userText);
     if (jevDecision) return jevDecision;
 
     const localDecision = this.workflowFromLocalDetectors(userText, history, workflows, jevHint);
@@ -67,10 +67,13 @@ export class WorkflowDecisionService {
     );
     if (modelDecision) return modelDecision;
 
-    return this.fallbackFromHint(jevHint);
+    return this.fallbackFromHint(jevHint, userText);
   }
 
-  private workflowFromJevHint(hint: TaskDecisionHint): WorkflowDecision | undefined {
+  private workflowFromJevHint(
+    hint: TaskDecisionHint,
+    userText: string,
+  ): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
     if (workflow) {
       const contract = createWorkflowContract(workflow, {
@@ -97,7 +100,7 @@ export class WorkflowDecisionService {
     // command_query become visible, while tool approval/policy still applies.
     if (isSafeCommandQueryHint(hint)) {
       const mode: WorkflowFallbackMode = "command_query";
-      const allowedTools = this.allowedToolsForFallback(mode);
+      const allowedTools = this.allowedToolsForFallback(mode, userText);
       const confidence = hint.toolNeeds.runCommand.confidence;
       const reason = "Jev 高置信度判断需要执行受控命令，进入命令/环境查询 fallback";
       this.log(
@@ -188,7 +191,7 @@ export class WorkflowDecisionService {
     }
     const allowedTools = decision.allowedTools
       ? [...new Set(decision.allowedTools)]
-      : this.allowedToolsForFallback(decision.mode);
+      : this.allowedToolsForFallback(decision.mode, userText);
     this.log(
       `[workflow] model fallback ${decision.mode}(${decision.confidence.toFixed(2)}): ${decision.reason}` +
         (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
@@ -204,10 +207,10 @@ export class WorkflowDecisionService {
     };
   }
 
-  private fallbackFromHint(hint: TaskDecisionHint): WorkflowDecision {
+  private fallbackFromHint(hint: TaskDecisionHint, userText: string): WorkflowDecision {
     const mode = fallbackModeFromHint(hint);
     const reason = fallbackReason(mode, hint);
-    const allowedTools = this.allowedToolsForFallback(mode);
+    const allowedTools = this.allowedToolsForFallback(mode, userText);
     this.log(
       `[workflow] fallback ${mode}: ${reason}` +
         (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
@@ -225,9 +228,10 @@ export class WorkflowDecisionService {
 
   private allowedToolsForFallback(
     mode: WorkflowFallbackMode,
+    userText?: string,
   ): readonly string[] | undefined {
     if (this.toolCatalog) {
-      return this.toolCatalog.toolsForFallback(mode);
+      return this.toolCatalog.toolsForFallback(mode, userText);
     }
     return allowedToolsForFallback(mode);
   }

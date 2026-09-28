@@ -6,6 +6,8 @@ import {
   ToolCatalog,
   capabilityQueryForFallback,
   type ToolCapability,
+  type ToolCapabilityTextMatch,
+  type ToolCapabilityTextQuery,
 } from "./toolCatalog";
 import {
   commandToolResult,
@@ -26,6 +28,8 @@ export { ToolCatalog, capabilityQueryForFallback };
 export type {
   RegisteredToolCapability,
   ToolCapability,
+  ToolCapabilityTextMatch,
+  ToolCapabilityTextQuery,
   ToolCapabilityQuery,
   ToolCapabilityRegistrationDefaults,
   ToolFallbackMode,
