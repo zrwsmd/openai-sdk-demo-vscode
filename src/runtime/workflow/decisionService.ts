@@ -199,7 +199,7 @@ export class WorkflowDecisionService {
   private allowedToolsForFallback(
     mode: WorkflowFallbackMode,
   ): readonly string[] | undefined {
-    if (this.toolCatalog && (mode === "read_only" || mode === "file_edit")) {
+    if (this.toolCatalog) {
       return this.toolCatalog.toolsForFallback(mode);
     }
     return allowedToolsForFallback(mode);

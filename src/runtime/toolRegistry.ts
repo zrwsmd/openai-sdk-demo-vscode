@@ -4,6 +4,7 @@ import type { DeliveryEvidence } from "./deliveryContract";
 import type { AgentConfig } from "./agentConfig";
 import {
   ToolCatalog,
+  capabilityQueryForFallback,
   type ToolCapability,
 } from "./toolCatalog";
 import {
@@ -21,7 +22,7 @@ import { createCoreToolProvider } from "./tools/coreToolProvider";
 import type { WorkflowContract, WorkflowRuntime } from "./workflow/types";
 
 export { commandToolResult };
-export { ToolCatalog };
+export { ToolCatalog, capabilityQueryForFallback };
 export type {
   RegisteredToolCapability,
   ToolCapability,

@@ -9,7 +9,7 @@ import type { PipelineStagePlan } from "../pipeline/stagePlan";
 import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
 import type { RuntimeServiceContainer } from "../services";
 import type { ToolEvidenceExtractor } from "../decision/completionEvidence";
-import type { ToolCatalog } from "../toolCatalog";
+import type { ToolCatalog, ToolFallbackMode } from "../toolCatalog";
 
 export type WorkflowId = string;
 
@@ -140,12 +140,7 @@ export type WorkflowDecisionSource =
   | "model"
   | "fallback";
 
-export type WorkflowFallbackMode =
-  | "general_chat"
-  | "read_only"
-  | "file_edit"
-  | "needs_clarification"
-  | "blocked_high_risk";
+export type WorkflowFallbackMode = ToolFallbackMode;
 
 export interface WorkflowDecisionContext {
   userText: string;

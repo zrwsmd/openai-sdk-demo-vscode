@@ -368,6 +368,28 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:agent` 通过（使用本地 `127.0.0.1:8790` mock gateway）。
 - `npm run test:st`、`npm run test:jev` 通过。
 
+### 5.2 通用 `ToolCatalog` 查询能力 fallback（当前增量阶段）
+
+- `ToolFallbackMode` 扩展为 `general_chat`、`read_only`、`file_edit`、
+  `needs_clarification` 和 `blocked_high_risk`，与公共 Workflow fallback 协议保持一致。
+- `ToolCatalog` 新增通用 `toolsForQuery()` 和 `capabilityQueryForFallback()`；
+  普通问答、需要澄清和高风险阻断模式统一查询 `risk=read/plan` 的能力。
+- `WorkflowDecisionService` 对所有 fallback 模式优先使用注入的 `ToolCatalog`，
+  不再只对 `read_only/file_edit` 调目录，其余模式也不会因为没有写死白名单而丢失
+  可用的领域查询工具。
+- 安全 fallback 只允许读或计划类能力，自动排除 `write`、`execute` 等副作用工具；
+  新增领域工具只需声明通用能力风险，不需要修改公共决策逻辑。
+- 新增回归覆盖：三种安全 fallback、目录查询、仅能力声明的领域工具、显式写入/命令
+  工具隔离，以及模型 fallback 决策结果。
+- 未修改 `src/analysis/*` 或 `st-analyze` 桥。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow`、`npm run test:batch` 通过。
+- `npm run test:agent`、`npm run test:st`、`npm run test:jev` 通过。
+
 ### 6. 通用 Completion Gate
 
 - 新增 `src/runtime/completionTypes.ts`，把 Completion Gate 的记录、问题、结果、

@@ -30,7 +30,12 @@ export interface ToolCapability {
   fallbackModes?: readonly ToolFallbackMode[];
 }
 
-export type ToolFallbackMode = "read_only" | "file_edit";
+export type ToolFallbackMode =
+  | "general_chat"
+  | "read_only"
+  | "file_edit"
+  | "needs_clarification"
+  | "blocked_high_risk";
 
 export interface RegisteredToolCapability extends ToolCapability {
   providerId: string;
@@ -48,6 +53,26 @@ export interface ToolCapabilityQuery {
   intents?: readonly string[];
   tags?: readonly string[];
   risks?: readonly ToolRisk[];
+}
+
+/**
+ * Fallback surfaces that may inspect context without creating a new side
+ * effect. Their tool set is derived from capability risk metadata rather than
+ * from provider-specific tool names.
+ */
+const SAFE_FALLBACK_RISKS: readonly ToolRisk[] = ["read", "plan"];
+
+export function capabilityQueryForFallback(
+  mode: ToolFallbackMode,
+): ToolCapabilityQuery | undefined {
+  if (
+    mode === "general_chat" ||
+    mode === "needs_clarification" ||
+    mode === "blocked_high_risk"
+  ) {
+    return { risks: SAFE_FALLBACK_RISKS };
+  }
+  return undefined;
 }
 
 function normalized(value: string): string {
@@ -244,6 +269,10 @@ export class ToolCatalog {
     return this.find({ tags: [tag] });
   }
 
+  toolsForQuery(query: ToolCapabilityQuery = {}): readonly string[] {
+    return this.find(query).map((capability) => capability.name);
+  }
+
   riskMap(): Readonly<Record<string, ToolRisk>> {
     return Object.freeze(
       Object.fromEntries(
@@ -273,6 +302,8 @@ export class ToolCatalog {
   }
 
   toolsForFallback(mode: ToolFallbackMode): readonly string[] {
+    const query = capabilityQueryForFallback(mode);
+    if (query) return this.toolsForQuery(query);
     return this.list()
       .filter((capability) => capability.fallbackModes?.includes(mode))
       .map((capability) => capability.name);

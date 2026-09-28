@@ -262,15 +262,19 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   });
   await test.coordinator.start('普通问题', { ...config, orchestration: 'auto' }, 'key');
   const completed = await test.store.getLast();
+  const safeToolAllowlist = completed?.toolAllowlist ?? [];
   if (
     routeCalls !== 0 ||
     planCalls !== 0 ||
     executorCalls !== 1 ||
     completed?.status !== 'completed' ||
     !Array.isArray(completed.toolAllowlist) ||
-    completed.toolAllowlist.length !== 0
+    safeToolAllowlist.length === 0 ||
+    safeToolAllowlist.includes('write_file') ||
+    safeToolAllowlist.includes('edit_file') ||
+    safeToolAllowlist.includes('run_command')
   ) {
-    throw new Error('workflow fallback did not suppress auto team/planner preparation');
+    throw new Error('workflow fallback did not suppress auto team/planner preparation or exposed unsafe tools');
   }
 }
 

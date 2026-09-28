@@ -59,6 +59,17 @@ assert.deepEqual(
   coreCatalog.find({ risks: ['read'] }).map((item) => item.name),
   ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
 );
+assert.deepEqual(
+  coreCatalog.toolsForQuery({ risks: ['read', 'plan'] }),
+  ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
+);
+for (const mode of ['general_chat', 'needs_clarification', 'blocked_high_risk']) {
+  assert.deepEqual(
+    coreCatalog.toolsForFallback(mode),
+    ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
+    `safe fallback ${mode} should expose only read/plan capabilities`,
+  );
+}
 
 const appRegistry = new ToolRegistry([
   createCoreToolProvider(),
@@ -84,6 +95,20 @@ assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'st_change_impact',
   'st_symbol_references',
 ]);
+assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
+  'get_io_table',
+  'read_plc_variables',
+  'list_files',
+  'read_file',
+  'search_files',
+  'validate_st_code',
+  'st_dependency_map',
+  'st_change_impact',
+  'st_symbol_references',
+]);
+assert(!appCatalog.toolsForFallback('general_chat').includes('write_file'));
+assert(!appCatalog.toolsForFallback('general_chat').includes('export_st_program'));
+assert(!appCatalog.toolsForFallback('blocked_high_risk').includes('run_command'));
 
 const customCapability = {
   name: 'query_modbus_device',
@@ -96,12 +121,31 @@ const customCapability = {
 };
 const customCatalog = new ToolCatalog();
 customCatalog.register('modbus', customCapability);
+customCatalog.register('library', {
+  name: 'library_symbol',
+  description: '查询领域库中的符号定义。',
+  domain: 'library',
+  tags: ['lookup'],
+  risk: 'plan',
+  effect: 'none',
+});
 assert.deepEqual(customCatalog.listByProvider('MODBUS').map((item) => item.name), [
   'query_modbus_device',
 ]);
 assert.equal(customCatalog.findByIntent('查询 Modbus 状态')[0]?.name, 'query_modbus_device');
-assert.deepEqual(customCatalog.toolsForFallback('read_only'), ['query_modbus_device']);
+assert.deepEqual(customCatalog.toolsForFallback('read_only'), [
+  'query_modbus_device',
+  'library_symbol',
+]);
 assert.deepEqual(customCatalog.toolsForFallback('file_edit'), ['query_modbus_device']);
+assert.deepEqual(customCatalog.toolsForFallback('general_chat'), [
+  'query_modbus_device',
+  'library_symbol',
+]);
+assert.deepEqual(customCatalog.toolsForFallback('needs_clarification'), [
+  'query_modbus_device',
+  'library_symbol',
+]);
 assert.throws(
   () => customCatalog.register('other', customCapability),
   /already registered/,
@@ -126,7 +170,14 @@ assert.throws(
 
 const dynamicRegistry = new ToolRegistry([{
   id: 'modbus',
-  capabilities: [customCapability],
+  capabilities: [customCapability, {
+    name: 'library_symbol',
+    description: '查询领域库中的符号定义。',
+    domain: 'library',
+    tags: ['lookup'],
+    risk: 'plan',
+    effect: 'none',
+  }],
   createTools: () => [],
 }]);
 assert.equal(dynamicRegistry.getRisk('query_modbus_device'), 'read');
@@ -188,7 +239,37 @@ const fallbackDecision = await decisionService.decide(
   },
 );
 assert.equal(fallbackDecision.kind, 'fallback');
-assert.deepEqual(fallbackDecision.allowedTools, ['query_modbus_device']);
+assert.deepEqual(fallbackDecision.allowedTools, [
+  'query_modbus_device',
+  'library_symbol',
+]);
+
+const safeFallbackDecision = await decisionService.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: false },
+  },
+  '解释这个领域符号',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'general_chat',
+      confidence: 0.93,
+      reason: 'test selected general chat fallback',
+    }),
+  },
+);
+assert.equal(safeFallbackDecision.kind, 'fallback');
+assert.deepEqual(safeFallbackDecision.allowedTools, [
+  'query_modbus_device',
+  'library_symbol',
+]);
 
 const explicitAllowlistDecision = await decisionService.decide(
   {
