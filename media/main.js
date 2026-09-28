@@ -43,6 +43,7 @@ const thinkingSegments = new Map();
 const activeThinkingSegments = new Map();
 const thinkingItemSegments = new Map();
 const thinkingSegmentCounters = new Map();
+const finalAnswerAnchors = new Map();
 const THINKING_INLINE_MAX_CHARS = 80;
 
 function setRuntimeMode(mode) {
@@ -116,6 +117,38 @@ function addMessage(kind, text) {
   return bubble;
 }
 
+function rememberFinalAnswerAnchor(runId, bubble) {
+  if (!runId || !bubble) return;
+  finalAnswerAnchors.set(runId, bubble);
+  while (finalAnswerAnchors.size > 12) {
+    const oldest = finalAnswerAnchors.keys().next().value;
+    if (!oldest) break;
+    finalAnswerAnchors.delete(oldest);
+  }
+}
+
+function finalAnswerNodeFor(runId) {
+  const bubble = (runId && finalAnswerAnchors.get(runId)) || agentBubble;
+  if (!bubble || !bubble.parentNode) return null;
+  if (bubble.parentNode === messagesEl) return bubble;
+  const wrapper = bubble.parentElement;
+  if (wrapper?.parentNode === messagesEl && wrapper.classList.contains('msg')) {
+    return wrapper;
+  }
+  return null;
+}
+
+function insertBeforeFinalAnswer(node, runId) {
+  // Provider streams may deliver reasoning after final text; keep the UI
+  // order stable by anchoring Thinking before this run's answer bubble.
+  const anchor = finalAnswerNodeFor(runId);
+  if (anchor?.parentNode === messagesEl) {
+    messagesEl.insertBefore(node, anchor);
+  } else {
+    messagesEl.appendChild(node);
+  }
+}
+
 function beginUserTurn(text, runId, reusePendingLocal = false) {
   const displayText = String(text ?? '');
   const hint = messagesEl.querySelector('.hint');
@@ -135,6 +168,7 @@ function beginUserTurn(text, runId, reusePendingLocal = false) {
     agentBubble = addMessage('agent', '');
     agentBubble.classList.add('streaming');
   }
+  rememberFinalAnswerAnchor(currentRunId, agentBubble);
   setRuntimeMode('running');
   if (reusePendingLocal) pendingLocalUserText = null;
 }
@@ -257,7 +291,7 @@ function renderInlineThinking(state, text) {
     } else if (view?.el?.parentNode) {
       view.el.after(el);
     } else {
-      messagesEl.appendChild(el);
+      insertBeforeFinalAnswer(el, state.runId);
     }
     state.inlineView = el;
     thinkingInlineViews.set(state.key, el);
@@ -342,7 +376,7 @@ function createThinkingView(key, runId) {
   const body = document.createElement('div');
   body.className = 'thinking-body hidden';
   details.append(summary, body);
-  messagesEl.appendChild(details);
+  insertBeforeFinalAnswer(details, runId);
   const view = {
     el: details,
     body,
@@ -1613,6 +1647,7 @@ window.addEventListener('message', (event) => {
       workflowViews.clear();
       workflowApprovals.clear();
       clearThinkingState();
+      finalAnswerAnchors.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1638,6 +1673,7 @@ window.addEventListener('message', (event) => {
       workflowViews.clear();
       workflowApprovals.clear();
       clearThinkingState();
+      finalAnswerAnchors.clear();
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -1701,6 +1737,7 @@ window.addEventListener('message', (event) => {
       pendingToolCount = 0;
       hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
+      rememberFinalAnswerAnchor(currentRunId, agentBubble);
       renderRich(agentBubble, agentText);
       agentBubble.classList.add('streaming');
       setRuntimeMode('running');
@@ -1724,6 +1761,7 @@ window.addEventListener('message', (event) => {
         agentBubble = addMessage('agent', '');
         agentBubble.classList.add('streaming');
       }
+      rememberFinalAnswerAnchor(currentRunId, agentBubble);
       if (msg.runId) acknowledgeRunStart();
       else setRuntimeMode('running');
       break;
