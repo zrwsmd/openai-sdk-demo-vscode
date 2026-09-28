@@ -3,6 +3,7 @@ import {
   ToolCatalog,
   ToolRegistry,
   AgentDecisionService,
+  splitToolCapabilityIntentText,
   WorkflowDecisionService,
   WorkflowRegistry,
   createCoreToolProvider,
@@ -68,6 +69,18 @@ assert.deepEqual(
   ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file'],
 );
 assert.deepEqual(
+  splitToolCapabilityIntentText('读取文件并搜索文本'),
+  ['读取文件', '搜索文本'],
+);
+assert.deepEqual(
+  coreCatalog.toolsForFallback('read_only', '读取文件并搜索文本'),
+  ['read_file', 'search_files'],
+);
+assert.deepEqual(
+  coreCatalog.toolsForFallback('file_edit', '编辑文件并运行测试'),
+  ['edit_file'],
+);
+assert.deepEqual(
   coreCatalog.find({ risks: ['read'] }).map((item) => item.name),
   ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
 );
@@ -131,6 +144,22 @@ assert.deepEqual(
 );
 assert.deepEqual(
   appCatalog.toolsForFallback('read_only', '查找某个 ST 符号的声明和引用位置'),
+  ['st_symbol_references'],
+);
+assert.deepEqual(
+  appCatalog.toolsForFallback(
+    'read_only',
+    '分析依赖、影响范围并查找符号引用',
+  ),
+  ['st_dependency_map', 'st_change_impact', 'st_symbol_references'],
+);
+const genericCompoundIntents = appCatalog.findByTextIntents('查看文件和符号引用');
+assert.deepEqual(
+  genericCompoundIntents[0]?.selected.map((match) => match.capability.name),
+  ['read_file', 'st_dependency_map', 'list_files'],
+);
+assert.deepEqual(
+  genericCompoundIntents[1]?.selected.map((match) => match.capability.name),
   ['st_symbol_references'],
 );
 assert.deepEqual(appCatalog.toolsForFallback('read_only'), [

@@ -43,6 +43,7 @@
 - [x] 9. 用非 ST Workflow 验证通用性
 - [x] 10. 清理兼容层并完成边界封锁
 - [x] 11. 增量阶段：文件级 `beforeEffect`、`ToolCatalog` 全覆盖 fallback、动态边界扫描、只读领域工具接入
+- [x] 12. 增量阶段：通用多意图 `ToolCatalog` 能力选择
 
 ## 0. 基线与边界
 
@@ -551,3 +552,28 @@ node scripts/run_coordinator_test.mjs
 - `npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
   `npm run test:batch`、`npm run test:st`、`npm run test:jev` 和
   `npm run test:agent` 通过；Agent 专项使用临时本地 mock gateway 运行。
+
+### 5.8 通用多意图 `ToolCatalog` 能力选择（当前增量阶段）
+
+- `ToolCatalog` 新增通用意图片段拆分：支持中文标点、中文连接词和常见英文连接词，
+  不依赖任何具体领域或工具名。
+- 每个片段独立执行能力匹配，再对高置信度结果做去重合并；没有命中或结果过多时
+  继续保留原 fallback 工具集，避免错误收窄。
+- 同一请求可以同时开放多个互不冲突的工具能力，例如“读取文件并搜索文本”选择
+  `read_file` 与 `search_files`，“分析依赖、影响范围并查找符号引用”选择三个
+  对应分析工具；工具调用顺序和是否并行仍由模型与运行时并行能力决定。
+- 多片段只有在上下文足够具体时才使用统一的 provider/domain 范围消歧；“查看文件”
+  这类短而泛的片段保留原候选，不会被另一个片段强行改写成领域工具。
+- 公共层只使用 `ToolCapability` 的描述、意图、标签、领域和风险元数据；新增领域
+  工具仍只需注册能力，不需要修改 `agent.ts`、`WorkflowDecisionService` 或
+  `src/analysis/*`。
+- 未修改 `st-analyze`、`src/analysis/*` 和现有 ST 工具实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile`、`npm run test:workflow`、`npm run test:batch`、
+  `npm run test:st` 和 `npm run test:jev` 通过。
+- `npm run test:agent` 通过（使用仓库要求的本地 mock gateway）。
+- `npm run test:generate` 通过。
+- `scripts/tool_catalog_test.mjs` 新增多意图拆分、能力并集、去重和短片段消歧回归。

@@ -5,7 +5,9 @@ import type { AgentConfig } from "./agentConfig";
 import {
   ToolCatalog,
   capabilityQueryForFallback,
+  splitToolCapabilityIntentText,
   type ToolCapability,
+  type ToolCapabilityIntentMatch,
   type ToolCapabilityTextMatch,
   type ToolCapabilityTextQuery,
 } from "./toolCatalog";
@@ -24,10 +26,15 @@ import { createCoreToolProvider } from "./tools/coreToolProvider";
 import type { WorkflowContract, WorkflowRuntime } from "./workflow/types";
 
 export { commandToolResult };
-export { ToolCatalog, capabilityQueryForFallback };
+export {
+  ToolCatalog,
+  capabilityQueryForFallback,
+  splitToolCapabilityIntentText,
+};
 export type {
   RegisteredToolCapability,
   ToolCapability,
+  ToolCapabilityIntentMatch,
   ToolCapabilityTextMatch,
   ToolCapabilityTextQuery,
   ToolCapabilityQuery,

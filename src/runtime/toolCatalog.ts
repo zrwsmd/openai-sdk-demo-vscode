@@ -69,6 +69,12 @@ export interface ToolCapabilityTextMatch {
   matchedFields: readonly ("name" | "description" | "intent" | "tag" | "domain")[];
 }
 
+export interface ToolCapabilityIntentMatch {
+  fragment: string;
+  matches: readonly ToolCapabilityTextMatch[];
+  selected: readonly ToolCapabilityTextMatch[];
+}
+
 /**
  * Fallback surfaces that may inspect context without creating a new side
  * effect. Their tool set is derived from capability risk metadata rather than
@@ -115,6 +121,24 @@ function longestCommonSubstringLength(left: string, right: string): number {
   return longest;
 }
 
+function longestCommonSubsequenceLength(left: string, right: string): number {
+  if (!left || !right) return 0;
+  const previous = new Array<number>(right.length + 1).fill(0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = new Array<number>(right.length + 1).fill(0);
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] =
+        left[leftIndex - 1] === right[rightIndex - 1]
+          ? previous[rightIndex - 1] + 1
+          : Math.max(previous[rightIndex], current[rightIndex - 1]);
+    }
+    for (let rightIndex = 0; rightIndex <= right.length; rightIndex += 1) {
+      previous[rightIndex] = current[rightIndex];
+    }
+  }
+  return previous[right.length];
+}
+
 function textMatchScore(query: string, value: string, weight: number): number {
   const compactQuery = compactSearchText(query);
   const compactValue = compactSearchText(value);
@@ -124,6 +148,19 @@ function textMatchScore(query: string, value: string, weight: number): number {
     compactValue.includes(compactQuery)
   ) {
     return weight;
+  }
+  if (compactQuery.length >= 3 && compactValue.length >= 3) {
+    const subsequenceLength = longestCommonSubsequenceLength(
+      compactQuery,
+      compactValue,
+    );
+    const shorterLength = Math.min(compactQuery.length, compactValue.length);
+    const coverage = subsequenceLength / shorterLength;
+    // Allow descriptive context between meaningful words while avoiding
+    // matches based on one or two shared characters.
+    if (subsequenceLength >= 3 && coverage >= 0.6) {
+      return weight * (0.74 + coverage * 0.24);
+    }
   }
   const commonLength = longestCommonSubstringLength(compactQuery, compactValue);
   if (commonLength >= 5) return weight * 0.92;
@@ -241,6 +278,73 @@ function freezeCapability(
     ...(requiresApproval !== undefined ? { requiresApproval } : {}),
     ...(evidence.length ? { evidence } : {}),
     fallbackModes: normalizedList(fallbackModes) as readonly ToolFallbackMode[],
+  });
+}
+
+const INTENT_FRAGMENT_SEPARATOR =
+  /(?:[，,；;、]+|\b(?:and|also|then|plus|as\s+well\s+as)\b|并且|同时|以及|另外|然后|还要|还需要|并|和|与|及)/giu;
+
+export function splitToolCapabilityIntentText(text: string): readonly string[] {
+  const fragments = text
+    .replace(/[。！？!?]+/gu, "；")
+    .split(INTENT_FRAGMENT_SEPARATOR)
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => compactSearchText(fragment).length >= 2);
+  return Object.freeze([...new Set(fragments)]);
+}
+
+function selectStrongTextMatches(
+  matches: readonly ToolCapabilityTextMatch[],
+): readonly ToolCapabilityTextMatch[] {
+  if (!matches.length) return [];
+  const topScore = matches[0].score;
+  const selected = matches.filter((match) => match.score >= topScore - 0.05);
+  if (topScore < 0.82 || selected.length === 0 || selected.length > 4) {
+    return [];
+  }
+  return selected;
+}
+
+function capabilityScope(
+  capability: RegisteredToolCapability,
+): string | undefined {
+  const domain = capability.domain?.trim();
+  if (domain) return `domain:${normalized(domain)}`;
+  const provider = capability.providerId.trim();
+  return provider ? `provider:${normalized(provider)}` : undefined;
+}
+
+const MIN_SCOPE_CONTEXT_FRAGMENT_LENGTH = 5;
+
+function applyIntentScopeContext(
+  intents: readonly ToolCapabilityIntentMatch[],
+): readonly ToolCapabilityIntentMatch[] {
+  const anchorScopes = new Set<string>();
+  for (const intent of intents) {
+    if (intent.selected.length !== 1) continue;
+    const scope = capabilityScope(intent.selected[0].capability);
+    if (scope) anchorScopes.add(scope);
+  }
+  if (anchorScopes.size !== 1) return intents;
+
+  const [scope] = anchorScopes;
+  return intents.map((intent) => {
+    // A short fragment such as "查看文件" is intentionally ambiguous:
+    // another fragment may establish a domain, but it must not rewrite this
+    // generic request into a domain-specific capability.
+    if (
+      intent.selected.length <= 1 ||
+      compactSearchText(intent.fragment).length <
+        MIN_SCOPE_CONTEXT_FRAGMENT_LENGTH
+    ) {
+      return intent;
+    }
+    const scoped = intent.selected.filter(
+      (match) => capabilityScope(match.capability) === scope,
+    );
+    return scoped.length
+      ? Object.freeze({ ...intent, selected: scoped })
+      : intent;
   });
 }
 
@@ -422,6 +526,35 @@ export class ToolCatalog {
     return this.findByText(text, query).map((match) => match.capability.name);
   }
 
+  findByTextIntents(
+    text: string,
+    query: ToolCapabilityTextQuery = {},
+  ): readonly ToolCapabilityIntentMatch[] {
+    const fragments = splitToolCapabilityIntentText(text);
+    const intents = fragments.map((fragment) => {
+      const matches = this.findByText(fragment, query);
+      return Object.freeze({
+        fragment,
+        matches,
+        selected: selectStrongTextMatches(matches),
+      });
+    });
+    return applyIntentScopeContext(intents);
+  }
+
+  toolsForTextIntents(
+    text: string,
+    query: ToolCapabilityTextQuery = {},
+  ): readonly string[] {
+    const selected = new Set<string>();
+    for (const intent of this.findByTextIntents(text, query)) {
+      for (const match of intent.selected) {
+        selected.add(match.capability.name);
+      }
+    }
+    return [...selected];
+  }
+
   toolsForQuery(query: ToolCapabilityQuery = {}): readonly string[] {
     return this.find(query).map((capability) => capability.name);
   }
@@ -463,18 +596,14 @@ export class ToolCatalog {
       .map((capability) => capability.name);
     if (!userText?.trim() || baseTools.length < 2) return baseTools;
 
-    const matches = this.findByText(userText, {
+    const selected = this.toolsForTextIntents(userText, {
       names: baseTools,
       minScore: 0.74,
     });
-    if (!matches.length) return baseTools;
-    const topScore = matches[0].score;
-    const selected = matches
-      .filter((match) => match.score >= topScore - 0.08)
-      .map((match) => match.capability.name);
     // A weak or broad match must never hide tools. Only a strong, bounded
-    // result is allowed to narrow the ordinary fallback surface.
-    if (topScore < 0.82 || selected.length === 0 || selected.length > 4) {
+    // result from one or more intent fragments is allowed to narrow the
+    // ordinary fallback surface.
+    if (selected.length === 0 || selected.length > 4) {
       return baseTools;
     }
     return selected;
