@@ -527,3 +527,27 @@ node scripts/run_coordinator_test.mjs
 - `npx tsc --noEmit`、`npm run compile`、`npm run test:workflow` 通过。
 - `ToolCatalog` 回归覆盖了普通文件编辑意图、未命中保守回退，以及 ST 工具作为
   外部 Provider 被通用筛选的行为。
+
+### 5.7 ST 分析降级为通用只读 fallback（当前增量阶段）
+
+- 宿主 `src/app/workflowRegistry.ts` 不再注册 `st_inspection`；默认可路由的 ST
+  Workflow 只保留 ST Delivery。
+- `stInspectionWorkflow.ts` 保留为兼容导出和独立测试用实现，但不再参与默认
+  Registry 的自动决策，不再创建固定 ST 分析阶段、运行时契约或 `initialTool`。
+- ST 依赖分析请求现在由通用决策链返回 `read_only`，再由 `ToolCatalog` 根据
+  工具能力意图选择 `st_dependency_map`；影响分析和符号引用沿用同一机制，分别
+  选择 `st_change_impact` 与 `st_symbol_references`。
+- 未修改 `st-analyze`、`src/analysis/*` 和 ST 工具实现。
+
+阶段测试结果：
+
+- `scripts/workflow_registry_test.mjs` 已确认默认 Registry 不再暴露
+  `st_inspection`。
+- `scripts/jev_decision_test.mjs` 已确认 ST 依赖分析不再返回
+  `workflow=st_inspection`，而是记录 `fallback read_only` 并只选择
+  `st_dependency_map`。
+- `scripts/tool_catalog_test.mjs` 同时覆盖依赖、影响面和符号引用三种只读意图
+  到对应工具的通用映射。
+- `npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
+  `npm run test:batch`、`npm run test:st`、`npm run test:jev` 和
+  `npm run test:agent` 通过；Agent 专项使用临时本地 mock gateway 运行。

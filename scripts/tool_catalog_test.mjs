@@ -129,6 +129,10 @@ assert.deepEqual(
   appCatalog.toolsForFallback('read_only', '查看某个 ST 文件的变更影响范围'),
   ['st_change_impact'],
 );
+assert.deepEqual(
+  appCatalog.toolsForFallback('read_only', '查找某个 ST 符号的声明和引用位置'),
+  ['st_symbol_references'],
+);
 assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'get_io_table',
   'read_plc_variables',

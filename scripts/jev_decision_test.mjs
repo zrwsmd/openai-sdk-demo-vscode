@@ -3,7 +3,7 @@ import {
   classifyDeliveryContract,
   isStWorkspaceDeliveryContract,
   JevDecisionProvider,
-  ST_INSPECTION_WORKFLOW,
+  getDefaultToolRegistry,
   WorkflowDecisionService,
 } from './agent.testbundle.mjs';
 
@@ -328,7 +328,13 @@ globalThis.fetch = async () => response({
   usage: { input_tokens: 17, output_tokens: 8 },
 });
 try {
-  const workflowDecision = await new WorkflowDecisionService().decide(
+  const inspectionLogs = [];
+  const workflowDecision = await new WorkflowDecisionService(
+    (line) => inspectionLogs.push(line),
+    undefined,
+    undefined,
+    getDefaultToolRegistry().getToolCatalog(),
+  ).decide(
     {
       apiKey: 'unused',
       baseUrl: '',
@@ -340,26 +346,20 @@ try {
     '分析一下当前工作区里这些 st 文件之间的依赖关系',
   );
   if (
-    workflowDecision.kind !== 'workflow' ||
-    workflowDecision.source !== 'jev' ||
-    workflowDecision.workflow.id !== 'st_inspection' ||
-    workflowDecision.deliveryContract !== undefined
+    workflowDecision.kind !== 'fallback' ||
+    workflowDecision.source !== 'fallback' ||
+    workflowDecision.mode !== 'read_only' ||
+    workflowDecision.allowedTools?.length !== 1 ||
+    workflowDecision.allowedTools[0] !== 'st_dependency_map'
   ) {
-    throw new Error('Jev ST inspection request did not stay on the registered read-only workflow');
+    throw new Error('ST dependency analysis did not use generic read_only ToolCatalog fallback');
   }
-  const runtime = ST_INSPECTION_WORKFLOW.createRuntime?.(undefined, {
-    slots: new Map(),
-  });
-  const tools = runtime?.visibleToolNames ?? [];
   if (
-    tools.length !== 3 ||
-    !tools.includes('st_dependency_map') ||
-    !tools.includes('st_change_impact') ||
-    !tools.includes('st_symbol_references') ||
-    tools.includes('validate_st_code') ||
-    tools.includes('write_file')
+    !inspectionLogs.some((line) =>
+      /\[workflow\] fallback read_only.*tools=st_dependency_map/u.test(line),
+    )
   ) {
-    throw new Error('ST inspection workflow exposed the wrong tool set');
+    throw new Error('ST dependency analysis fallback log did not name the selected tool');
   }
 } finally {
   globalThis.fetch = originalFetch;

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import {
-  ST_INSPECTION_WORKFLOW,
   ST_WORKSPACE_DELIVERY_WORKFLOW,
   WorkflowRegistry,
   ToolRegistry,
@@ -32,7 +31,11 @@ assert.throws(() => registry.register(generic), /already registered/);
 
 const appRegistry = createAppWorkflowRegistry();
 assert.equal(appRegistry.get('st_workspace_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
-assert.equal(appRegistry.get('st_inspection'), ST_INSPECTION_WORKFLOW);
+assert.equal(appRegistry.get('st_inspection'), undefined);
+assert.deepEqual(
+  appRegistry.list().map((workflow) => workflow.id),
+  ['st_workspace_delivery'],
+);
 assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
 
 // A separately constructed registry is isolated from the host's built-in list.

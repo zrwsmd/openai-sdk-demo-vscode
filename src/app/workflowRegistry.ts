@@ -2,7 +2,6 @@ import {
   setDefaultWorkflowRegistry,
   WorkflowRegistry,
 } from "../runtime/workflow/registry";
-import { ST_INSPECTION_WORKFLOW } from "../runtime/plugins/st/stInspectionWorkflow";
 import { ST_WORKSPACE_DELIVERY_WORKFLOW } from "../runtime/plugins/st/stWorkspaceDeliveryWorkflow";
 
 /**
@@ -14,7 +13,6 @@ import { ST_WORKSPACE_DELIVERY_WORKFLOW } from "../runtime/plugins/st/stWorkspac
 export function createAppWorkflowRegistry(): WorkflowRegistry {
   const registry = new WorkflowRegistry([
     ST_WORKSPACE_DELIVERY_WORKFLOW,
-    ST_INSPECTION_WORKFLOW,
   ]);
   setDefaultWorkflowRegistry(registry);
   return registry;
