@@ -14,6 +14,7 @@ import {
   createCoreToolProvider,
   createDeliveryWorkflowRuntimeState,
   createWorkflowRuntime,
+  adaptDeliveryWorkflow,
   evaluateCompletionGate,
   getGenericFileInspectionState,
   normalizeWorkflowRuntime,
@@ -216,14 +217,16 @@ try {
     { mode: 'allow_list', names: ['st_symbol_references'] },
   );
 
-  const adaptedStRuntime = createWorkflowRuntime(
+  const genericStRuntime = createWorkflowRuntime(
     'st_inspection',
     undefined,
     createDeliveryWorkflowRuntimeState(),
     new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
     { userText: '分析这个 ST 文件的变更影响面' },
   );
-  assert(adaptedStRuntime);
+  assert(genericStRuntime);
+  assert.equal(genericStRuntime.completionAdapter, undefined);
+  const adaptedStRuntime = adaptDeliveryWorkflow(genericStRuntime);
   assert(adaptedStRuntime.completionAdapter);
   assert.equal(
     adaptedStRuntime.completionAdapter.finalMessage?.([]),

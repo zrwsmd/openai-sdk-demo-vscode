@@ -90,9 +90,10 @@ import {
 } from "./deliveryContract";
 import {
   createWorkflowRuntime,
-  createDeliveryWorkflowRuntimeState,
   getWorkflowDescriptor,
-} from "./deliveryWorkflow";
+} from "./workflow/runtime";
+import { createWorkflowRuntimeState } from "./workflow/runtimeState";
+import { adaptDeliveryWorkflow } from "./workflow/deliveryCompatibility";
 import {
   commandToolResult,
   getDefaultToolRegistry,
@@ -1880,7 +1881,7 @@ export async function runAgent(
   );
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
-  const workflowState = createDeliveryWorkflowRuntimeState();
+  const workflowState = createWorkflowRuntimeState();
   const toolRegistry = options.toolRegistry ?? getDefaultToolRegistry();
   const registeredToolRisks = toolRegistry.riskMap();
   const registeredToolEvidence = toolRegistry.evidenceMap();
@@ -1899,13 +1900,16 @@ export async function runAgent(
     state: workflowState,
     toolCatalog: toolRegistry.getToolCatalog(),
   };
-  const deliveryWorkflow = createWorkflowRuntime(
+  const workflowRuntime = createWorkflowRuntime(
     options.workflowId,
     options.deliveryContract,
     workflowState,
     options.workflowRegistry,
     workflowVisibilityContext,
   );
+  const deliveryWorkflow = workflowRuntime
+    ? adaptDeliveryWorkflow(workflowRuntime)
+    : undefined;
   const workflowBusinessToolPolicy = deliveryWorkflow || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(
         [deliveryWorkflow, workflowDescriptor],

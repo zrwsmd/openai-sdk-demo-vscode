@@ -46,6 +46,7 @@
 - [x] 12. 增量阶段：通用多意图 `ToolCatalog` 能力选择
 - [x] 13. 增量阶段：公共 Workflow 协议默认能力与 Delivery 兼容边界
 - [x] 14. 增量阶段：旧 Delivery 接口收敛到兼容适配层
+- [x] 15. 增量阶段：通用运行时入口与 Delivery 兼容 Facade 分离
 
 ## 0. 基线与边界
 
@@ -326,6 +327,42 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:st` 通过。
 - `npm run test:batch` 通过。
 - 公共运行时边界扫描通过。
+
+### 15. 通用运行时入口与 Delivery 兼容 Facade 分离
+
+本阶段把运行时创建、描述、Registry 查询和运行时管理判断从旧
+`src/runtime/deliveryWorkflow.ts` 拆到通用 `src/runtime/workflow/runtime.ts`。
+旧文件只保留 Delivery 兼容入口，避免公共核心继续把通用 Workflow 误认为
+Delivery Workflow。
+
+本阶段已完成：
+
+- 新增通用 `workflow/runtime.ts`，提供：
+  `createWorkflowRuntime`、`describeWorkflow`、`getWorkflowDescriptor` 和
+  `isRuntimeManagedWorkflow`。
+- `Agent` 直接使用通用运行时入口，再通过独立
+  `deliveryCompatibility.ts` 适配仍在使用旧 Delivery 方法的插件。
+- `runCoordinator` 改为直接依赖通用 Workflow 运行时查询，不再从旧
+  `deliveryWorkflow.ts` 获取公共入口。
+- `deliveryWorkflow.ts` 保留旧入口作为兼容 Facade，并新增明确的
+  `createDeliveryWorkflowRuntime` 适配入口；旧调用方无需一次性迁移。
+- 没有 Completion Adapter 的轻量 Workflow 不再被自动注入空适配器，避免
+  默认实现遮蔽旧 Delivery 适配器。
+- 增加回归断言：通用工厂返回纯通用运行时，显式经过兼容适配后才得到
+  Delivery Completion Adapter。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 工具业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过，公共边界扫描通过。
+- `npm run test:st` 通过。
+- `npm run test:batch` 通过。
+- `node scripts/run_store_test.mjs` 通过。
+- `node scripts/run_coordinator_test.mjs` 通过。
+- `npm run test:agent` 仍受本机测试前置条件影响：`127.0.0.1:8790`
+  网关未启动，报 `ECONNREFUSED`；本次编译和 Agent 入口类型检查均通过。
 
 ### 0. 基线记录
 

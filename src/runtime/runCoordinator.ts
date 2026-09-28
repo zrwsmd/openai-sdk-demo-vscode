@@ -41,7 +41,7 @@ import {
 import {
   describeWorkflow,
   isRuntimeManagedWorkflow,
-} from './deliveryWorkflow';
+} from './workflow/runtime';
 import {
   WorkflowDecisionService,
   type WorkflowModelClassifier,

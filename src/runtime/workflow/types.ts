@@ -138,12 +138,16 @@ export function normalizeWorkflowRuntime(
   runtime: WorkflowRuntime,
 ): NormalizedWorkflowRuntime {
   const completionAdapter = runtime.completionAdapter;
-  return {
+  const normalized: NormalizedWorkflowRuntime = {
     ...runtime,
     stages: runtime.stages ? [...runtime.stages] : [],
     parallelToolCalls: runtime.parallelToolCalls ?? true,
     initialTool: (options) => runtime.initialTool?.(options),
     instructions: () => runtime.instructions?.() ?? "",
+  };
+  if (!completionAdapter) return normalized;
+  return {
+    ...normalized,
     completionAdapter: {
       collectArtifacts: (records) => completionAdapter?.collectArtifacts?.(records) ?? [],
       collectIssues: (context) => completionAdapter?.collectIssues?.(context) ?? [],
