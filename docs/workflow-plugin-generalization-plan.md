@@ -45,6 +45,7 @@
 - [x] 11. 增量阶段：文件级 `beforeEffect`、`ToolCatalog` 全覆盖 fallback、动态边界扫描、只读领域工具接入
 - [x] 12. 增量阶段：通用多意图 `ToolCatalog` 能力选择
 - [x] 13. 增量阶段：公共 Workflow 协议默认能力与 Delivery 兼容边界
+- [x] 14. 增量阶段：旧 Delivery 接口收敛到兼容适配层
 
 ## 0. 基线与边界
 
@@ -293,6 +294,38 @@ node scripts/run_coordinator_test.mjs
 - `npm run test:workflow` 通过。
 - `npm run test:batch` 通过。
 - `node scripts/runtime_boundary_test.mjs` 通过。
+
+### 14. 旧 Delivery 接口收敛到兼容适配层
+
+本阶段把旧 Delivery 方法从公共 `WorkflowRuntime` 协议中移出，保留旧插件行为，
+但由兼容适配层转换为通用 `completionAdapter`。
+
+本阶段已完成：
+
+- 新增 `src/runtime/workflow/deliveryCompatibility.ts`，集中定义旧
+  `DeliveryWorkflow`、旧描述器和适配逻辑。
+- 公共 `WorkflowRuntime` 不再暴露 `chooseRepairTool`、
+  `authoritativeMessage`、`hydrate`、`verifyRequiredAction` 等旧方法。
+- 公共运行时只使用通用能力：
+  `completionAdapter.selectRepairTool`、`finalMessage`、`restore`、
+  `collectActionArtifact`。
+- ST Delivery、ST Inspection 和历史测试 Workflow 继续实现旧接口，但只在兼容层
+  转换，不再让 Agent 直接调用旧方法。
+- `validationInputMode`、`recordSuccessfulValidation`、`canWriteContent` 收回
+  Delivery 兼容类型，ST 工具上下文只在 ST 插件边界读取。
+- `WorkflowDescription` 支持没有 stages 的轻量 Workflow；
+  `describeWorkflowDescriptor` 提供通用默认描述。
+- 新增回归断言，确认旧 ST Workflow 创建后会得到通用 `completionAdapter`。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 工具业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:st` 通过。
+- `npm run test:batch` 通过。
+- 公共运行时边界扫描通过。
 
 ### 0. 基线记录
 

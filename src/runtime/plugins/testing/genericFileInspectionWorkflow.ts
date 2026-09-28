@@ -7,6 +7,8 @@ import {
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
+} from "../../workflow/deliveryCompatibility";
+import type {
   WorkflowDecisionContext,
   WorkflowDescriptor,
   WorkflowLocalMatch,

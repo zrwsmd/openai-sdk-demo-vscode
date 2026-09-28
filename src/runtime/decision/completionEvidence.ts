@@ -1,7 +1,7 @@
 import type { Artifact, ToolResult } from "../../protocol/results";
 import type { CompletionGateResult } from "../completionGate";
 import type { DeliveryContract } from "../deliveryContract";
-import type { DeliveryWorkflow } from "../deliveryWorkflow";
+import type { WorkflowRuntime } from "../workflow/types";
 
 export type CompletionEvidenceRecord = {
   name: string;
@@ -34,8 +34,10 @@ export interface CompletionEvidenceInput {
   gate: CompletionGateResult;
   artifacts: Artifact[];
   deliveredArtifacts: Artifact[];
+  workflow?: WorkflowRuntime;
   deliveryContract?: DeliveryContract;
-  deliveryWorkflow?: DeliveryWorkflow;
+  /** @deprecated Use workflow. */
+  deliveryWorkflow?: WorkflowRuntime;
   authoritativeMessage?: string;
   extractors?: readonly ToolEvidenceExtractor[];
 }
@@ -256,12 +258,13 @@ function extractWorkflowEvidenceFacts(input: CompletionEvidenceInput): EvidenceF
       "workflow",
     ));
   }
-  if (input.deliveryWorkflow) {
-    facts.push(fact("workflow.id", input.deliveryWorkflow.id, "workflow"));
-    facts.push(fact("workflow.title", input.deliveryWorkflow.title, "workflow"));
+  const workflow = input.workflow ?? input.deliveryWorkflow;
+  if (workflow) {
+    facts.push(fact("workflow.id", workflow.id, "workflow"));
+    facts.push(fact("workflow.title", workflow.title, "workflow"));
     facts.push(fact(
       "workflow.stages",
-      (input.deliveryWorkflow.stages ?? [])
+      (workflow.stages ?? [])
         .map((stage) => `${stage.order}:${stage.toolName ?? stage.id}`)
         .join(">"),
       "workflow",

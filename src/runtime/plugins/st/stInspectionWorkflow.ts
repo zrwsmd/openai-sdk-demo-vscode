@@ -3,6 +3,8 @@ import type { CompletionGateResult } from "../../completionGate";
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
+} from "../../workflow/deliveryCompatibility";
+import type {
   WorkflowDecisionContext,
   WorkflowDescriptor,
   WorkflowBusinessToolPolicy,

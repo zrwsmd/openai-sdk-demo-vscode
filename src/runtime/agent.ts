@@ -2410,7 +2410,7 @@ export async function runAgent(
     for (const call of calls) {
       if (!call.result.ok) continue;
       if (deliveryWorkflow) {
-        const artifact = deliveryWorkflow.verifyRequiredAction(call);
+        const artifact = deliveryWorkflow.completionAdapter?.collectActionArtifact?.(call);
         if (artifact) verified.push(artifact);
         continue;
       }
@@ -2617,7 +2617,7 @@ export async function runAgent(
        ],
       artifacts: [...artifacts, ...deliveredArtifactsFromTools()],
       deliveryContract: options.deliveryContract,
-      workflowAdapter: deliveryWorkflow,
+      workflowAdapter: deliveryWorkflow?.completionAdapter,
       toolEvidence,
     });
 
@@ -2631,7 +2631,7 @@ export async function runAgent(
     const artifacts: Artifact[] = [];
     for (const call of workflowToolRecords()) {
       if (!call.result.ok) continue;
-      const artifact = deliveryWorkflow.verifyRequiredAction(call);
+      const artifact = deliveryWorkflow.completionAdapter?.collectActionArtifact?.(call);
       if (artifact) artifacts.push(artifact);
     }
     return artifacts;
@@ -2664,7 +2664,7 @@ export async function runAgent(
         artifacts,
         deliveredArtifacts: deliveredArtifactsFromTools(),
         deliveryContract: options.deliveryContract,
-        deliveryWorkflow,
+        workflow: deliveryWorkflow,
         authoritativeMessage: authoritativeWorkflowMessage(),
         extractors: deliveryWorkflow?.evidenceExtractors,
       });
@@ -2709,7 +2709,7 @@ export async function runAgent(
   };
 
   const authoritativeWorkflowMessage = (): string | undefined =>
-    deliveryWorkflow?.authoritativeMessage(workflowToolRecords());
+    deliveryWorkflow?.completionAdapter?.finalMessage?.(workflowToolRecords());
 
   const fallbackDeliveryMessage = (): string | undefined => {
     const authoritative = authoritativeWorkflowMessage();
@@ -2782,13 +2782,13 @@ export async function runAgent(
   const finalizeStructuredOutputFromRuntime = async (): Promise<IndustrialAgentOutput | undefined> => {
     const protocolArtifacts = toProtocolArtifacts(structuredOutput?.artifacts ?? []);
     const gate = runCompletionGate(output, protocolArtifacts);
-    const evidence = buildCompletionEvidenceSummaries({
+      const evidence = buildCompletionEvidenceSummaries({
       records: workflowToolRecords(),
       gate,
       artifacts: protocolArtifacts,
       deliveredArtifacts: deliveredArtifactsFromTools(),
       deliveryContract: options.deliveryContract,
-      deliveryWorkflow,
+      workflow: deliveryWorkflow,
       authoritativeMessage: authoritativeWorkflowMessage(),
       extractors: deliveryWorkflow?.evidenceExtractors,
     });
@@ -2837,7 +2837,7 @@ export async function runAgent(
   ): string | undefined => {
     refreshDeliveryWorkflowCompletion();
     if (deliveryWorkflowCompleted) return undefined;
-    const workflowRepairTool = deliveryWorkflow?.chooseRepairTool(
+    const workflowRepairTool = deliveryWorkflow?.completionAdapter?.selectRepairTool?.(
       gate,
       workflowToolRecords(),
       availableToolNames,
@@ -3287,7 +3287,7 @@ export async function runAgent(
     ? await loadHistoricalToolResults(session, userText)
     : [];
   if (options.initialState) {
-    deliveryWorkflow?.hydrate(historicalToolResults);
+    deliveryWorkflow?.completionAdapter?.restore?.(historicalToolResults);
     refreshDeliveryWorkflowCompletion();
   }
 

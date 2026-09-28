@@ -38,6 +38,7 @@ export * from '../src/runtime/workflow/types';
 export * from '../src/runtime/workflow/runtimeState';
 export * from '../src/runtime/workflow/registry';
 export * from '../src/runtime/workflow/decisionService';
+export * from '../src/runtime/deliveryWorkflow';
 export * from '../src/app/workflowRegistry';
 export * from '../src/app/toolRegistry';
 export * from '../src/runtime/tools/coreToolProvider';

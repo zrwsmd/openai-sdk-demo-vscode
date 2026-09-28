@@ -8,8 +8,6 @@ import {
   type WorkflowRegistry,
 } from "./workflow/registry";
 import type {
-  DeliveryWorkflow,
-  DeliveryWorkflowDescriptor,
   NormalizedWorkflowRuntime,
   WorkflowDescriptor,
   WorkflowRuntimeContext,
@@ -18,8 +16,14 @@ import type {
 } from "./workflow/types";
 import {
   describeWorkflowDescriptor,
-  normalizeWorkflowRuntime,
 } from "./workflow/types";
+import {
+  adaptDeliveryWorkflow,
+  asDeliveryDescription,
+  type AdaptedWorkflowRuntime,
+  type DeliveryWorkflow,
+  type DeliveryWorkflowDescriptor,
+} from "./workflow/deliveryCompatibility";
 
 export {
   createDeliveryWorkflowRuntimeState,
@@ -29,9 +33,8 @@ export {
 export type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
-  WorkflowStage,
-  WorkflowToolRecord,
-} from "./workflow/types";
+} from "./workflow/deliveryCompatibility";
+export type { WorkflowStage, WorkflowToolRecord } from "./workflow/types";
 
 export function createWorkflowRuntime(
   workflowId: string | undefined,
@@ -39,14 +42,14 @@ export function createWorkflowRuntime(
   state: DeliveryWorkflowRuntimeState,
   registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
   context?: Omit<WorkflowRuntimeContext, "contract" | "state">,
-): NormalizedWorkflowRuntime | undefined {
+): AdaptedWorkflowRuntime | undefined {
   const matched = getWorkflowDescriptor(workflowId, contract, registry);
   const runtime = matched?.createRuntime?.(contract, state, {
     ...context,
     contract,
     state,
   });
-  return runtime ? normalizeWorkflowRuntime(runtime) : undefined;
+  return runtime ? adaptDeliveryWorkflow(runtime) : undefined;
 }
 
 export function createDeliveryWorkflow(
@@ -63,10 +66,7 @@ export function describeDeliveryWorkflow(
 ): DeliveryWorkflowDescriptor | undefined {
   const description = describeWorkflow(undefined, contract, registry);
   if (!description) return undefined;
-  return {
-    ...description,
-    stages: [...(description.stages ?? [])] as DeliveryWorkflowDescriptor["stages"],
-  };
+  return asDeliveryDescription(description);
 }
 
 export function describeWorkflow(

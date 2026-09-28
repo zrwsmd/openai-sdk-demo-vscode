@@ -13,12 +13,7 @@ import type { ToolCatalog, ToolFallbackMode } from "../toolCatalog";
 
 export type WorkflowId = string;
 
-/**
- * Generic names used by the workflow runtime.
- *
- * The DeliveryWorkflow aliases below remain available during the migration so
- * existing plugins and persisted-run callers do not need to change at once.
- */
+/** Generic names used by the workflow runtime. */
 export type WorkflowContract = DeliveryContract;
 export type WorkflowState = WorkflowRuntimeState;
 
@@ -55,21 +50,6 @@ export interface WorkflowDescription {
   stages?: readonly WorkflowStage[];
   [key: string]: unknown;
 }
-
-/**
- * Legacy delivery description. New workflows can omit stages entirely.
- */
-export type DeliveryWorkflowDescriptor = WorkflowDescription & {
-  stages: Array<{
-    order: number;
-    id: string;
-    toolName?: string;
-    title: string;
-    description: string;
-    successEvidence: string;
-    onFailure: WorkflowStage["onFailure"];
-  }>;
-};
 
 export type WorkflowBusinessToolAccess =
   | "allow_list"
@@ -114,32 +94,27 @@ export interface WorkflowToolPolicy extends WorkflowToolPolicySource {
 }
 
 export interface WorkflowCompletionAdapter extends CompletionGateWorkflowAdapter {
-  chooseRepairTool?(
+  selectRepairTool?(
     gate: Exclude<CompletionGateResult, { passed: true }>,
     records: WorkflowToolRecord[],
     availableToolNames: Set<string>,
   ): string | undefined;
-  authoritativeMessage?(records: WorkflowToolRecord[]): string | undefined;
-  hydrate?(records: WorkflowToolRecord[]): void;
-  verifyRequiredAction?(call: WorkflowToolRecord): Artifact | undefined;
+  finalMessage?(records: WorkflowToolRecord[]): string | undefined;
+  restore?(records: WorkflowToolRecord[]): void;
+  collectActionArtifact?(call: WorkflowToolRecord): Artifact | undefined;
 }
 
-export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionAdapter {
+export interface WorkflowRuntime extends WorkflowToolPolicy {
   readonly id: string;
   readonly title: string;
   readonly stages?: readonly WorkflowStage[];
   readonly services?: RuntimeServiceContainer;
+  readonly completionAdapter?: WorkflowCompletionAdapter;
   readonly evidenceExtractors?: readonly ToolEvidenceExtractor[];
-  readonly validationInputMode?: "inline_code" | "path_or_code";
   readonly requiredActionTool?: string;
   initialTool?(options: { isResume: boolean }): string | undefined;
   instructions?(): string;
-  recordSuccessfulValidation?(content: string, hash: string): void;
-  canWriteContent?(content: string): boolean;
 }
-
-/** @deprecated Use WorkflowRuntime in new code. */
-export type DeliveryWorkflow = WorkflowRuntime;
 
 export type NormalizedWorkflowRuntime = Omit<
   WorkflowRuntime,
@@ -147,23 +122,11 @@ export type NormalizedWorkflowRuntime = Omit<
   | "parallelToolCalls"
   | "initialTool"
   | "instructions"
-  | "chooseRepairTool"
-  | "authoritativeMessage"
-  | "hydrate"
-  | "verifyRequiredAction"
 > & {
   readonly stages: readonly WorkflowStage[];
   readonly parallelToolCalls: boolean;
   initialTool(options: { isResume: boolean }): string | undefined;
   instructions(): string;
-  chooseRepairTool(
-    gate: Exclude<CompletionGateResult, { passed: true }>,
-    records: WorkflowToolRecord[],
-    availableToolNames: Set<string>,
-  ): string | undefined;
-  authoritativeMessage(records: WorkflowToolRecord[]): string | undefined;
-  hydrate(records: WorkflowToolRecord[]): void;
-  verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined;
 };
 
 /**
@@ -174,16 +137,26 @@ export type NormalizedWorkflowRuntime = Omit<
 export function normalizeWorkflowRuntime(
   runtime: WorkflowRuntime,
 ): NormalizedWorkflowRuntime {
+  const completionAdapter = runtime.completionAdapter;
   return {
     ...runtime,
-    stages: runtime.stages ?? [],
+    stages: runtime.stages ? [...runtime.stages] : [],
     parallelToolCalls: runtime.parallelToolCalls ?? true,
-    initialTool: runtime.initialTool ?? (() => undefined),
-    instructions: runtime.instructions ?? (() => ""),
-    chooseRepairTool: runtime.chooseRepairTool ?? (() => undefined),
-    authoritativeMessage: runtime.authoritativeMessage ?? (() => undefined),
-    hydrate: runtime.hydrate ?? (() => undefined),
-    verifyRequiredAction: runtime.verifyRequiredAction ?? (() => undefined),
+    initialTool: (options) => runtime.initialTool?.(options),
+    instructions: () => runtime.instructions?.() ?? "",
+    completionAdapter: {
+      collectArtifacts: (records) => completionAdapter?.collectArtifacts?.(records) ?? [],
+      collectIssues: (context) => completionAdapter?.collectIssues?.(context) ?? [],
+      resolveIssue: (issue, context) => completionAdapter?.resolveIssue?.(issue, context),
+      hasSuccessfulVerification: (toolName, context) =>
+        completionAdapter?.hasSuccessfulVerification?.(toolName, context),
+      selectRepairTool: (gate, records, availableToolNames) =>
+        completionAdapter?.selectRepairTool?.(gate, records, availableToolNames),
+      finalMessage: (records) => completionAdapter?.finalMessage?.(records),
+      restore: (records) => completionAdapter?.restore?.(records),
+      collectActionArtifact: (call) =>
+        completionAdapter?.collectActionArtifact?.(call),
+    },
   };
 }
 

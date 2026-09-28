@@ -13,6 +13,7 @@ import {
   WorkflowRegistry,
   createCoreToolProvider,
   createDeliveryWorkflowRuntimeState,
+  createWorkflowRuntime,
   evaluateCompletionGate,
   getGenericFileInspectionState,
   normalizeWorkflowRuntime,
@@ -150,7 +151,7 @@ try {
   assert.equal(minimalRuntime.instructions(), '');
   assert.equal(minimalRuntime.initialTool({ isResume: false }), undefined);
   assert.equal(
-    minimalRuntime.chooseRepairTool(
+    minimalRuntime.completionAdapter?.selectRepairTool?.(
       {
         passed: false,
         reason: 'not needed',
@@ -162,9 +163,9 @@ try {
     ),
     undefined,
   );
-  minimalRuntime.hydrate([]);
-  assert.equal(minimalRuntime.authoritativeMessage([]), undefined);
-  assert.equal(minimalRuntime.verifyRequiredAction({
+  minimalRuntime.completionAdapter?.restore?.([]);
+  assert.equal(minimalRuntime.completionAdapter?.finalMessage?.([]), undefined);
+  assert.equal(minimalRuntime.completionAdapter?.collectActionArtifact?.({
     name: 'read_file',
     args: '{}',
     result: readResult,
@@ -213,6 +214,28 @@ try {
       },
     ),
     { mode: 'allow_list', names: ['st_symbol_references'] },
+  );
+
+  const adaptedStRuntime = createWorkflowRuntime(
+    'st_inspection',
+    undefined,
+    createDeliveryWorkflowRuntimeState(),
+    new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
+    { userText: '分析这个 ST 文件的变更影响面' },
+  );
+  assert(adaptedStRuntime);
+  assert(adaptedStRuntime.completionAdapter);
+  assert.equal(
+    adaptedStRuntime.completionAdapter.finalMessage?.([]),
+    undefined,
+  );
+  assert.equal(
+    adaptedStRuntime.completionAdapter.collectActionArtifact?.({
+      name: 'st_change_impact',
+      args: '{}',
+      result: readResult,
+    }),
+    undefined,
   );
 
   console.log('generic workflow plugin tests passed');

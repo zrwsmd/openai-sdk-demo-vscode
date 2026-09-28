@@ -15,6 +15,8 @@ import { getWorkflowStateSlot, type DeliveryWorkflowRuntimeState } from "../../w
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
+} from "../../workflow/deliveryCompatibility";
+import type {
   WorkflowDecisionContext,
   WorkflowDescriptor,
   WorkflowLocalMatch,
