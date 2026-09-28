@@ -44,6 +44,7 @@
 - [x] 10. 清理兼容层并完成边界封锁
 - [x] 11. 增量阶段：文件级 `beforeEffect`、`ToolCatalog` 全覆盖 fallback、动态边界扫描、只读领域工具接入
 - [x] 12. 增量阶段：通用多意图 `ToolCatalog` 能力选择
+- [x] 13. 增量阶段：公共 Workflow 协议默认能力与 Delivery 兼容边界
 
 ## 0. 基线与边界
 
@@ -267,6 +268,31 @@ node scripts/run_coordinator_test.mjs
 - 如果兼容性要求与“公共层无 ST 逻辑”冲突，兼容代码放在插件或宿主装配层。
 
 ## 实际执行记录
+
+### 13. 公共 Workflow 协议默认能力与 Delivery 兼容边界
+
+本阶段先完成公共协议的可选能力和统一默认值，暂不迁移现有 ST Delivery
+实现，保证可以分阶段验证。
+
+本阶段已完成：
+
+- `WorkflowRuntimeState` 成为新的通用状态类型；
+  `DeliveryWorkflowRuntimeState` 和 `createDeliveryWorkflowRuntimeState` 保留为兼容别名。
+- `WorkflowDescriptor.describe`、阶段列表、并行调用配置、初始工具、运行时指令、
+  修复工具、权威消息、历史恢复和必需动作验证均改为可选能力。
+- 新增 `normalizeWorkflowRuntime`，为缺少上述能力的轻量 Workflow 补充安全默认实现：
+  空阶段、允许并行、无初始工具、空指令、无修复、无恢复、无权威消息和无动作验证。
+- `createWorkflowRuntime` 统一返回规范化运行时，现有 Agent 和 ST Delivery 调用方式保持不变。
+- `describeWorkflowDescriptor` 为没有自定义描述器的 Workflow 生成通用描述。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 插件业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:batch` 通过。
+- `node scripts/runtime_boundary_test.mjs` 通过。
 
 ### 0. 基线记录
 

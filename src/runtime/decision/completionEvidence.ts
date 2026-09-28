@@ -261,7 +261,7 @@ function extractWorkflowEvidenceFacts(input: CompletionEvidenceInput): EvidenceF
     facts.push(fact("workflow.title", input.deliveryWorkflow.title, "workflow"));
     facts.push(fact(
       "workflow.stages",
-      input.deliveryWorkflow.stages
+      (input.deliveryWorkflow.stages ?? [])
         .map((stage) => `${stage.order}:${stage.toolName ?? stage.id}`)
         .join(">"),
       "workflow",

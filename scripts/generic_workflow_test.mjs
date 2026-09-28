@@ -15,6 +15,8 @@ import {
   createDeliveryWorkflowRuntimeState,
   evaluateCompletionGate,
   getGenericFileInspectionState,
+  normalizeWorkflowRuntime,
+  describeWorkflowDescriptor,
   resolveWorkflowBusinessToolPolicy,
 } from './agent.testbundle.mjs';
 
@@ -136,6 +138,49 @@ try {
   assert.deepEqual(
     resolveWorkflowBusinessToolPolicy([descriptorOnlyPolicy], visibilityContext),
     { mode: 'allow_list', names: ['read_file'] },
+  );
+
+  const minimalRuntime = normalizeWorkflowRuntime({
+    id: 'minimal_generic_workflow',
+    title: 'Minimal generic workflow',
+    businessToolNames: ['read_file'],
+  });
+  assert.deepEqual(minimalRuntime.stages, []);
+  assert.equal(minimalRuntime.parallelToolCalls, true);
+  assert.equal(minimalRuntime.instructions(), '');
+  assert.equal(minimalRuntime.initialTool({ isResume: false }), undefined);
+  assert.equal(
+    minimalRuntime.chooseRepairTool(
+      {
+        passed: false,
+        reason: 'not needed',
+        repairInstruction: '',
+        issues: [],
+      },
+      [],
+      new Set(['read_file']),
+    ),
+    undefined,
+  );
+  minimalRuntime.hydrate([]);
+  assert.equal(minimalRuntime.authoritativeMessage([]), undefined);
+  assert.equal(minimalRuntime.verifyRequiredAction({
+    name: 'read_file',
+    args: '{}',
+    result: readResult,
+  }), undefined);
+  assert.deepEqual(
+    describeWorkflowDescriptor({
+      id: 'minimal_generic_workflow',
+      title: 'Minimal generic workflow',
+      description: 'No delivery-specific methods.',
+      runtimeManaged: true,
+    }),
+    {
+      id: 'minimal_generic_workflow',
+      title: 'Minimal generic workflow',
+      description: 'No delivery-specific methods.',
+    },
   );
 
   const stState = createDeliveryWorkflowRuntimeState();

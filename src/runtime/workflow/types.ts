@@ -6,7 +6,7 @@ import type {
 } from "../completionTypes";
 import type { DeliveryContract } from "../deliveryContract";
 import type { PipelineStagePlan } from "../pipeline/stagePlan";
-import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
+import type { WorkflowRuntimeState } from "./runtimeState";
 import type { RuntimeServiceContainer } from "../services";
 import type { ToolEvidenceExtractor } from "../decision/completionEvidence";
 import type { ToolCatalog, ToolFallbackMode } from "../toolCatalog";
@@ -20,7 +20,7 @@ export type WorkflowId = string;
  * existing plugins and persisted-run callers do not need to change at once.
  */
 export type WorkflowContract = DeliveryContract;
-export type WorkflowState = DeliveryWorkflowRuntimeState;
+export type WorkflowState = WorkflowRuntimeState;
 
 export interface WorkflowRuntimeContext {
   readonly contract?: WorkflowContract;
@@ -48,9 +48,18 @@ export type WorkflowStage = {
   onFailure: "retry" | "revise_draft" | "stop";
 };
 
-export type DeliveryWorkflowDescriptor = {
+export interface WorkflowDescription {
   id: string;
   title: string;
+  description?: string;
+  stages?: readonly WorkflowStage[];
+  [key: string]: unknown;
+}
+
+/**
+ * Legacy delivery description. New workflows can omit stages entirely.
+ */
+export type DeliveryWorkflowDescriptor = WorkflowDescription & {
   stages: Array<{
     order: number;
     id: string;
@@ -61,8 +70,6 @@ export type DeliveryWorkflowDescriptor = {
     onFailure: WorkflowStage["onFailure"];
   }>;
 };
-
-export type WorkflowDescription = DeliveryWorkflowDescriptor;
 
 export type WorkflowBusinessToolAccess =
   | "allow_list"
@@ -103,10 +110,52 @@ export interface WorkflowToolPolicySource {
  */
 export interface WorkflowToolPolicy extends WorkflowToolPolicySource {
   readonly pipelinePlan?: PipelineStagePlan;
-  readonly parallelToolCalls: boolean;
+  readonly parallelToolCalls?: boolean;
 }
 
 export interface WorkflowCompletionAdapter extends CompletionGateWorkflowAdapter {
+  chooseRepairTool?(
+    gate: Exclude<CompletionGateResult, { passed: true }>,
+    records: WorkflowToolRecord[],
+    availableToolNames: Set<string>,
+  ): string | undefined;
+  authoritativeMessage?(records: WorkflowToolRecord[]): string | undefined;
+  hydrate?(records: WorkflowToolRecord[]): void;
+  verifyRequiredAction?(call: WorkflowToolRecord): Artifact | undefined;
+}
+
+export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionAdapter {
+  readonly id: string;
+  readonly title: string;
+  readonly stages?: readonly WorkflowStage[];
+  readonly services?: RuntimeServiceContainer;
+  readonly evidenceExtractors?: readonly ToolEvidenceExtractor[];
+  readonly validationInputMode?: "inline_code" | "path_or_code";
+  readonly requiredActionTool?: string;
+  initialTool?(options: { isResume: boolean }): string | undefined;
+  instructions?(): string;
+  recordSuccessfulValidation?(content: string, hash: string): void;
+  canWriteContent?(content: string): boolean;
+}
+
+/** @deprecated Use WorkflowRuntime in new code. */
+export type DeliveryWorkflow = WorkflowRuntime;
+
+export type NormalizedWorkflowRuntime = Omit<
+  WorkflowRuntime,
+  | "stages"
+  | "parallelToolCalls"
+  | "initialTool"
+  | "instructions"
+  | "chooseRepairTool"
+  | "authoritativeMessage"
+  | "hydrate"
+  | "verifyRequiredAction"
+> & {
+  readonly stages: readonly WorkflowStage[];
+  readonly parallelToolCalls: boolean;
+  initialTool(options: { isResume: boolean }): string | undefined;
+  instructions(): string;
   chooseRepairTool(
     gate: Exclude<CompletionGateResult, { passed: true }>,
     records: WorkflowToolRecord[],
@@ -115,24 +164,28 @@ export interface WorkflowCompletionAdapter extends CompletionGateWorkflowAdapter
   authoritativeMessage(records: WorkflowToolRecord[]): string | undefined;
   hydrate(records: WorkflowToolRecord[]): void;
   verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined;
-}
+};
 
-export interface WorkflowRuntime extends WorkflowToolPolicy, WorkflowCompletionAdapter {
-  readonly id: string;
-  readonly title: string;
-  readonly stages: WorkflowStage[];
-  readonly services?: RuntimeServiceContainer;
-  readonly evidenceExtractors?: readonly ToolEvidenceExtractor[];
-  readonly validationInputMode?: "inline_code" | "path_or_code";
-  readonly requiredActionTool?: string;
-  initialTool(options: { isResume: boolean }): string | undefined;
-  instructions(): string;
-  recordSuccessfulValidation?(content: string, hash: string): void;
-  canWriteContent?(content: string): boolean;
+/**
+ * Converts optional plugin capabilities into the stable shape used by the
+ * runtime. Delivery plugins keep their existing behavior; lightweight
+ * workflows can implement only the capabilities they need.
+ */
+export function normalizeWorkflowRuntime(
+  runtime: WorkflowRuntime,
+): NormalizedWorkflowRuntime {
+  return {
+    ...runtime,
+    stages: runtime.stages ?? [],
+    parallelToolCalls: runtime.parallelToolCalls ?? true,
+    initialTool: runtime.initialTool ?? (() => undefined),
+    instructions: runtime.instructions ?? (() => ""),
+    chooseRepairTool: runtime.chooseRepairTool ?? (() => undefined),
+    authoritativeMessage: runtime.authoritativeMessage ?? (() => undefined),
+    hydrate: runtime.hydrate ?? (() => undefined),
+    verifyRequiredAction: runtime.verifyRequiredAction ?? (() => undefined),
+  };
 }
-
-/** @deprecated Use WorkflowRuntime in new code. */
-export type DeliveryWorkflow = WorkflowRuntime;
 
 export type WorkflowDecisionSource =
   | "jev"
@@ -174,7 +227,7 @@ export interface WorkflowDescriptor {
   /** @deprecated Use businessToolNames. */
   visibleToolNames?: readonly string[];
   pipelinePlan?: PipelineStagePlan;
-  describe(): WorkflowDescription;
+  describe?(): WorkflowDescription;
   /** Generic contract hooks. */
   matchesContract?(contract: WorkflowContract | undefined): boolean;
   createContract?(options?: {
@@ -193,6 +246,16 @@ export interface WorkflowDescriptor {
     state: WorkflowState,
     context?: WorkflowRuntimeContext,
   ): WorkflowRuntime | undefined;
+}
+
+export function describeWorkflowDescriptor(
+  workflow: WorkflowDescriptor,
+): WorkflowDescription {
+  return workflow.describe?.() ?? {
+    id: workflow.id,
+    title: workflow.title,
+    description: workflow.description,
+  };
 }
 
 export function createWorkflowContract(

@@ -10,10 +10,15 @@ import {
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
+  NormalizedWorkflowRuntime,
   WorkflowDescriptor,
   WorkflowRuntimeContext,
   WorkflowStage,
   WorkflowToolRecord,
+} from "./workflow/types";
+import {
+  describeWorkflowDescriptor,
+  normalizeWorkflowRuntime,
 } from "./workflow/types";
 
 export {
@@ -34,13 +39,14 @@ export function createWorkflowRuntime(
   state: DeliveryWorkflowRuntimeState,
   registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
   context?: Omit<WorkflowRuntimeContext, "contract" | "state">,
-): DeliveryWorkflow | undefined {
+): NormalizedWorkflowRuntime | undefined {
   const matched = getWorkflowDescriptor(workflowId, contract, registry);
-  return matched?.createRuntime?.(contract, state, {
+  const runtime = matched?.createRuntime?.(contract, state, {
     ...context,
     contract,
     state,
   });
+  return runtime ? normalizeWorkflowRuntime(runtime) : undefined;
 }
 
 export function createDeliveryWorkflow(
@@ -55,15 +61,21 @@ export function describeDeliveryWorkflow(
   contract: DeliveryContract | undefined,
   registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
 ): DeliveryWorkflowDescriptor | undefined {
-  return describeWorkflow(undefined, contract, registry);
+  const description = describeWorkflow(undefined, contract, registry);
+  if (!description) return undefined;
+  return {
+    ...description,
+    stages: [...(description.stages ?? [])] as DeliveryWorkflowDescriptor["stages"],
+  };
 }
 
 export function describeWorkflow(
   workflowId: string | undefined,
   contract: DeliveryContract | undefined,
   registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
-): DeliveryWorkflowDescriptor | undefined {
-  return getWorkflowDescriptor(workflowId, contract, registry)?.describe();
+): ReturnType<typeof describeWorkflowDescriptor> | undefined {
+  const workflow = getWorkflowDescriptor(workflowId, contract, registry);
+  return workflow ? describeWorkflowDescriptor(workflow) : undefined;
 }
 
 export function getDeliveryWorkflowDescriptor(
