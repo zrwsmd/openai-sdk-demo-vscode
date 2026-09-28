@@ -7,7 +7,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const runtimeRoot = path.join(repoRoot, 'src', 'runtime');
+const sourceRoot = path.join(repoRoot, 'src');
 const pluginRoot = path.join(runtimeRoot, 'plugins');
+const legacyDeliveryFacade = path.join(runtimeRoot, 'deliveryWorkflow.ts');
+const legacyCompatibilityModule = path.join(
+  runtimeRoot,
+  'workflow',
+  'deliveryCompatibility.ts',
+);
 
 const staticForbiddenTokens = [
   'stAnalyzer',
@@ -78,6 +85,7 @@ function listTypeScriptFiles(directory) {
 }
 
 const files = listTypeScriptFiles(runtimeRoot);
+const sourceFiles = listTypeScriptFiles(sourceRoot);
 const forbiddenTokens = [
   ...staticForbiddenTokens,
   ...(await registeredPluginToolNames()),
@@ -91,6 +99,32 @@ for (const file of files) {
   }
   for (const pattern of forbiddenPatterns) {
     if (pattern.test(text)) findings.push(`${relative}: forbidden pattern ${pattern}`);
+  }
+}
+
+const legacyDeliveryImportPattern =
+  /(?:from\s+|import\s*\()\s*['"][^'"]*deliveryWorkflow(?:\.ts)?['"]/u;
+const allowedLegacyImporters = new Set([
+  legacyDeliveryFacade,
+  legacyCompatibilityModule,
+]);
+const allowedLegacyImporterPrefixes = [
+  path.join(runtimeRoot, 'plugins') + path.sep,
+  path.join(repoRoot, 'src', 'app') + path.sep,
+];
+for (const file of sourceFiles) {
+  const text = fs.readFileSync(file, 'utf8');
+  if (!legacyDeliveryImportPattern.test(text)) continue;
+  const normalizedFile = path.normalize(file);
+  const allowed =
+    allowedLegacyImporters.has(normalizedFile) ||
+    allowedLegacyImporterPrefixes.some((prefix) =>
+      normalizedFile.startsWith(prefix),
+    );
+  if (!allowed) {
+    findings.push(
+      `${path.relative(repoRoot, file)}: public code imports legacy Delivery facade`,
+    );
   }
 }
 
@@ -113,4 +147,7 @@ for (const legacyPath of [
 }
 
 assert.deepEqual(findings, [], `public runtime boundary violations:\n${findings.join('\n')}`);
-console.log(`runtime boundary passed (${files.length} public TypeScript files scanned)`);
+console.log(
+  `runtime boundary passed (${files.length} public TypeScript files scanned; ` +
+    `${sourceFiles.length} source import boundaries checked)`,
+);

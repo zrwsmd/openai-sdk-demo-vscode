@@ -48,6 +48,7 @@
 - [x] 14. 增量阶段：旧 Delivery 接口收敛到兼容适配层
 - [x] 15. 增量阶段：通用运行时入口与 Delivery 兼容 Facade 分离
 - [x] 16. 增量阶段：收紧 Delivery Facade，迁移内部兼容实现
+- [x] 17. 增量阶段：自动封锁公共层对旧 Delivery Facade 的依赖
 
 ## 0. 基线与边界
 
@@ -388,6 +389,30 @@ Delivery Workflow。
 
 - `npx tsc --noEmit` 通过。
 - `npm run compile` 通过。
+- `npm run test:workflow`、`npm run test:st` 和 `npm run test:batch` 通过。
+
+### 17. 自动封锁公共层对旧 Delivery Facade 的依赖
+
+本阶段把兼容边界加入自动检查，避免后续新增通用 Workflow 时重新引用旧
+`src/runtime/deliveryWorkflow.ts`。
+
+本阶段已完成：
+
+- `runtime_boundary_test.mjs` 新增 TypeScript import 边界扫描，检测公共源码
+  是否导入旧 Delivery Facade。
+- 公共运行时核心不允许引用旧 Facade；旧 Facade 自身、Delivery 兼容模块、
+  ST 插件边界和宿主装配层保留为允许范围。
+- 原有 ST 专用字符串、工具名和旧文件残留检查保持不变，新增规则不依赖
+  任何具体领域工具名称。
+- 测试入口显式区分通用 `createWorkflowRuntime` 与旧 Delivery 兼容入口，
+  避免同名导出再次产生歧义。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:boundary` 通过。
 - `npm run test:workflow`、`npm run test:st` 和 `npm run test:batch` 通过。
 
 ### 0. 基线记录
