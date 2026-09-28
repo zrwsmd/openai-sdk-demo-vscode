@@ -47,6 +47,7 @@
 - [x] 13. 增量阶段：公共 Workflow 协议默认能力与 Delivery 兼容边界
 - [x] 14. 增量阶段：旧 Delivery 接口收敛到兼容适配层
 - [x] 15. 增量阶段：通用运行时入口与 Delivery 兼容 Facade 分离
+- [x] 16. 增量阶段：收紧 Delivery Facade，迁移内部兼容实现
 
 ## 0. 基线与边界
 
@@ -363,6 +364,31 @@ Delivery Workflow。
 - `node scripts/run_coordinator_test.mjs` 通过。
 - `npm run test:agent` 仍受本机测试前置条件影响：`127.0.0.1:8790`
   网关未启动，报 `ECONNREFUSED`；本次编译和 Agent 入口类型检查均通过。
+
+### 16. 收紧 Delivery Facade，迁移内部兼容实现
+
+本阶段继续缩小旧入口的职责：兼容实现统一放入
+`src/runtime/workflow/deliveryCompatibility.ts`，旧的
+`src/runtime/deliveryWorkflow.ts` 只保留历史模块路径转发。
+
+本阶段已完成：
+
+- 将 Delivery Runtime 创建、描述、查询和兼容判断函数全部迁移到
+  `workflow/deliveryCompatibility.ts`。
+- `deliveryWorkflow.ts` 改为纯兼容 Facade，不再包含运行时业务实现。
+- 公共 Agent、Coordinator 和测试主体继续直接使用通用
+  `workflow/runtime.ts`；测试入口只通过兼容模块验证旧接口。
+- 增加旧模块路径回归测试，确认历史 `createWorkflowRuntime` 调用仍能得到
+  Completion Adapter。
+- 保留旧函数名和模块路径，但用 `@deprecated` 明确新代码不得继续依赖；
+  新增 Delivery 代码应使用 `createDeliveryWorkflowRuntime` 或直接使用通用入口。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 业务实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow`、`npm run test:st` 和 `npm run test:batch` 通过。
 
 ### 0. 基线记录
 

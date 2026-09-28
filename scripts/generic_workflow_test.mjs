@@ -14,6 +14,7 @@ import {
   createCoreToolProvider,
   createDeliveryWorkflowRuntimeState,
   createWorkflowRuntime,
+  createLegacyDeliveryWorkflowRuntime,
   adaptDeliveryWorkflow,
   evaluateCompletionGate,
   getGenericFileInspectionState,
@@ -238,6 +239,19 @@ try {
       args: '{}',
       result: readResult,
     }),
+    undefined,
+  );
+
+  const legacyFacadeRuntime = createLegacyDeliveryWorkflowRuntime(
+    'st_inspection',
+    undefined,
+    createDeliveryWorkflowRuntimeState(),
+    new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
+    { userText: '分析这个 ST 文件的变更影响面' },
+  );
+  assert(legacyFacadeRuntime?.completionAdapter);
+  assert.equal(
+    legacyFacadeRuntime?.completionAdapter.finalMessage?.([]),
     undefined,
   );
 

@@ -7,11 +7,25 @@ import type {
   NormalizedWorkflowRuntime,
   WorkflowDescription,
   WorkflowCompletionAdapter,
+  WorkflowDescriptor,
   WorkflowRuntime,
+  WorkflowRuntimeContext,
   WorkflowStage,
   WorkflowToolRecord,
 } from "./types";
 import { normalizeWorkflowRuntime } from "./types";
+import type { DeliveryWorkflowRuntimeState } from "./runtimeState";
+import type { DeliveryContract } from "../deliveryContract";
+import {
+  getDefaultWorkflowRegistry,
+  type WorkflowRegistry,
+} from "./registry";
+import {
+  createWorkflowRuntime as createGenericWorkflowRuntime,
+  describeWorkflow as describeGenericWorkflow,
+  getWorkflowDescriptor as getGenericWorkflowDescriptor,
+  isRuntimeManagedWorkflow as isGenericRuntimeManagedWorkflow,
+} from "./runtime";
 
 /**
  * Legacy Delivery runtime shape.
@@ -141,4 +155,100 @@ export function asDeliveryDescription(
     ...description,
     stages: [...(description.stages ?? [])] as DeliveryWorkflowDescriptor["stages"],
   };
+}
+
+/**
+ * Creates a legacy-compatible Delivery runtime from the generic runtime
+ * entrypoint. New code should call `workflow/runtime.createWorkflowRuntime`
+ * and use a generic completion adapter directly.
+ */
+export function createDeliveryWorkflowRuntime(
+  workflowId: string | undefined,
+  contract: DeliveryContract | undefined,
+  state: DeliveryWorkflowRuntimeState,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+  context?: Omit<WorkflowRuntimeContext, "contract" | "state">,
+): AdaptedWorkflowRuntime | undefined {
+  const runtime = createGenericWorkflowRuntime(
+    workflowId,
+    contract,
+    state,
+    registry,
+    context,
+  );
+  return runtime ? adaptDeliveryWorkflow(runtime) : undefined;
+}
+
+/** @deprecated Use `createDeliveryWorkflowRuntime`. */
+export function createWorkflowRuntime(
+  workflowId: string | undefined,
+  contract: DeliveryContract | undefined,
+  state: DeliveryWorkflowRuntimeState,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+  context?: Omit<WorkflowRuntimeContext, "contract" | "state">,
+): AdaptedWorkflowRuntime | undefined {
+  return createDeliveryWorkflowRuntime(
+    workflowId,
+    contract,
+    state,
+    registry,
+    context,
+  );
+}
+
+export function createDeliveryWorkflow(
+  contract: DeliveryContract | undefined,
+  state: DeliveryWorkflowRuntimeState,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): DeliveryWorkflow | undefined {
+  return createDeliveryWorkflowRuntime(undefined, contract, state, registry);
+}
+
+export function describeDeliveryWorkflow(
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): DeliveryWorkflowDescriptor | undefined {
+  const description = describeGenericWorkflow(undefined, contract, registry);
+  return description ? asDeliveryDescription(description) : undefined;
+}
+
+/** @deprecated Use `workflow/runtime.describeWorkflow`. */
+export function describeWorkflow(
+  workflowId: string | undefined,
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): ReturnType<typeof describeGenericWorkflow> {
+  return describeGenericWorkflow(workflowId, contract, registry);
+}
+
+export function getDeliveryWorkflowDescriptor(
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): WorkflowDescriptor | undefined {
+  return getGenericWorkflowDescriptor(undefined, contract, registry);
+}
+
+/** @deprecated Use `workflow/runtime.getWorkflowDescriptor`. */
+export function getWorkflowDescriptor(
+  workflowId: string | undefined,
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): WorkflowDescriptor | undefined {
+  return getGenericWorkflowDescriptor(workflowId, contract, registry);
+}
+
+export function isRuntimeManagedDeliveryWorkflow(
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): boolean {
+  return isGenericRuntimeManagedWorkflow(undefined, contract, registry);
+}
+
+/** @deprecated Use `workflow/runtime.isRuntimeManagedWorkflow`. */
+export function isRuntimeManagedWorkflow(
+  workflowId: string | undefined,
+  contract: DeliveryContract | undefined,
+  registry: WorkflowRegistry = getDefaultWorkflowRegistry(),
+): boolean {
+  return isGenericRuntimeManagedWorkflow(workflowId, contract, registry);
 }
