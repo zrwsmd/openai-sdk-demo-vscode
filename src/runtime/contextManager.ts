@@ -11,14 +11,22 @@ export interface ContextManagedSession {
   replaceItems(items: AgentInputItem[]): Promise<void>;
 }
 
-/** Configurable limits used by the current local compaction strategy. */
-export interface ContextCompactionBudget {
+/** Legacy limits retained for old hosts and persisted run documents. */
+export interface LegacyContextCompactionBudget {
+  /** @deprecated Use maxInputTokens or the model context window instead. */
+  maxItems?: number;
+  /** @deprecated Use maxInputTokens or the model context window instead. */
+  maxCharacters?: number;
+  /** Retained in both modes to control how many recent items remain verbatim. */
+  recentItems?: number;
+  /** Retained in both modes to bound the summarizer input. */
+  maxSummaryInputCharacters?: number;
+}
+
+/** Model-aware local compaction settings. */
+export interface ContextCompactionBudget extends LegacyContextCompactionBudget {
   /** Explicit effective input-token ceiling; 0/unset uses the model profile. */
   maxInputTokens?: number;
-  maxItems?: number;
-  maxCharacters?: number;
-  recentItems?: number;
-  maxSummaryInputCharacters?: number;
 }
 
 export interface TokenEstimateCalibration {
@@ -64,13 +72,23 @@ export type ContextSummarizer = (
 export interface ContextManagerOptions {
   /** New unified configuration entry point for context management. */
   modelContext?: ModelContextProfile;
-  /** Direct fields remain supported for callers and older tests. */
+  /** Legacy direct fields remain supported for callers and older tests. */
+  /** @deprecated Use modelContext.compaction.maxInputTokens instead. */
   maxItems?: number;
+  /** @deprecated Use modelContext.compaction.maxInputTokens instead. */
   maxCharacters?: number;
+  /** Retained as a compaction-shaping option in both trigger modes. */
   recentItems?: number;
+  /** Retained as a compaction-shaping option in both trigger modes. */
   maxSummaryInputCharacters?: number;
   signal?: AbortSignal;
   summarize?: ContextSummarizer;
+}
+
+export interface ResolvedContextCompactionPolicy {
+  triggerMode: 'token_budget' | 'legacy_threshold';
+  inputBudgetTokens?: number;
+  legacy: Required<LegacyContextCompactionBudget>;
 }
 
 export interface ContextCompactionResult {
@@ -87,10 +105,12 @@ export interface ContextCompactionResult {
   error?: string;
 }
 
-const DEFAULT_MAX_ITEMS = 48;
-const DEFAULT_MAX_CHARACTERS = 80_000;
-const DEFAULT_RECENT_ITEMS = 16;
-const DEFAULT_SUMMARY_INPUT_CHARACTERS = 60_000;
+export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
+  maxItems: 48,
+  maxCharacters: 80_000,
+  recentItems: 16,
+  maxSummaryInputCharacters: 60_000,
+};
 
 export async function ensureContextCompacted(
   session: ContextManagedSession,
@@ -100,14 +120,12 @@ export async function ensureContextCompacted(
   const items = await session.getItems();
   const beforeCharacters = estimateItemsCharacters(items);
   const modelContext = options.modelContext ?? config.modelContext;
-  const budget = modelContext?.compaction;
-  const inputBudgetTokens = resolveInputTokenBudget(modelContext);
-  const triggerMode = inputBudgetTokens === undefined ? 'legacy_threshold' : 'token_budget';
+  const policy = resolveContextCompactionPolicy(modelContext, options);
+  const { inputBudgetTokens, triggerMode } = policy;
   const beforeTokens = inputBudgetTokens === undefined
     ? undefined
     : estimateItemsTokens(items, modelContext?.tokenCalibration);
-  const maxItems = options.maxItems ?? budget?.maxItems ?? DEFAULT_MAX_ITEMS;
-  const maxCharacters = options.maxCharacters ?? budget?.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+  const { maxItems, maxCharacters } = policy.legacy;
   const tooManyItems = items.length > maxItems;
   const tooManyCharacters = beforeCharacters > maxCharacters;
   const tooManyTokens =
@@ -133,7 +151,7 @@ export async function ensureContextCompacted(
 
   const recentCount = Math.max(
     2,
-    Math.min(items.length - 1, options.recentItems ?? budget?.recentItems ?? DEFAULT_RECENT_ITEMS),
+    Math.min(items.length - 1, policy.legacy.recentItems),
   );
   const splitAt = Math.max(1, items.length - recentCount);
   const olderItems = items.slice(0, splitAt);
@@ -160,9 +178,7 @@ export async function ensureContextCompacted(
       olderItems,
       recentItems,
       options.signal,
-      options.maxSummaryInputCharacters ??
-        budget?.maxSummaryInputCharacters ??
-        DEFAULT_SUMMARY_INPUT_CHARACTERS,
+      policy.legacy.maxSummaryInputCharacters,
     );
     const compactedItems = [
       createSummaryItem(summary),
@@ -221,6 +237,48 @@ export async function ensureContextCompacted(
 }
 
 /**
+ * Centralize the migration boundary between the token budget and the old
+ * item/character thresholds. The old fields are intentionally still read,
+ * but they cannot override a valid token budget.
+ */
+export function resolveContextCompactionPolicy(
+  modelContext?: ModelContextProfile,
+  options: Pick<
+    ContextManagerOptions,
+    'maxItems' | 'maxCharacters' | 'recentItems' | 'maxSummaryInputCharacters'
+  > = {},
+): ResolvedContextCompactionPolicy {
+  const budget = modelContext?.compaction;
+  const legacy = {
+    maxItems: positiveIntegerOrDefault(
+      options.maxItems ?? budget?.maxItems,
+      LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxItems,
+    ),
+    maxCharacters: positiveIntegerOrDefault(
+      options.maxCharacters ?? budget?.maxCharacters,
+      LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxCharacters,
+    ),
+    recentItems: Math.max(
+      2,
+      positiveIntegerOrDefault(
+        options.recentItems ?? budget?.recentItems,
+        LEGACY_CONTEXT_COMPACTION_DEFAULTS.recentItems,
+      ),
+    ),
+    maxSummaryInputCharacters: positiveIntegerOrDefault(
+      options.maxSummaryInputCharacters ?? budget?.maxSummaryInputCharacters,
+      LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxSummaryInputCharacters,
+    ),
+  };
+  const inputBudgetTokens = resolveInputTokenBudget(modelContext);
+  return {
+    triggerMode: inputBudgetTokens === undefined ? 'legacy_threshold' : 'token_budget',
+    inputBudgetTokens,
+    legacy,
+  };
+}
+
+/**
  * Resolve the effective local input budget.
  *
  * An explicit compaction max wins when it is below the model-derived ceiling.
@@ -253,7 +311,7 @@ export async function summarizeContextWithModel(
   olderItems: AgentInputItem[],
   recentItems: AgentInputItem[],
   signal?: AbortSignal,
-  maxInputCharacters = DEFAULT_SUMMARY_INPUT_CHARACTERS,
+  maxInputCharacters = LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxSummaryInputCharacters,
 ): Promise<ContextSummary> {
   signal?.throwIfAborted();
   const adapter = buildModelAdapter(config);
@@ -400,4 +458,10 @@ function positiveInteger(value: number | undefined): number | undefined {
 function nonNegativeInteger(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.floor(value));
+}
+
+function positiveIntegerOrDefault(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : fallback;
 }

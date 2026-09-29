@@ -12,7 +12,9 @@ import {
   estimateTextTokens,
   extractChatMessages,
   JsonFileSession,
+  LEGACY_CONTEXT_COMPACTION_DEFAULTS,
   modelContextCalibrationRouteKey,
+  resolveContextCompactionPolicy,
   resolveInputTokenBudget,
   updateTokenEstimateCalibration,
 } from './agent.testbundle.mjs';
@@ -107,6 +109,27 @@ try {
       10_000,
     );
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
+    assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
+      maxItems: 48,
+      maxCharacters: 80_000,
+      recentItems: 16,
+      maxSummaryInputCharacters: 60_000,
+    });
+    assert.deepEqual(
+      resolveContextCompactionPolicy(undefined, {}),
+      {
+        triggerMode: 'legacy_threshold',
+        inputBudgetTokens: undefined,
+        legacy: LEGACY_CONTEXT_COMPACTION_DEFAULTS,
+      },
+    );
+    assert.equal(
+      resolveContextCompactionPolicy(
+        { contextWindowTokens: 128_000, reservedOutputTokens: 4_096, safetyMarginTokens: 1_024 },
+        { maxItems: 2, maxCharacters: 10, recentItems: 3, maxSummaryInputCharacters: 100 },
+      ).triggerMode,
+      'token_budget',
+    );
   }
 
   {
@@ -265,6 +288,36 @@ try {
     assert.equal(result.compacted, false);
     assert.equal(result.triggerMode, 'token_budget');
     assert.equal(called, false);
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'legacy-profile-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: 'legacy 1' },
+      { type: 'message', role: 'assistant', content: 'legacy 2' },
+      { type: 'message', role: 'user', content: 'legacy 3' },
+      { type: 'message', role: 'assistant', content: 'legacy 4' },
+    ]);
+    const result = await ensureContextCompacted(session, cfg, {
+      modelContext: {
+        compaction: {
+          maxItems: 3,
+          recentItems: 2,
+        },
+      },
+      summarize: async () => ({
+        summary: 'legacy summary',
+        userPreferences: [],
+        durableFacts: [],
+        importantFiles: [],
+        openTasks: [],
+        risks: [],
+      }),
+    });
+    assert.equal(result.compacted, true);
+    assert.equal(result.triggerMode, 'legacy_threshold');
+    assert.equal(result.beforeTokens, undefined);
+    assert.match(result.reason, /items>3/);
   }
 
   {

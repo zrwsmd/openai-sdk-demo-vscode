@@ -163,13 +163,13 @@
           "type": "integer",
           "minimum": 2,
           "default": 16,
-          "description": "压缩时原样保留的最近会话条目数"
+          "description": "压缩时原样保留的最近会话条目数；旧版仅作为兼容阈值策略"
         },
         "plcAgent.context.compaction.maxSummaryInputCharacters": {
           "type": "integer",
           "minimum": 1,
           "default": 60000,
-          "description": "单次摘要请求最多读取的历史字符数"
+          "description": "单次摘要请求最多读取的历史字符数；不参与 token 预算触发判断"
         },
         "plcAgent.jev.enabled": {
           "type": "boolean",
