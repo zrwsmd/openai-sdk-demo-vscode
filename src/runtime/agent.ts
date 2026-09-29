@@ -93,7 +93,6 @@ import {
   getWorkflowDescriptor,
 } from "./workflow/runtime";
 import { createWorkflowRuntimeState } from "./workflow/runtimeState";
-import { adaptDeliveryWorkflow } from "./workflow/deliveryCompatibility";
 import {
   commandToolResult,
   getDefaultToolRegistry,
@@ -1907,32 +1906,29 @@ export async function runAgent(
     options.workflowRegistry,
     workflowVisibilityContext,
   );
-  const deliveryWorkflow = workflowRuntime
-    ? adaptDeliveryWorkflow(workflowRuntime)
-    : undefined;
-  const workflowBusinessToolPolicy = deliveryWorkflow || workflowDescriptor
+  const workflowBusinessToolPolicy = workflowRuntime || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(
-        [deliveryWorkflow, workflowDescriptor],
+        [workflowRuntime, workflowDescriptor],
         workflowVisibilityContext,
       )
     : undefined;
-  let deliveryWorkflowCompleted = false;
-  let deliveryWorkflowCompletionLogged = false;
-  const deliveryWorkflowToolNames =
+  let workflowCompleted = false;
+  let workflowCompletionLogged = false;
+  const workflowToolNames =
     workflowBusinessToolPolicy?.mode === "allow_list"
       ? new Set(workflowBusinessToolPolicy.names ?? [])
       : undefined;
   const completedWorkflowToolRejection = (toolName: string): string | undefined => {
-    if (!deliveryWorkflow || !deliveryWorkflowCompleted) return undefined;
-    if (deliveryWorkflowToolNames && !deliveryWorkflowToolNames.has(toolName)) {
+    if (!workflowRuntime || !workflowCompleted) return undefined;
+    if (workflowToolNames && !workflowToolNames.has(toolName)) {
       return undefined;
     }
-    return `运行时交付工作流“${deliveryWorkflow.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
+    return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
-  const runtimeToolGuard: RuntimeToolCallGuard | undefined = deliveryWorkflow
+  const runtimeToolGuard: RuntimeToolCallGuard | undefined = workflowRuntime
     ? (toolName) => completedWorkflowToolRejection(toolName)
     : undefined;
-  const pipelineStageRuntime = new PipelineStageRuntime(deliveryWorkflow?.pipelinePlan);
+  const pipelineStageRuntime = new PipelineStageRuntime(workflowRuntime?.pipelinePlan);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
   const textStreamingMode =
@@ -2062,7 +2058,7 @@ export async function runAgent(
   const registeredTools = toolRegistry.createTools({
     cfg,
     workflowContract: options.deliveryContract,
-    workflow: deliveryWorkflow,
+    workflow: workflowRuntime,
     diagnosticReporter: reportDiagnostics,
     runtimeToolGuard,
   }).filter((item) => {
@@ -2122,7 +2118,7 @@ export async function runAgent(
           "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
           "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
           "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
-        : deliveryWorkflow
+        : workflowRuntime
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
   ) + (isolateHistoricalToolChain
@@ -2133,8 +2129,8 @@ export async function runAgent(
       renderDeliveryContract(options.deliveryContract) +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
       "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
-      (deliveryWorkflow
-        ? deliveryWorkflow.instructions()
+      (workflowRuntime
+        ? workflowRuntime.instructions()
         : "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。") +
       "契约列出的验证工具必须实际调用并依据成功回执完成；不要用文字描述代替工具调用。" +
       (requiresInlineFinalArtifact
@@ -2142,8 +2138,8 @@ export async function runAgent(
         : "")
     : "";
   const workflowInstructions =
-    deliveryWorkflow && !options.deliveryContract?.requiresDeliverable
-      ? "\n\n当前 workflow 运行约束：" + deliveryWorkflow.instructions()
+    workflowRuntime && !options.deliveryContract?.requiresDeliverable
+      ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
       : "";
   let runtimeCompletionRepairInstruction = "";
   let runtimeActionReminderInstruction = "";
@@ -2151,7 +2147,7 @@ export async function runAgent(
     const availableForcedTool =
       forcedTool && availableToolNames.has(forcedTool) ? forcedTool : undefined;
     const modelSettings = {
-      parallelToolCalls: deliveryWorkflow?.parallelToolCalls ?? true,
+      parallelToolCalls: workflowRuntime?.parallelToolCalls ?? true,
       ...(availableForcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: availableForcedTool }
         : {}),
@@ -2197,7 +2193,7 @@ export async function runAgent(
         : {}),
     });
   };
-  const initialWorkflowTool = deliveryWorkflow?.initialTool({
+  const initialWorkflowTool = workflowRuntime?.initialTool({
     isResume: Boolean(options.initialState),
   });
   const availableInitialWorkflowTool =
@@ -2349,7 +2345,7 @@ export async function runAgent(
     name: string,
     result: ToolResult | undefined,
   ): void => {
-    if (deliveryWorkflowCompleted) return;
+    if (workflowCompleted) return;
     const decision = pipelineStageRuntime.nextToolAfterResult(
       name,
       result,
@@ -2399,13 +2395,13 @@ export async function runAgent(
       const recordedResult =
         result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
       recordToolResult(name, callId, recordedResult);
-      refreshDeliveryWorkflowCompletion();
+      refreshWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);
     }
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
-    const verificationTool = deliveryWorkflow?.requiredActionTool ?? requiredTool;
+    const verificationTool = workflowRuntime?.requiredActionTool ?? requiredTool;
     if (!verificationTool) return [];
     const verified: Artifact[] = [];
     const calls = [...toolResults.values()].filter(
@@ -2413,8 +2409,8 @@ export async function runAgent(
     );
     for (const call of calls) {
       if (!call.result.ok) continue;
-      if (deliveryWorkflow) {
-        const artifact = deliveryWorkflow.completionAdapter?.collectActionArtifact?.(call);
+      if (workflowRuntime) {
+        const artifact = workflowRuntime.completionAdapter?.collectActionArtifact?.(call);
         if (artifact) verified.push(artifact);
         continue;
       }
@@ -2434,7 +2430,7 @@ export async function runAgent(
       // ActionPolicy is a soft hint for ordinary turns. A missing hint call
       // must not turn a status question or a model choice into a hard error.
       // Workflow contracts keep their own strict evidence path below.
-      if (!deliveryWorkflow) return [];
+      if (!workflowRuntime) return [];
       throw new AgentActionVerificationError(
         `用户明确要求执行 ${verificationTool}，但本轮没有调用该工具`,
       );
@@ -2442,7 +2438,7 @@ export async function runAgent(
     if (!successful) return verified;
     if (verificationTool === "write_file" && !verified.length) {
       throw new AgentActionVerificationError(
-        deliveryWorkflow
+        workflowRuntime
           ? "工具 write_file 返回成功，但当前 workflow 要求的写入证据未通过校验"
           : "工具 write_file 返回成功，但本轮没有完成文件回读校验",
       );
@@ -2621,7 +2617,7 @@ export async function runAgent(
        ],
       artifacts: [...artifacts, ...deliveredArtifactsFromTools()],
       deliveryContract: options.deliveryContract,
-      workflowAdapter: deliveryWorkflow?.completionAdapter,
+      workflowAdapter: workflowRuntime?.completionAdapter,
       toolEvidence,
     });
 
@@ -2631,24 +2627,24 @@ export async function runAgent(
   ];
 
   const deliveredWorkflowArtifacts = (): Artifact[] => {
-    if (!deliveryWorkflow) return [];
+    if (!workflowRuntime) return [];
     const artifacts: Artifact[] = [];
     for (const call of workflowToolRecords()) {
       if (!call.result.ok) continue;
-      const artifact = deliveryWorkflow.completionAdapter?.collectActionArtifact?.(call);
+      const artifact = workflowRuntime.completionAdapter?.collectActionArtifact?.(call);
       if (artifact) artifacts.push(artifact);
     }
     return artifacts;
   };
 
-  const refreshDeliveryWorkflowCompletion = (): void => {
-    if (!deliveryWorkflow || deliveryWorkflowCompleted) return;
+  const refreshWorkflowCompletion = (): void => {
+    if (!workflowRuntime || workflowCompleted) return;
     if (!deliveredWorkflowArtifacts().length) return;
-    deliveryWorkflowCompleted = true;
-    if (!deliveryWorkflowCompletionLogged) {
-      deliveryWorkflowCompletionLogged = true;
+    workflowCompleted = true;
+    if (!workflowCompletionLogged) {
+      workflowCompletionLogged = true;
       agentLog(
-        `[workflow] ${deliveryWorkflow.title} 已完成，后续 workflow 工具调用将被阻止以避免重复执行`,
+        `[workflow] ${workflowRuntime.title} 已完成，后续 workflow 工具调用将被阻止以避免重复执行`,
       );
     }
   };
@@ -2668,9 +2664,9 @@ export async function runAgent(
         artifacts,
         deliveredArtifacts: deliveredArtifactsFromTools(),
         deliveryContract: options.deliveryContract,
-        workflow: deliveryWorkflow,
+        workflow: workflowRuntime,
         authoritativeMessage: authoritativeWorkflowMessage(),
-        extractors: deliveryWorkflow?.evidenceExtractors,
+        extractors: workflowRuntime?.evidenceExtractors,
       });
       await decisionService.completionGateHint(
         cfg.jev,
@@ -2713,7 +2709,7 @@ export async function runAgent(
   };
 
   const authoritativeWorkflowMessage = (): string | undefined =>
-    deliveryWorkflow?.completionAdapter?.finalMessage?.(workflowToolRecords());
+    workflowRuntime?.completionAdapter?.finalMessage?.(workflowToolRecords());
 
   const fallbackDeliveryMessage = (): string | undefined => {
     const authoritative = authoritativeWorkflowMessage();
@@ -2792,9 +2788,9 @@ export async function runAgent(
       artifacts: protocolArtifacts,
       deliveredArtifacts: deliveredArtifactsFromTools(),
       deliveryContract: options.deliveryContract,
-      workflow: deliveryWorkflow,
+      workflow: workflowRuntime,
       authoritativeMessage: authoritativeWorkflowMessage(),
-      extractors: deliveryWorkflow?.evidenceExtractors,
+      extractors: workflowRuntime?.evidenceExtractors,
     });
     const finalized = await runFinalOutputFinalizer({
       model,
@@ -2839,9 +2835,9 @@ export async function runAgent(
   const chooseCompletionRepairTool = (
     gate: Exclude<CompletionGateResult, { passed: true }>,
   ): string | undefined => {
-    refreshDeliveryWorkflowCompletion();
-    if (deliveryWorkflowCompleted) return undefined;
-    const workflowRepairTool = deliveryWorkflow?.completionAdapter?.selectRepairTool?.(
+    refreshWorkflowCompletion();
+    if (workflowCompleted) return undefined;
+    const workflowRepairTool = workflowRuntime?.completionAdapter?.selectRepairTool?.(
       gate,
       workflowToolRecords(),
       availableToolNames,
@@ -3291,8 +3287,8 @@ export async function runAgent(
     ? await loadHistoricalToolResults(session, userText)
     : [];
   if (options.initialState) {
-    deliveryWorkflow?.completionAdapter?.restore?.(historicalToolResults);
-    refreshDeliveryWorkflowCompletion();
+    workflowRuntime?.completionAdapter?.restore?.(historicalToolResults);
+    refreshWorkflowCompletion();
   }
 
   // Approval checkpoints are first-class results. The host persists the
@@ -3414,7 +3410,7 @@ export async function runAgent(
       !options.initialState &&
       !activePlan &&
       !options.teamTask &&
-      !deliveryWorkflow &&
+      !workflowRuntime &&
       availableToolNames.has(requiredTool) &&
       !state.getInterruptions().length
     ) {
