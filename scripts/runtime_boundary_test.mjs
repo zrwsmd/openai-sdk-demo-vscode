@@ -9,12 +9,18 @@ const repoRoot = path.resolve(scriptDir, '..');
 const runtimeRoot = path.join(repoRoot, 'src', 'runtime');
 const sourceRoot = path.join(repoRoot, 'src');
 const pluginRoot = path.join(runtimeRoot, 'plugins');
+const stPluginRoot = path.join(pluginRoot, 'st');
 
 const staticForbiddenTokens = [
   'stAnalyzer',
   'StAnalyzer',
   'stAnalyzerSettings',
   'StValidation',
+  'DeliveryWorkflow',
+  'AdaptedWorkflowRuntime',
+  'DeliveryWorkflowDescriptor',
+  'createDeliveryWorkflowRuntime',
+  'adaptDeliveryWorkflow',
   'createDeliveryContract',
   'matchesDeliveryContract',
   'deliveryWorkflow',
@@ -81,11 +87,40 @@ function listTypeScriptFiles(directory) {
   return result;
 }
 
+function listAllTypeScriptFiles(directory) {
+  const result = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...listAllTypeScriptFiles(fullPath));
+    } else if (entry.isFile() && fullPath.endsWith('.ts')) {
+      result.push(fullPath);
+    }
+  }
+  return result;
+}
+
 const files = listTypeScriptFiles(runtimeRoot);
+const pluginFiles = listAllTypeScriptFiles(pluginRoot);
 const sourceFiles = listTypeScriptFiles(sourceRoot);
 const forbiddenTokens = [
   ...staticForbiddenTokens,
   ...(await registeredPluginToolNames()),
+];
+const nonStPluginForbiddenTokens = [
+  'StAnalyzer',
+  'stAnalyzer',
+  'StAnalyzerSettings',
+  'StValidation',
+  'DeliveryContract',
+  'deliveryContract',
+  'DeliveryWorkflow',
+  'validate_st_code',
+  'export_st_program',
+  'st_dependency_map',
+  'st_change_impact',
+  'st_symbol_references',
+  'st_library_symbol',
 ];
 const findings = [];
 for (const file of files) {
@@ -96,6 +131,27 @@ for (const file of files) {
   }
   for (const pattern of forbiddenPatterns) {
     if (pattern.test(text)) findings.push(`${relative}: forbidden pattern ${pattern}`);
+  }
+}
+
+for (const file of files) {
+  const text = fs.readFileSync(file, 'utf8');
+  const relative = path.relative(repoRoot, file);
+  if (
+    /(?:from|import)\s*(?:\(\s*)?['"][^'"]*(?:runtime[/\\])?plugins[/\\]st(?:[/\\]|['"])/u.test(text)
+  ) {
+    findings.push(`${relative}: public runtime imports the ST plugin directly`);
+  }
+}
+
+for (const file of pluginFiles) {
+  if (file === stPluginRoot || file.startsWith(`${stPluginRoot}${path.sep}`)) continue;
+  const text = fs.readFileSync(file, 'utf8');
+  const relative = path.relative(repoRoot, file);
+  for (const token of nonStPluginForbiddenTokens) {
+    if (text.includes(token)) {
+      findings.push(`${relative}: non-ST plugin contains domain token ${token}`);
+    }
   }
 }
 
@@ -132,7 +188,11 @@ for (const legacyPath of [
 }
 
 assert.deepEqual(findings, [], `public runtime boundary violations:\n${findings.join('\n')}`);
+assert(
+  pluginFiles.some((file) => path.resolve(file) === path.join(stPluginRoot, 'stValidationRuntimeService.ts')),
+  'ST validation runtime service must remain inside the ST plugin directory',
+);
 console.log(
   `runtime boundary passed (${files.length} public TypeScript files scanned; ` +
-    `${sourceFiles.length} source import boundaries checked)`,
+    `${pluginFiles.length} plugin files and ${sourceFiles.length} source import boundaries checked)`,
 );

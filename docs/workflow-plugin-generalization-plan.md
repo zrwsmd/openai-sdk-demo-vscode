@@ -56,7 +56,7 @@
 - [x] 22. 让 Agent 彻底移除 Delivery 适配调用
 - [x] 23. 删除旧 Delivery 兼容层
 - [x] 24. 清理协议中的旧 Delivery 兼容字段
-- [ ] 25. 强化最终 Workflow 边界测试
+- [x] 25. 强化最终 Workflow 边界测试
 
 ## 0. 基线与边界
 
@@ -679,6 +679,27 @@ Agent 直接消费通用 `WorkflowRuntime`。ST 工具需要的专用能力通�
 - 非 ST Workflow 不依赖 ST 或 Delivery 类型。
 - ST 私有服务只存在于 ST 插件目录。
 - 不修改 `st-analyze` 和 `src/analysis/*` 的实现。
+
+本阶段已完成：
+
+- 公共 `src/runtime` 扫描新增旧 `DeliveryWorkflow` 家族类型、旧兼容入口和
+  旧契约钩子的禁用检查。
+- 公共运行时新增反向导入检查，禁止核心直接导入
+  `src/runtime/plugins/st`；ST 能力只能由宿主装配层注册。
+- 新增非 ST 插件扫描，确保测试用的通用 Workflow 不依赖 ST 分析器、
+  ST 工具名或 `DeliveryContract` 数据类型。
+- 增加 ST 私有运行时服务归属检查，确保
+  `stValidationRuntimeService.ts` 位于 ST 插件目录内。
+- 保留旧兼容文件删除检查，并验证 ST Inspection 没有重新进入 Workflow Registry。
+- 未修改 `st-analyze`、`src/analysis/*` 或任何 ST 工具实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:st` 通过。
+- `npm run test:batch` 通过。
 
 每个阶段完成后执行：
 
