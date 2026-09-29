@@ -57,7 +57,6 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     audit,
     cfg,
     contract,
-    deliveryWorkflow,
     diagnosticReporter,
     guard,
     guardrails,
@@ -233,11 +232,6 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                   validationInput.target.text,
                   validatedHash,
                 );
-              } else {
-                deliveryWorkflow?.recordSuccessfulValidation?.(
-                  validationInput.target.text,
-                  validatedHash,
-                );
               }
             }
           }
@@ -396,8 +390,6 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       validatedStContent.add(contentHash);
       if (validationService) {
         validationService.recordSuccessfulValidation(content, contentHash);
-      } else {
-        deliveryWorkflow?.recordSuccessfulValidation?.(content, contentHash);
       }
     }
     audit({

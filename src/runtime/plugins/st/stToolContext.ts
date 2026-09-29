@@ -12,13 +12,11 @@ import {
   type StValidationRuntimeService,
 } from "./stValidationRuntimeService";
 import type { ToolBuildContext } from "../../tools/toolBuildContext";
-import type { DeliveryWorkflow } from "../../workflow/deliveryCompatibility";
 
 export const ST_ANALYZER_SERVICE = "st.analyzer";
 export const ST_ANALYZER_OPTIONS_SERVICE = "st.analyzerOptions";
 
 export interface StToolBuildContext extends ToolBuildContext {
-  deliveryWorkflow?: DeliveryWorkflow;
   validationService?: StValidationRuntimeService;
   stAnalyzer: StAnalyzer;
   stToolOptions: StAnalyzerToolOptions;
@@ -48,7 +46,6 @@ export function createStToolBuildContext(
 
   return {
     ...context,
-    deliveryWorkflow: context.workflow as DeliveryWorkflow | undefined,
     validationService,
     stAnalyzer: stAnalyzer ?? new FallbackStAnalyzer(),
     stToolOptions: stToolOptions ?? {},
@@ -59,9 +56,7 @@ export function createStToolBuildContext(
           deliverable.requiredVerificationTools?.includes("validate_st_code"),
       ) === true,
     inlineStValidation:
-      (validationService?.validationInputMode ??
-        (context.workflow as DeliveryWorkflow | undefined)?.validationInputMode) ===
-      "inline_code",
+      validationService?.validationInputMode === "inline_code",
     stValidationState,
     validatedStContent: stValidationState.hashes,
     stValidationCache: new Map<string, Promise<string>>(),

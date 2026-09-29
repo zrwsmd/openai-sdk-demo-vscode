@@ -87,9 +87,7 @@ function fileBeforeEffect(
     const contentAlreadyValidated = content === undefined
       ? false
       : context.validationService?.canWriteContent(content) ??
-        (context.deliveryWorkflow?.canWriteContent
-          ? context.deliveryWorkflow.canWriteContent(content)
-          : context.validatedStContent.has(hashStContent(content)));
+        context.validatedStContent.has(hashStContent(content));
     if (
       !context.requiresStValidation ||
       !path.toLowerCase().endsWith(".st") ||
@@ -107,9 +105,7 @@ function fileBeforeEffect(
         failureData: {
           suppliedContentHash: validation.contentHash,
           lastValidatedContentHash: context.validationService?.lastValidatedContentHash ??
-            (context.deliveryWorkflow?.canWriteContent
-              ? undefined
-              : [...context.validatedStContent].at(-1)),
+            [...context.validatedStContent].at(-1),
           errorCount: validation.counts.error,
           warningCount: validation.counts.warning,
           diagnostics: validation.repairPacket

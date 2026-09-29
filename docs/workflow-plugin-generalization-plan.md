@@ -54,7 +54,7 @@
 - [x] 20. 建立 ST 私有运行时服务
 - [x] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 - [x] 22. 让 Agent 彻底移除 Delivery 适配调用
-- [ ] 23. 删除旧 Delivery 兼容层
+- [x] 23. 删除旧 Delivery 兼容层
 - [ ] 24. 清理协议中的旧 Delivery 兼容字段
 - [ ] 25. 强化最终 Workflow 边界测试
 
@@ -609,6 +609,28 @@ Agent 直接消费通用 `WorkflowRuntime`。ST 工具需要的专用能力通�
 - `DeliveryWorkflowRuntimeState` 及其创建函数兼容别名。
 
 同步清理测试入口和历史兼容导出。
+
+本阶段已完成：
+
+- 删除 `src/runtime/workflow/deliveryCompatibility.ts` 和
+  `src/runtime/deliveryWorkflow.ts`。
+- 删除 `DeliveryWorkflow`、`AdaptedWorkflowRuntime`、
+  `DeliveryWorkflowDescriptor`、`adaptDeliveryWorkflow` 及旧 Delivery Runtime
+  状态别名。
+- ST 工具上下文、校验工具和写入前置检查全部只通过
+  `StValidationRuntimeService` 读取 ST 私有状态，不再依赖 Delivery 兼容接口。
+- 清理测试入口和通用 Workflow 测试中的兼容 Facade 验证。
+- 边界测试改为强制检查旧兼容文件和旧兼容引用不存在。
+- 未修改 `st-analyze`、`src/analysis/*`；协议中的旧 Descriptor 字段暂留到第 24
+  阶段处理。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:st` 通过。
+- `npm run test:batch` 通过。
 
 ### 24. 清理协议中的旧 Delivery 兼容字段
 

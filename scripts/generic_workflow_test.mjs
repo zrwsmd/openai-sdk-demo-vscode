@@ -16,8 +16,6 @@ import {
   createStCodeDeliveryContract,
   createWorkflowRuntimeState,
   createWorkflowRuntime,
-  createLegacyDeliveryWorkflowRuntime,
-  adaptDeliveryWorkflow,
   evaluateCompletionGate,
   getGenericFileInspectionState,
   normalizeWorkflowRuntime,
@@ -220,31 +218,12 @@ try {
     genericStRuntime.completionAdapter.finalMessage?.([]),
     undefined,
   );
-  const adaptedStRuntime = adaptDeliveryWorkflow(genericStRuntime);
-  assert(adaptedStRuntime.completionAdapter);
   assert.equal(
-    adaptedStRuntime.completionAdapter.finalMessage?.([]),
-    undefined,
-  );
-  assert.equal(
-    adaptedStRuntime.completionAdapter.collectActionArtifact?.({
+    genericStRuntime.completionAdapter.collectActionArtifact?.({
       name: 'st_change_impact',
       args: '{}',
       result: readResult,
     }),
-    undefined,
-  );
-
-  const legacyFacadeRuntime = createLegacyDeliveryWorkflowRuntime(
-    'st_workspace_delivery',
-    stDeliveryContract,
-    createWorkflowRuntimeState(),
-    new WorkflowRegistry([ST_WORKSPACE_DELIVERY_WORKFLOW]),
-    { userText: '生成 ST 程序并保存到工作区' },
-  );
-  assert(legacyFacadeRuntime?.completionAdapter);
-  assert.equal(
-    legacyFacadeRuntime?.completionAdapter.finalMessage?.([]),
     undefined,
   );
 

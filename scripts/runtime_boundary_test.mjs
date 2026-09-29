@@ -9,12 +9,6 @@ const repoRoot = path.resolve(scriptDir, '..');
 const runtimeRoot = path.join(repoRoot, 'src', 'runtime');
 const sourceRoot = path.join(repoRoot, 'src');
 const pluginRoot = path.join(runtimeRoot, 'plugins');
-const legacyDeliveryFacade = path.join(runtimeRoot, 'deliveryWorkflow.ts');
-const legacyCompatibilityModule = path.join(
-  runtimeRoot,
-  'workflow',
-  'deliveryCompatibility.ts',
-);
 
 const staticForbiddenTokens = [
   'stAnalyzer',
@@ -102,33 +96,20 @@ for (const file of files) {
   }
 }
 
-const legacyDeliveryImportPattern =
-  /(?:from\s+|import\s*\()\s*['"][^'"]*deliveryWorkflow(?:\.ts)?['"]/u;
-const allowedLegacyImporters = new Set([
-  legacyDeliveryFacade,
-  legacyCompatibilityModule,
-]);
-const allowedLegacyImporterPrefixes = [
-  path.join(runtimeRoot, 'plugins') + path.sep,
-  path.join(repoRoot, 'src', 'app') + path.sep,
-];
 for (const file of sourceFiles) {
   const text = fs.readFileSync(file, 'utf8');
-  if (!legacyDeliveryImportPattern.test(text)) continue;
-  const normalizedFile = path.normalize(file);
-  const allowed =
-    allowedLegacyImporters.has(normalizedFile) ||
-    allowedLegacyImporterPrefixes.some((prefix) =>
-      normalizedFile.startsWith(prefix),
-    );
-  if (!allowed) {
-    findings.push(
-      `${path.relative(repoRoot, file)}: public code imports legacy Delivery facade`,
-    );
+  if (
+    text.includes('deliveryCompatibility') ||
+    text.includes('src/runtime/deliveryWorkflow') ||
+    text.includes('runtime/deliveryWorkflow')
+  ) {
+    findings.push(`${path.relative(repoRoot, file)}: deleted Delivery compatibility reference`);
   }
 }
 
 for (const legacyPath of [
+  'src/runtime/workflow/deliveryCompatibility.ts',
+  'src/runtime/deliveryWorkflow.ts',
   'src/runtime/workflows/stDeliveryContract.ts',
   'src/runtime/workflows/stInspectionWorkflow.ts',
   'src/runtime/plugins/st/stInspectionWorkflow.ts',

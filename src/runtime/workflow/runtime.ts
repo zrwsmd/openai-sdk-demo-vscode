@@ -17,8 +17,7 @@ import {
 /**
  * Generic workflow runtime entrypoints.
  *
- * This module only knows the workflow protocol and registry. Delivery
- * compatibility is intentionally kept in `deliveryCompatibility.ts`.
+ * This module only knows the generic workflow protocol and registry.
  */
 export function createWorkflowRuntime(
   workflowId: string | undefined,

@@ -37,24 +37,8 @@ export * from '../src/runtime/decision/completionEvidence';
 export * from '../src/runtime/workflow/types';
 export * from '../src/runtime/workflow/runtimeState';
 export * from '../src/runtime/workflow/runtime';
-export {
-  adaptDeliveryWorkflow,
-} from '../src/runtime/workflow/deliveryCompatibility';
 export * from '../src/runtime/workflow/registry';
 export * from '../src/runtime/workflow/decisionService';
-export {
-  createDeliveryWorkflow,
-  createDeliveryWorkflowRuntime,
-  describeDeliveryWorkflow,
-  getDeliveryWorkflowDescriptor,
-  isRuntimeManagedDeliveryWorkflow,
-} from '../src/runtime/workflow/deliveryCompatibility';
-export {
-  createWorkflowRuntime as createLegacyDeliveryWorkflowRuntime,
-  describeWorkflow as describeLegacyWorkflow,
-  getWorkflowDescriptor as getLegacyWorkflowDescriptor,
-  isRuntimeManagedWorkflow as isLegacyRuntimeManagedWorkflow,
-} from '../src/runtime/deliveryWorkflow';
 export * from '../src/app/workflowRegistry';
 export * from '../src/app/toolRegistry';
 export * from '../src/runtime/tools/coreToolProvider';
