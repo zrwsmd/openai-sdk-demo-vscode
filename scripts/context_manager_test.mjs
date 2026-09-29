@@ -5,9 +5,15 @@ import path from 'node:path';
 import {
   CONTEXT_SUMMARY_MARKER,
   ensureContextCompacted,
+  applyTokenEstimateCalibration,
+  estimateItemsTokens,
   estimateItemsCharacters,
+  estimateModelRequestTokens,
+  estimateTextTokens,
   extractChatMessages,
   JsonFileSession,
+  modelContextCalibrationRouteKey,
+  updateTokenEstimateCalibration,
 } from './agent.testbundle.mjs';
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-context-test-'));
@@ -20,6 +26,70 @@ const cfg = {
 };
 
 try {
+  {
+    const englishTokens = estimateTextTokens('The quick brown fox jumps over the lazy dog.');
+    const chineseTokens = estimateTextTokens('读取工作区文件并分析依赖关系');
+    assert.ok(englishTokens > 0);
+    assert.ok(chineseTokens > englishTokens);
+
+    const requestEstimate = estimateModelRequestTokens({
+      systemInstructions: 'You are a helpful assistant.',
+      input: [{ type: 'message', role: 'user', content: '读取 main.st' }],
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: { path: { type: 'string' } } } }],
+      handoffs: [],
+      outputType: 'text',
+      modelSettings: {},
+    });
+    assert.ok(requestEstimate > chineseTokens);
+
+    const routeKey = modelContextCalibrationRouteKey({
+      provider: 'openai',
+      apiFormat: 'responses',
+      baseUrl: 'https://api.example/v1/',
+      model: 'model-a',
+    });
+    assert.equal(
+      modelContextCalibrationRouteKey({
+        provider: 'openai',
+        apiFormat: 'auto',
+        baseUrl: 'https://api.example/v1/',
+        model: 'model-a',
+      }),
+      modelContextCalibrationRouteKey({
+        provider: 'openai',
+        apiFormat: 'chat_completions',
+        baseUrl: 'https://api.example/v1/',
+        model: 'model-a',
+      }),
+    );
+    assert.equal(
+      modelContextCalibrationRouteKey({
+        provider: 'openai',
+        apiFormat: 'auto',
+        baseUrl: '',
+        model: 'model-a',
+      }),
+      modelContextCalibrationRouteKey({
+        provider: 'openai',
+        apiFormat: 'responses',
+        baseUrl: '',
+        model: 'model-a',
+      }),
+    );
+    const first = updateTokenEstimateCalibration(undefined, routeKey, 100, 150);
+    assert.equal(first.factor, 1.5);
+    assert.equal(first.samples, 1);
+    const second = updateTokenEstimateCalibration(first, routeKey, 100, 200);
+    assert.equal(second.samples, 2);
+    assert.equal(second.factor, 1.625);
+    assert.equal(applyTokenEstimateCalibration(100, second), 163);
+    assert.ok(estimateItemsTokens([{ type: 'message', role: 'user', content: '你好' }], second) > 0);
+
+    const otherRoute = updateTokenEstimateCalibration(second, 'other-route', 100, 110);
+    assert.equal(otherRoute.samples, 1);
+    assert.equal(otherRoute.factor, 1.1);
+  }
+
   {
     const session = new JsonFileSession(path.join(dir, 'session.json'));
     await session.addItems([

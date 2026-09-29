@@ -5,6 +5,11 @@ import {
 } from '@openai/agents';
 import OpenAI from 'openai';
 import { createAnthropicMessagesModel } from './anthropicMessagesModel';
+import type { ModelContextProfile } from './contextManager';
+import {
+  modelContextCalibrationRouteKey,
+  observeModelUsage,
+} from './contextTokenEstimator';
 
 /**
  * Provider and wire-format are separate dimensions on purpose.
@@ -57,6 +62,7 @@ export interface ModelAdapterConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  modelContext?: ModelContextProfile;
 }
 
 export interface ModelAdapter {
@@ -152,17 +158,27 @@ export function createModelAdapter(
   options: ModelAdapterFactoryOptions,
 ): ModelAdapter {
   const route = resolveModelRoute(config);
+  let adapter: ModelAdapter;
   if (route.apiFormat === AGENT_API_FORMAT_MESSAGES) {
-    return createAnthropicMessagesAdapter(config, options.fetchImpl);
+    adapter = createAnthropicMessagesAdapter(config, options.fetchImpl);
+  } else if (route.apiFormat === AGENT_API_FORMAT_RESPONSES) {
+    adapter = createOpenAIResponsesAdapter(config, options.fetchImpl);
+  } else {
+    adapter = {
+      provider: route.provider,
+      apiFormat: route.apiFormat,
+      model: options.createChatCompletionsModel(),
+    };
   }
-  if (route.apiFormat === AGENT_API_FORMAT_RESPONSES) {
-    return createOpenAIResponsesAdapter(config, options.fetchImpl);
-  }
-  return {
+  const routeKey = modelContextCalibrationRouteKey({
+    ...config,
     provider: route.provider,
     apiFormat: route.apiFormat,
-    model: options.createChatCompletionsModel(),
-  };
+  });
+  Object.assign(adapter, {
+    model: observeModelUsage(adapter.model, config.modelContext, routeKey),
+  });
+  return adapter;
 }
 
 /**

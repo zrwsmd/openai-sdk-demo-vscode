@@ -21,6 +21,7 @@ import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
 import type { AgentConfig } from './agentConfig';
 import { usesOfficialOpenAIResponses } from './modelAdapter';
+import { modelContextCalibrationRouteKey } from './contextTokenEstimator';
 import type { DeliveryContract } from './deliveryContract';
 import { AgentDecisionService } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
@@ -456,6 +457,15 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
+      const previousCalibration = (await this.store.getLast())?.config.modelContext?.tokenCalibration;
+      if (
+        previousCalibration?.routeKey === modelContextCalibrationRouteKey(config)
+      ) {
+        config.modelContext = {
+          ...config.modelContext,
+          tokenCalibration: previousCalibration,
+        };
+      }
       let sessionItems = await this.session.getItems();
       const run = await this.store.begin(
         userText,

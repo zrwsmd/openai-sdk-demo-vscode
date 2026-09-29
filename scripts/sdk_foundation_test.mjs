@@ -24,6 +24,7 @@ import {
   saveStoredApiProfile,
   officialResponsesCompactionSettings,
   usesOfficialOpenAIResponses,
+  createModelAdapter,
 } from './agent.testbundle.mjs';
 
 assert.equal(
@@ -58,6 +59,51 @@ assert.equal(
   }),
   undefined,
 );
+
+{
+  class FakeModel {
+    async getResponse() {
+      return { output: [], usage: { inputTokens: 120 } };
+    }
+
+    async *getStreamedResponse() {
+      yield {
+        type: 'response_done',
+        response: { usage: { inputTokens: 90 } },
+      };
+    }
+  }
+
+  const profile = {};
+  const fakeModel = new FakeModel();
+  const adapter = createModelAdapter({
+    provider: 'openai',
+    apiFormat: 'chat_completions',
+    baseUrl: 'https://gateway.example/v1',
+    apiKey: 'key',
+    model: 'model-a',
+    modelContext: profile,
+  }, {
+    createChatCompletionsModel: () => fakeModel,
+  });
+  assert.equal(adapter.model instanceof FakeModel, true);
+  const request = {
+    systemInstructions: 'system',
+    input: [{ type: 'message', role: 'user', content: 'hello' }],
+    tools: [],
+    handoffs: [],
+    outputType: 'text',
+    modelSettings: {},
+  };
+  await adapter.model.getResponse(request);
+  assert.equal(profile.tokenCalibration.samples, 1);
+  const firstFactor = profile.tokenCalibration.factor;
+  for await (const _event of adapter.model.getStreamedResponse(request)) {
+    // Consume the streamed response so usage observation runs.
+  }
+  assert.equal(profile.tokenCalibration.samples, 2);
+  assert.ok(profile.tokenCalibration.factor < firstFactor);
+}
 
 const policy = new DefaultToolPolicy();
 

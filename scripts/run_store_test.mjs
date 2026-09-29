@@ -1,11 +1,21 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { JsonRunStore, JsonFileSession } from './agent.testbundle.mjs';
+import {
+  JsonRunStore,
+  JsonFileSession,
+  modelContextCalibrationRouteKey,
+} from './agent.testbundle.mjs';
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-run-store-test-'));
 const file = path.join(dir, 'runs.json');
 const store = new JsonRunStore(file);
+const calibrationRouteKey = modelContextCalibrationRouteKey({
+  provider: 'openai',
+  apiFormat: 'chat_completions',
+  baseUrl: 'http://mock/v1',
+  model: 'mock',
+});
 const config = {
   baseUrl: 'http://mock/v1',
   model: 'mock',
@@ -20,6 +30,12 @@ const config = {
     contextWindowTokens: 128_000,
     reservedOutputTokens: 4_096,
     safetyMarginTokens: 1_024,
+    tokenCalibration: {
+      routeKey: calibrationRouteKey,
+      factor: 1.15,
+      samples: 3,
+      updatedAt: '2026-09-29T00:00:00.000Z',
+    },
     compaction: {
       maxItems: 48,
       maxCharacters: 80_000,
@@ -48,6 +64,7 @@ if (
 }
 if (
   restored.config.modelContext?.contextWindowTokens !== 128_000 ||
+  restored.config.modelContext.tokenCalibration?.factor !== 1.15 ||
   restored.config.modelContext.compaction?.maxItems !== 48 ||
   restored.config.modelContext.compaction.recentItems !== 16
 ) {

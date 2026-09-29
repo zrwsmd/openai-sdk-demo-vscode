@@ -18,6 +18,13 @@ export interface ContextCompactionBudget {
   maxSummaryInputCharacters?: number;
 }
 
+export interface TokenEstimateCalibration {
+  routeKey: string;
+  factor: number;
+  samples: number;
+  updatedAt: string;
+}
+
 /** Model-route context metadata shared by local and provider-managed compaction. */
 export interface ModelContextProfile {
   /** The model's total context window, consumed by the token-aware stage. */
@@ -26,6 +33,8 @@ export interface ModelContextProfile {
   reservedOutputTokens?: number;
   /** Extra input headroom kept as a safety margin. */
   safetyMarginTokens?: number;
+  /** Automatically learned estimate correction for this model/API route. */
+  tokenCalibration?: TokenEstimateCalibration;
   /** Current local-compaction limits; token-aware fields arrive in the next stage. */
   compaction?: ContextCompactionBudget;
 }

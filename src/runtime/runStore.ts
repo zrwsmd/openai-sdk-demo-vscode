@@ -223,7 +223,20 @@ function isModelContextProfile(value: unknown): boolean {
   for (const key of ['contextWindowTokens', 'reservedOutputTokens', 'safetyMarginTokens'] as const) {
     if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
   }
-  return value.compaction === undefined || isContextCompactionBudget(value.compaction);
+  if (value.compaction !== undefined && !isContextCompactionBudget(value.compaction)) return false;
+  if (value.tokenCalibration === undefined) return true;
+  return (
+    isRecord(value.tokenCalibration) &&
+    typeof value.tokenCalibration.routeKey === 'string' &&
+    value.tokenCalibration.routeKey.length > 0 &&
+    typeof value.tokenCalibration.factor === 'number' &&
+    Number.isFinite(value.tokenCalibration.factor) &&
+    value.tokenCalibration.factor >= 0.5 &&
+    value.tokenCalibration.factor <= 3 &&
+    Number.isSafeInteger(value.tokenCalibration.samples) &&
+    (value.tokenCalibration.samples as number) > 0 &&
+    typeof value.tokenCalibration.updatedAt === 'string'
+  );
 }
 
 function isJevSettings(value: unknown): boolean {

@@ -26,6 +26,7 @@ export * from '../src/workspace/workspaceScope';
 export * from '../src/runtime/modelAdapter';
 export * from '../src/runtime/taskPlan';
 export * from '../src/runtime/contextManager';
+export * from '../src/runtime/contextTokenEstimator';
 export * from '../src/runtime/completionGate';
 export * from '../src/runtime/deliveryContract';
 export * from '../src/runtime/pipeline/stagePlan';
