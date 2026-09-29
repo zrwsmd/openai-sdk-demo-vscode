@@ -48,6 +48,21 @@ export function usesOfficialOpenAIResponses(
     resolveApiFormat(config.baseUrl, config.apiFormat, provider) === AGENT_API_FORMAT_RESPONSES;
 }
 
+/**
+ * The Agents SDK's Responses compaction session accepts OpenAI model ids only.
+ * Keep this check at the adapter boundary so callers can fall back to local
+ * compaction instead of discovering the incompatibility after a run starts.
+ */
+export function supportsOfficialResponsesCompactionModel(model: string): boolean {
+  const trimmed = model.trim();
+  if (!trimmed) return false;
+  const withoutFineTunePrefix = trimmed.startsWith('ft:')
+    ? trimmed.slice('ft:'.length)
+    : trimmed;
+  const root = withoutFineTunePrefix.split(':', 1)[0];
+  return root.startsWith('gpt-') || /^o\d[a-z0-9-]*$/i.test(root);
+}
+
 export function officialResponsesCompactionSettings(
   config: Pick<ModelAdapterConfig, 'provider' | 'apiFormat' | 'baseUrl'>,
 ): Pick<ModelSettings, 'contextManagement'> | undefined {

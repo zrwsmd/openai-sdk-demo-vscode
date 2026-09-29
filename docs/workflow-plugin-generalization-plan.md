@@ -1130,10 +1130,25 @@ npm run test:jev
     gateway 后仍在既有“交付后重复写入”场景触发审批恢复超轮次，未发现与本批
     token 预算/校准改动相关的调用栈。
 
-- [ ] **第三批：会话生命周期与单轮中途检查（问题 5、6）**
+- [x] **第三批：会话生命周期与单轮中途检查（问题 5、6）**
   - 明确本地 session 和官方 Responses 服务端压缩的职责边界。
   - 在工具回执增长后增加中途上下文检查点。
   - 保持取消、暂停、恢复和历史持久化语义不变。
+  - 新增 `src/runtime/contextSession.ts`：本地路径使用通用
+    `ContextCheckpointSession`，每次会话追加后以串行、best-effort 方式检查
+    token/旧阈值；官方 OpenAI Responses 路径使用 SDK 的
+    `OpenAIResponsesCompactionSession`，压缩结果通过底层 `JsonFileSession`
+    回写，下一轮不会继续上传未压缩的完整本地历史。
+  - 官方 SDK 只接受 `gpt-*`、`o*` 或兼容的 fine-tuned OpenAI 模型名；第三方
+    Responses、未知模型名和构造失败会记录原因并自动回退本地压缩，不把 provider
+    特性错误地当成通用能力。
+  - 本地中途检查失败不会阻断工具回执；取消、审批拒绝、重试和异常路径统一先
+    恢复本轮会话边界，再执行原有回滚逻辑。
+  - `scripts/run_coordinator_test.mjs` 更新官方 Responses 路径断言，
+    `scripts/context_session_test.mjs` 覆盖本地中途检查、官方 compact、失败回退
+    和会话边界恢复。
+  - 测试结果：`npx tsc --noEmit`、`npm run compile`、`npm run test:batch` 和
+    `node scripts/context_session_test.mjs` 全部通过。
 
 - [ ] **第四批：字符串模型 usage 观察（问题 8）**
   - 修复字符串模型绕过 usage 观察的静默路径。

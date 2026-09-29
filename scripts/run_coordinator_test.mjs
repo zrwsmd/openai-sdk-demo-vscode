@@ -38,8 +38,9 @@ async function fixture(executeAgent, planTask, team = {}) {
   return { dir, session, store, events, coordinator };
 }
 
-// Official OpenAI Responses uses server-side context management. The
-// coordinator must not also run the local summary compactor for that route.
+// Official OpenAI Responses uses the SDK compaction session when the model id
+// is eligible. The coordinator must not also run the local summary compactor
+// for that route.
 {
   let compactCalls = 0;
   const test = await fixture(
@@ -63,6 +64,7 @@ async function fixture(executeAgent, planTask, team = {}) {
       ...config,
       baseUrl: '',
       apiFormat: 'responses',
+      model: 'gpt-4o-mini',
     },
     'key',
   );

@@ -34,6 +34,11 @@ import {
   type ContextManagerOptions,
 } from './contextManager';
 import {
+  createManagedContextSession,
+  type ManagedContextSession,
+  type RecoverableContextSession,
+} from './contextSession';
+import {
   failTaskPlan,
   pauseTaskPlan,
   restartTaskPlan,
@@ -343,6 +348,18 @@ export class RunCoordinator {
     };
   }
 
+  private compactContextForAgent(
+    session: RecoverableContextSession,
+    config: AgentConfig,
+    options?: ContextManagerOptions,
+  ): Promise<ContextCompactionResult> {
+    const compactConfig = {
+      ...config,
+      apiFormat: config.apiFormat === 'auto' ? undefined : config.apiFormat,
+    };
+    return this.compactContext(session, compactConfig, options);
+  }
+
   async initialize(): Promise<void> {
     if (this.initializeOperation) return this.initializeOperation;
     if (this.clearing && this.clearOperation) await this.clearOperation;
@@ -488,7 +505,42 @@ export class RunCoordinator {
       );
       const compactionController = new AbortController();
       if (usesOfficialOpenAIResponses(config)) {
-        this.writeLog('[context] 使用 OpenAI Responses 服务端自动压缩，跳过本地摘要压缩');
+        this.transitionController = compactionController;
+        try {
+          const managedContext = await createManagedContextSession(
+            this.session,
+            this.agentConfig(config, apiKey),
+            {
+              getSignal: () => compactionController.signal,
+              compact: (session, contextConfig, options) =>
+                this.compactContextForAgent(session, contextConfig, options),
+              log: this.writeLog,
+            },
+          );
+          const compaction = await managedContext.runInitialCheckpoint();
+          if (compaction.mode === 'official_responses') {
+            this.writeLog('[context] 已启用官方 Responses 会话压缩，完成后由 SDK 自动检查并回写本地 session');
+          }
+          if (compaction.compacted) {
+            this.writeLog(
+              `[context] 初始历史检查已压缩: items ${compaction.beforeItems}->${compaction.afterItems}, ` +
+                `chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
+            );
+            sessionItems = await this.session.getItems();
+            run.sessionItemCountBefore = sessionItems.length;
+            await this.store.update(run);
+          } else if (compaction.error) {
+            this.writeLog(`[context] 初始历史检查失败，继续使用当前历史: ${compaction.error}`);
+          }
+          if (this.isClearing(generation)) return;
+          if (this.stopRequested || compactionController.signal.aborted) {
+            this.stopRequested = false;
+            await this.pausePending(run, false);
+            return;
+          }
+        } finally {
+          if (this.transitionController === compactionController) this.transitionController = undefined;
+        }
       } else {
         this.transitionController = compactionController;
         const compaction = await this.compactContext(
@@ -1337,6 +1389,11 @@ export class RunCoordinator {
     this.ensureProtocolFactory(run);
 
     const baseOutput = run.output;
+    let managedContextSession: ManagedContextSession | undefined;
+    const rollbackSessionBoundary = async (): Promise<void> => {
+      await managedContextSession?.restoreTurnBoundary();
+      await this.session.truncate(run.sessionItemCountBefore);
+    };
     try {
       try {
         await this.prepareTeam(run, apiKey, controller.signal, runGeneration);
@@ -1402,6 +1459,29 @@ export class RunCoordinator {
         this.emit({ type: 'done', usage: run.usage, canRetry: true });
         return;
       }
+      if (!run.teamTask?.executionGraph) {
+        managedContextSession = await createManagedContextSession(
+          this.session,
+          this.agentConfig(run.config, apiKey),
+          {
+            getSignal: () => controller.signal,
+            compact: (session, contextConfig, options) =>
+              this.compactContextForAgent(session, contextConfig, options),
+            log: this.writeLog,
+          },
+        );
+        const initialCompaction = await managedContextSession.runInitialCheckpoint();
+        if (initialCompaction.compacted) {
+          this.writeLog(
+            `[context] 执行前历史检查已压缩: items ${initialCompaction.beforeItems}->${initialCompaction.afterItems}, ` +
+              `chars ${initialCompaction.beforeCharacters}->${initialCompaction.afterCharacters}`,
+          );
+          run.sessionItemCountBefore = initialCompaction.afterItems;
+          await this.store.update(run);
+        } else if (initialCompaction.error) {
+          this.writeLog(`[context] 执行前历史检查失败，继续使用当前历史: ${initialCompaction.error}`);
+        }
+      }
       const executeSingleAgent = (
         agentOptions: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'>,
       ): Promise<AgentRunResult> =>
@@ -1420,7 +1500,7 @@ export class RunCoordinator {
               });
             },
           },
-          this.session,
+          managedContextSession?.session ?? this.session,
           run.userText,
           {
             ...agentOptions,
@@ -1490,7 +1570,7 @@ export class RunCoordinator {
           if (!run.plan || run.teamTask || !this.isLinearPlanIncompleteError(error)) throw error;
           const failedPlanId = run.plan.id;
           const message = '线性计划未推进，已退回单任务执行';
-          await this.session.truncate(run.sessionItemCountBefore);
+          await rollbackSessionBoundary();
           if (this.isRunInvalidated(runGeneration)) return;
           run.plan = undefined;
           run.resumeStage = undefined;
@@ -1546,7 +1626,7 @@ export class RunCoordinator {
       // Session rollback must happen before the run becomes terminal. If the
       // host crashes between these writes, startup still sees an active run.
       if ((result.status === 'cancelled' && !resumable) || result.status === 'refused') {
-        await this.session.truncate(run.sessionItemCountBefore);
+        await rollbackSessionBoundary();
         if (this.isRunInvalidated(runGeneration)) return;
       }
       await this.store.update(run);
@@ -1672,7 +1752,7 @@ export class RunCoordinator {
       if (this.isRunInvalidated(runGeneration)) return;
       const executorAlreadyCompleted = run.teamTask?.nodes.find((node) => node.id === 'executor')?.status === 'completed';
       if (!hasSdkState && !executorAlreadyCompleted) {
-        await this.session.truncate(run.sessionItemCountBefore);
+        await rollbackSessionBoundary();
         if (this.isRunInvalidated(runGeneration)) return;
       }
       const continuable = manuallyPaused || retryableFailure;
