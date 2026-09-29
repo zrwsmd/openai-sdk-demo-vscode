@@ -7,6 +7,10 @@ import {
   ST_TOOL_STATE_SERVICE,
   type StValidationState,
 } from "./stWorkspaceDeliveryWorkflow";
+import {
+  ST_VALIDATION_RUNTIME_SERVICE,
+  type StValidationRuntimeService,
+} from "./stValidationRuntimeService";
 import type { ToolBuildContext } from "../../tools/toolBuildContext";
 import type { DeliveryWorkflow } from "../../workflow/deliveryCompatibility";
 
@@ -15,6 +19,7 @@ export const ST_ANALYZER_OPTIONS_SERVICE = "st.analyzerOptions";
 
 export interface StToolBuildContext extends ToolBuildContext {
   deliveryWorkflow?: DeliveryWorkflow;
+  validationService?: StValidationRuntimeService;
   stAnalyzer: StAnalyzer;
   stToolOptions: StAnalyzerToolOptions;
   requiresStValidation: boolean;
@@ -30,6 +35,9 @@ export function createStToolBuildContext(
   const state = context.workflow?.services?.get(ST_TOOL_STATE_SERVICE) as
     | StValidationState
     | undefined;
+  const validationService = context.workflow?.services?.get(
+    ST_VALIDATION_RUNTIME_SERVICE,
+  ) as StValidationRuntimeService | undefined;
   const stValidationState = state ?? { hashes: new Set<string>() };
   const stAnalyzer =
     context.services.get(ST_ANALYZER_SERVICE) as StAnalyzer | undefined;
@@ -41,6 +49,7 @@ export function createStToolBuildContext(
   return {
     ...context,
     deliveryWorkflow: context.workflow as DeliveryWorkflow | undefined,
+    validationService,
     stAnalyzer: stAnalyzer ?? new FallbackStAnalyzer(),
     stToolOptions: stToolOptions ?? {},
     requiresStValidation:
@@ -50,7 +59,8 @@ export function createStToolBuildContext(
           deliverable.requiredVerificationTools?.includes("validate_st_code"),
       ) === true,
     inlineStValidation:
-      (context.workflow as DeliveryWorkflow | undefined)?.validationInputMode ===
+      (validationService?.validationInputMode ??
+        (context.workflow as DeliveryWorkflow | undefined)?.validationInputMode) ===
       "inline_code",
     stValidationState,
     validatedStContent: stValidationState.hashes,

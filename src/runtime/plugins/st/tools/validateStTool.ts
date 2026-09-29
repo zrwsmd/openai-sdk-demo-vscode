@@ -67,6 +67,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     stAnalyzer,
     stToolOptions,
     stValidationCache,
+    validationService,
     validatedStContent,
     workspace,
     withEffect,
@@ -226,10 +227,19 @@ export function createValidateStTools(ctx: StToolBuildContext) {
             : toProtocolDiagnostics(diagnostics);
           if (!validationFailed) {
             validatedStContent.add(validatedHash);
-            if (!p) deliveryWorkflow?.recordSuccessfulValidation?.(
-              validationInput.target.text,
-              validatedHash,
-            );
+            if (!p) {
+              if (validationService) {
+                validationService.recordSuccessfulValidation(
+                  validationInput.target.text,
+                  validatedHash,
+                );
+              } else {
+                deliveryWorkflow?.recordSuccessfulValidation?.(
+                  validationInput.target.text,
+                  validatedHash,
+                );
+              }
+            }
           }
           audit({
             type: "tool_completed",
@@ -384,7 +394,11 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       : undefined;
     if (!validationFailed) {
       validatedStContent.add(contentHash);
-      deliveryWorkflow?.recordSuccessfulValidation?.(content, contentHash);
+      if (validationService) {
+        validationService.recordSuccessfulValidation(content, contentHash);
+      } else {
+        deliveryWorkflow?.recordSuccessfulValidation?.(content, contentHash);
+      }
     }
     audit({
       type: "tool_completed",
@@ -463,7 +477,11 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
       const name = m?.[1] ?? `program_${Date.now()}`;
       const file = path.join(cfg.exportDir, `${name}.st`);
-      if (requiresStValidation && !validatedStContent.has(hashStContent(code))) {
+      if (
+        requiresStValidation &&
+        !(validationService?.hasValidatedContent(code) ??
+          validatedStContent.has(hashStContent(code)))
+      ) {
         return toolResult({
           ok: false,
           error: "ST 代码在导出前必须先通过 validate_st_code，且必须校验当前这份完整代码。",

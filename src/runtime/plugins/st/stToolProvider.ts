@@ -84,13 +84,17 @@ function fileBeforeEffect(
     const args = input as Record<string, unknown>;
     const path = typeof args.path === "string" ? args.path : "";
     const content = typeof args.content === "string" ? args.content : undefined;
+    const contentAlreadyValidated = content === undefined
+      ? false
+      : context.validationService?.canWriteContent(content) ??
+        (context.deliveryWorkflow?.canWriteContent
+          ? context.deliveryWorkflow.canWriteContent(content)
+          : context.validatedStContent.has(hashStContent(content)));
     if (
       !context.requiresStValidation ||
       !path.toLowerCase().endsWith(".st") ||
       content === undefined ||
-      (context.deliveryWorkflow?.canWriteContent
-        ? context.deliveryWorkflow.canWriteContent(content)
-        : context.validatedStContent.has(hashStContent(content)))
+      contentAlreadyValidated
     ) {
       return undefined;
     }
@@ -102,9 +106,10 @@ function fileBeforeEffect(
         error: "ST 写入内容与最近一次通过校验的草稿不一致，且写入前重新校验未通过。",
         failureData: {
           suppliedContentHash: validation.contentHash,
-          lastValidatedContentHash: context.deliveryWorkflow?.canWriteContent
-            ? undefined
-            : [...context.validatedStContent].at(-1),
+          lastValidatedContentHash: context.validationService?.lastValidatedContentHash ??
+            (context.deliveryWorkflow?.canWriteContent
+              ? undefined
+              : [...context.validatedStContent].at(-1)),
           errorCount: validation.counts.error,
           warningCount: validation.counts.warning,
           diagnostics: validation.repairPacket

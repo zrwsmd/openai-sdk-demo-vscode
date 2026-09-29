@@ -51,7 +51,7 @@
 - [x] 17. 增量阶段：自动封锁公共层对旧 Delivery Facade 的依赖
 - [x] 18. 增量阶段：非 ST Workflow 脱离 Delivery 兼容接口
 - [x] 19. 删除无用的 ST Inspection Workflow
-- [ ] 20. 建立 ST 私有运行时服务
+- [x] 20. 建立 ST 私有运行时服务
 - [ ] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 - [ ] 22. 让 Agent 彻底移除 Delivery 适配调用
 - [ ] 23. 删除旧 Delivery 兼容层
@@ -498,6 +498,27 @@ Delivery Workflow。
 该服务只属于 ST 插件，通过通用 `WorkflowRuntime.services` 传递给
 `stToolContext`、`validateStTool` 和 `stToolProvider`，公共 Workflow 协议不声明
 这些 ST 能力。
+
+本阶段已完成：
+
+- 新增 `src/runtime/plugins/st/stValidationRuntimeService.ts`，集中管理 ST
+  校验输入模式、成功校验哈希、最近一次成功校验内容、写入匹配判断和历史状态恢复。
+- `StWorkspaceDeliveryWorkflow` 通过服务创建并注入
+  `st.validationState`、`st.validationRuntime` 两个插件服务；旧方法暂时保留为
+  委托，确保 Delivery 兼容层和历史测试不受影响。
+- `stToolContext`、`validateStTool`、`stToolProvider` 已改为服务优先读取和写入；
+  旧 Delivery 方法仅作为过渡兜底。
+- 新增 `scripts/st_validation_service_test.mjs`，覆盖服务复用、校验记录、内容匹配、
+  哈希隔离和历史恢复。
+- 未修改 `st-analyze`、`src/analysis/*` 或公共 Workflow 协议。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:st` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:batch` 通过。
 
 ### 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 

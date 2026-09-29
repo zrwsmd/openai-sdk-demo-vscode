@@ -11,7 +11,21 @@ import {
   ST_WORKSPACE_DELIVERY_STAGES,
 } from "./stWorkspaceDeliveryPlan";
 import { hashStContent } from "./stContentHash";
-import { getWorkflowStateSlot, type DeliveryWorkflowRuntimeState } from "../../workflow/runtimeState";
+import {
+  getStValidationRuntimeService,
+  StValidationRuntimeService,
+  type StValidationInputMode,
+  type StValidationState,
+} from "./stValidationRuntimeService";
+export {
+  createStValidationState,
+  getStValidationState,
+  ST_TOOL_STATE_SERVICE,
+  ST_VALIDATION_RUNTIME_SERVICE,
+  type StValidatedDraft,
+  type StValidationInputMode,
+  type StValidationState,
+} from "./stValidationRuntimeService";
 import type {
   DeliveryWorkflow,
   DeliveryWorkflowDescriptor,
@@ -30,37 +44,10 @@ import {
 } from "./stDeliveryContract";
 import { ST_TOOL_EVIDENCE_EXTRACTORS } from "./stCompletionEvidence";
 
-export type StValidatedDraft = {
-  hash: string;
-  content: string;
-};
-
-export type StValidationState = {
-  hashes: Set<string>;
-  lastSuccessful?: StValidatedDraft;
-};
-
 export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
   "validate_st_code",
   "write_file",
 ] as const;
-
-const ST_WORKSPACE_DELIVERY_STATE_KEY = "st_workspace_delivery.validation";
-export const ST_TOOL_STATE_SERVICE = "st.validationState";
-
-export function createStValidationState(): StValidationState {
-  return { hashes: new Set<string>() };
-}
-
-export function getStValidationState(
-  state: DeliveryWorkflowRuntimeState,
-): StValidationState {
-  return getWorkflowStateSlot(
-    state,
-    ST_WORKSPACE_DELIVERY_STATE_KEY,
-    createStValidationState,
-  );
-}
 
 function describeStWorkspaceDelivery(): DeliveryWorkflowDescriptor {
   return {
@@ -118,7 +105,7 @@ export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
   localMatch: stWorkspaceDeliveryLocalMatch,
   createRuntime: (contract, state) =>
     isStWorkspaceDeliveryContract(contract)
-      ? new StWorkspaceDeliveryWorkflow(contract, getStValidationState(state))
+      ? new StWorkspaceDeliveryWorkflow(contract, getStValidationRuntimeService(state))
       : undefined,
 };
 
@@ -131,7 +118,6 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
 
   readonly businessToolNames = ST_WORKSPACE_DELIVERY_TOOL_NAMES;
   readonly parallelToolCalls = false;
-  readonly validationInputMode = "inline_code" as const;
   readonly requiredActionTool = "write_file";
   readonly services: ReadonlyMap<string, unknown>;
   readonly evidenceExtractors = ST_TOOL_EVIDENCE_EXTRACTORS;
@@ -141,12 +127,26 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     return this.businessToolNames;
   }
 
+  get validationInputMode(): StValidationInputMode {
+    return this.validationService.validationInputMode;
+  }
+
   constructor(
     private readonly contract: DeliveryContract | undefined,
-    readonly state: StValidationState,
+    validation: StValidationState | StValidationRuntimeService,
   ) {
-    this.services = new Map([[ST_TOOL_STATE_SERVICE, state]]);
+    this.validationService = validation instanceof StValidationRuntimeService
+      ? validation
+      : new StValidationRuntimeService(validation);
+    this.state = this.validationService.state;
+    this.services = new Map<string, unknown>([
+      ["st.validationState", this.state],
+      ["st.validationRuntime", this.validationService],
+    ]);
   }
+
+  readonly state: StValidationState;
+  readonly validationService: StValidationRuntimeService;
 
   initialTool(options: { isResume: boolean }): string | undefined {
     return options.isResume ? undefined : "validate_st_code";
@@ -163,12 +163,11 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   }
 
   recordSuccessfulValidation(content: string, hash: string): void {
-    this.state.hashes.add(hash);
-    this.state.lastSuccessful = { hash, content };
+    this.validationService.recordSuccessfulValidation(content, hash);
   }
 
   canWriteContent(content: string): boolean {
-    return this.state.lastSuccessful?.hash === hashStContent(content);
+    return this.validationService.canWriteContent(content);
   }
 
   chooseRepairTool(
@@ -255,28 +254,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   }
 
   hydrate(records: WorkflowToolRecord[]): void {
-    for (const record of records) {
-      const data = resultData(record.result);
-      if (record.name === "validate_st_code" && record.result.ok) {
-        if (data.errorCount !== 0) continue;
-        const args = parseArgs(record.args);
-        const code = typeof args.code === "string" && args.code.trim()
-          ? args.code
-          : undefined;
-        const hash = typeof data.validatedContentHash === "string"
-          ? data.validatedContentHash
-          : code ? hashStContent(code) : undefined;
-        if (!code || !hash) continue;
-        this.recordSuccessfulValidation(code, hash);
-        continue;
-      }
-      if (record.name === "write_file" && record.result.ok) {
-        const args = parseArgs(record.args);
-        const content = typeof args.content === "string" ? args.content : undefined;
-        const hash = preWriteValidationHash(data);
-        if (content && hash === hashStContent(content)) this.recordSuccessfulValidation(content, hash);
-      }
-    }
+    this.validationService.restore(records);
   }
 
   verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined {
