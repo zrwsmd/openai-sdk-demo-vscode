@@ -8,6 +8,7 @@ import { createAnthropicMessagesModel } from './anthropicMessagesModel';
 import type { ModelContextProfile } from './contextManager';
 import {
   modelContextCalibrationRouteKey,
+  type NamedModelResolver,
   observeModelUsage,
 } from './contextTokenEstimator';
 
@@ -96,6 +97,13 @@ export interface ResolvedModelRoute {
 export interface ModelAdapterFactoryOptions {
   fetchImpl?: typeof fetch;
   createChatCompletionsModel: () => string | Model;
+  /**
+   * Resolves a named model before usage observation is attached.
+   *
+   * The Agents SDK normally performs this through ModelProvider. The adapter
+   * needs an explicit resolver because it observes the concrete Model boundary.
+   */
+  resolveNamedModel?: NamedModelResolver;
 }
 
 export function isAgentApiFormat(value: unknown): value is AgentApiFormat {
@@ -198,6 +206,7 @@ export function createModelAdapter(
       config.modelContext,
       routeKey,
       config.usageScope,
+      options.resolveNamedModel,
     ),
   });
   return adapter;

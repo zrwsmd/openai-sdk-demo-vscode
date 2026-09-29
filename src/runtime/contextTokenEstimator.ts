@@ -3,6 +3,7 @@ import type {
   Model,
   ModelRequest,
   ModelResponse,
+  ModelRetryAdviceRequest,
   StreamEvent,
 } from '@openai/agents';
 import type { ModelContextProfile, TokenEstimateCalibration } from './contextManager';
@@ -11,6 +12,10 @@ import { createHash } from 'node:crypto';
 const CALIBRATION_ALPHA = 0.25;
 const MIN_CALIBRATION_FACTOR = 0.5;
 const MAX_CALIBRATION_FACTOR = 3;
+
+export type NamedModelResolver = (
+  modelName: string,
+) => Model | Promise<Model>;
 
 export function estimateTextTokens(text: string): number {
   let cjkCharacters = 0;
@@ -255,8 +260,18 @@ export function observeModelUsage(
   profile: ModelContextProfile | undefined,
   routeKey: string,
   usageScope = 'main_agent',
+  resolveNamedModel?: NamedModelResolver,
 ): string | Model {
-  if (typeof model === 'string' || !profile) return model;
+  if (!profile) return model;
+
+  if (typeof model === 'string') {
+    if (!resolveNamedModel) {
+      throw new Error(
+        `字符串模型 "${model}" 无法启用 usage 校准：请提供 resolveNamedModel`,
+      );
+    }
+    model = new DeferredNamedModel(model, resolveNamedModel);
+  }
 
   return new Proxy(model, {
     get(target, property) {
@@ -279,6 +294,50 @@ export function observeModelUsage(
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+}
+
+/**
+ * Keeps named-model resolution lazy while still exposing a normal SDK Model.
+ *
+ * The Agents SDK normally resolves a string model through ModelProvider inside
+ * Runner. The runtime observes the Model boundary instead, so a named model
+ * needs the same resolution step before it can be instrumented. Resolving on
+ * first use preserves the old lazy behavior and makes provider failures visible
+ * at the actual model call.
+ */
+class DeferredNamedModel implements Model {
+  private resolvedModel: Promise<Model> | undefined;
+
+  constructor(
+    private readonly modelName: string,
+    private readonly resolveNamedModel: NamedModelResolver,
+  ) {}
+
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    const model = await this.resolveModel();
+    return model.getResponse(request);
+  }
+
+  async *getStreamedResponse(
+    request: ModelRequest,
+  ): AsyncGenerator<StreamEvent> {
+    const model = await this.resolveModel();
+    yield* model.getStreamedResponse(request);
+  }
+
+  async getRetryAdvice(args: ModelRetryAdviceRequest) {
+    const model = await this.resolveModel();
+    return model.getRetryAdvice?.(args);
+  }
+
+  private resolveModel(): Promise<Model> {
+    if (!this.resolvedModel) {
+      this.resolvedModel = Promise.resolve(
+        this.resolveNamedModel(this.modelName),
+      );
+    }
+    return this.resolvedModel;
+  }
 }
 
 async function* observeStreamUsage(

@@ -141,6 +141,68 @@ assert.equal(
   assert.equal(Object.keys(profile.tokenCalibrations ?? {}).length, 2);
 }
 
+{
+  class NamedFakeModel {
+    async getResponse() {
+      return { output: [], usage: { inputTokens: 160 } };
+    }
+
+    async *getStreamedResponse() {
+      yield {
+        type: 'response_done',
+        response: { usage: { inputTokens: 140 } },
+      };
+    }
+  }
+
+  const profile = {};
+  const resolvedModel = new NamedFakeModel();
+  const request = {
+    systemInstructions: 'system',
+    input: [{ type: 'message', role: 'user', content: 'hello' }],
+    tools: [],
+    handoffs: [],
+    outputType: 'text',
+    modelSettings: {},
+  };
+  const adapter = createModelAdapter({
+    provider: 'openai',
+    apiFormat: 'chat_completions',
+    baseUrl: 'https://gateway.example/v1',
+    apiKey: 'key',
+    model: 'named-model',
+    modelContext: profile,
+  }, {
+    createChatCompletionsModel: () => 'named-model',
+    resolveNamedModel: (modelName) => {
+      assert.equal(modelName, 'named-model');
+      return resolvedModel;
+    },
+  });
+
+  assert.equal(typeof adapter.model, 'object');
+  await adapter.model.getResponse(request);
+  assert.equal(profile.tokenCalibration.samples, 1);
+  for await (const _event of adapter.model.getStreamedResponse(request)) {
+    // Consume the stream so the observed usage is recorded.
+  }
+  assert.equal(profile.tokenCalibration.samples, 2);
+}
+
+assert.throws(
+  () => createModelAdapter({
+    provider: 'openai',
+    apiFormat: 'chat_completions',
+    baseUrl: 'https://gateway.example/v1',
+    apiKey: 'key',
+    model: 'unresolved-model',
+    modelContext: {},
+  }, {
+    createChatCompletionsModel: () => 'unresolved-model',
+  }),
+  /resolveNamedModel/,
+);
+
 const policy = new DefaultToolPolicy();
 
 assert.deepEqual(policy.evaluate('read_file', { path: 'main.st' }, { workspaceRoot: '.' }), {

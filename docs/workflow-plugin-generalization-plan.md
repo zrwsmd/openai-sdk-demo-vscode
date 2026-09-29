@@ -1150,9 +1150,18 @@ npm run test:jev
   - 测试结果：`npx tsc --noEmit`、`npm run compile`、`npm run test:batch` 和
     `node scripts/context_session_test.mjs` 全部通过。
 
-- [ ] **第四批：字符串模型 usage 观察（问题 8）**
-  - 修复字符串模型绕过 usage 观察的静默路径。
-  - 增加 provider/model adapter 回归，确认校准可观测且失败可见。
+- [x] **第四批：字符串模型 usage 观察（问题 8）**
+  - `observeModelUsage()` 不再让已启用上下文校准的字符串模型静默绕过观察。
+  - 新增通用 `NamedModelResolver` 和惰性 `DeferredNamedModel`：字符串模型在首次
+    请求时解析为 SDK `Model`，再统一接入普通响应、流式响应和重试建议观察。
+  - `ModelAdapterFactoryOptions.resolveNamedModel` 允许宿主注入自己的
+    `ModelProvider`/模型解析逻辑，不把 provider 绑定到 ST 或某个具体网关。
+  - 已启用校准但没有解析器时立即抛出明确错误；不再悄悄返回未观测的字符串模型。
+  - 保留兼容行为：未配置 `modelContext` 时，字符串模型仍按原样返回。
+  - 未修改 `st-analyze`、`src/analysis/*` 或 ST 工具业务实现。
+  - 测试结果：`npx tsc --noEmit`、`npm run compile`、`npm run test:batch` 和
+    `sdk_foundation_test` 全部通过；新增回归覆盖字符串模型解析后的普通/流式
+    usage 校准以及缺少解析器时的可见失败。
 
 ### 7.3 第一批验收标准
 
