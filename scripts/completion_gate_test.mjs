@@ -360,11 +360,11 @@ const codeContract = createDeliveryContract({
     },
   ];
   const stWorkflow = new StWorkspaceDeliveryWorkflow(stContract, createStValidationState());
-  stWorkflow.hydrate(stRecords);
+  stWorkflow.completionAdapter?.restore?.(stRecords);
   const gate = evaluateCompletionGate({
     userText: '生成一个 ST 程序',
     finalMessage: '已生成、校验并保存 WaterPumpControl.st。',
-    workflowAdapter: stWorkflow,
+    workflowAdapter: stWorkflow.completionAdapter,
     toolEvidence: {
       write_file: ['successful_write'],
       export_st_program: ['successful_export', 'successful_write'],
@@ -426,12 +426,12 @@ const codeContract = createDeliveryContract({
     },
   ];
   const workflow = new StWorkspaceDeliveryWorkflow(stContract, createStValidationState());
-  workflow.hydrate(records);
+  workflow.completionAdapter?.restore?.(records);
   const gate = evaluateCompletionGate({
     userText: '生成并保存 ST 程序',
     finalMessage: '已校验并保存 WaterPumpControl.st。',
     deliveryContract: stContract,
-    workflowAdapter: workflow,
+    workflowAdapter: workflow.completionAdapter,
     toolEvidence: { write_file: ['successful_write'] },
     toolResults: records,
   });

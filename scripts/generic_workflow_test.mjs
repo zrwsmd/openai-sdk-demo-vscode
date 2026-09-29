@@ -7,6 +7,7 @@ import {
   GENERIC_FILE_INSPECTION_TOOL_NAMES,
   GENERIC_FILE_INSPECTION_WORKFLOW,
   ST_WORKSPACE_DELIVERY_WORKFLOW,
+  StWorkspaceDeliveryWorkflow,
   ToolCatalog,
   ToolRegistry,
   WorkflowDecisionService,
@@ -201,7 +202,24 @@ try {
     { userText: '生成 ST 程序并保存到工作区' },
   );
   assert(genericStRuntime);
-  assert.equal(genericStRuntime.completionAdapter, undefined);
+  assert.equal(typeof ST_WORKSPACE_DELIVERY_WORKFLOW.matchesContract, 'function');
+  assert.equal(typeof ST_WORKSPACE_DELIVERY_WORKFLOW.createContract, 'function');
+  assert.equal(ST_WORKSPACE_DELIVERY_WORKFLOW.matchesDeliveryContract, undefined);
+  assert.equal(ST_WORKSPACE_DELIVERY_WORKFLOW.createDeliveryContract, undefined);
+  assert.equal(
+    StWorkspaceDeliveryWorkflow.prototype.chooseRepairTool,
+    undefined,
+  );
+  assert.equal(StWorkspaceDeliveryWorkflow.prototype.hydrate, undefined);
+  assert.equal(
+    StWorkspaceDeliveryWorkflow.prototype.verifyRequiredAction,
+    undefined,
+  );
+  assert(genericStRuntime.completionAdapter);
+  assert.equal(
+    genericStRuntime.completionAdapter.finalMessage?.([]),
+    undefined,
+  );
   const adaptedStRuntime = adaptDeliveryWorkflow(genericStRuntime);
   assert(adaptedStRuntime.completionAdapter);
   assert.equal(

@@ -52,7 +52,7 @@
 - [x] 18. 增量阶段：非 ST Workflow 脱离 Delivery 兼容接口
 - [x] 19. 删除无用的 ST Inspection Workflow
 - [x] 20. 建立 ST 私有运行时服务
-- [ ] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
+- [x] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 - [ ] 22. 让 Agent 彻底移除 Delivery 适配调用
 - [ ] 23. 删除旧 Delivery 兼容层
 - [ ] 24. 清理协议中的旧 Delivery 兼容字段
@@ -541,6 +541,28 @@ implements WorkflowRuntime
 Descriptor 从 `matchesDeliveryContract`、`createDeliveryContract` 迁移到通用的
 `matchesContract`、`createContract`。ST 专用校验状态继续由
 `StValidationRuntimeService` 管理。
+
+本阶段已完成：
+
+- `StWorkspaceDeliveryWorkflow` 已改为 `implements WorkflowRuntime`，不再实现旧
+  `DeliveryWorkflow`。
+- ST 的修复工具选择、完成证据、问题解决、最终消息、历史恢复和交付物提取全部收进
+  `completionAdapter`。
+- ST Descriptor 已切换到 `matchesContract`、`createContract`，不再声明旧
+  Delivery Descriptor 钩子。
+- 旧 Delivery 兼容层仍可通过 `adaptDeliveryWorkflow` 包装这个通用运行时，但不再
+  负责补齐 ST 的完成逻辑。
+- 更新 Completion Gate、通用 Workflow 和兼容 Facade 回归测试，确认新旧入口行为一致。
+- 未修改 `st-analyze`、`src/analysis/*` 或 Agent 的适配调用；Agent 适配调用留到第
+  22 阶段处理。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:st` 通过。
+- `npm run test:batch` 通过。
 
 ### 22. 让 Agent 彻底移除 Delivery 适配调用
 

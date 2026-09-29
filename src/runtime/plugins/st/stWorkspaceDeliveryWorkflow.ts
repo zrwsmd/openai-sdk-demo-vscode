@@ -5,7 +5,6 @@ import type {
   CompletionGateResult,
   CompletionGateWorkflowContext,
 } from "../../completionTypes";
-import type { DeliveryContract } from "../../deliveryContract";
 import {
   ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
   ST_WORKSPACE_DELIVERY_STAGES,
@@ -27,13 +26,13 @@ export {
   type StValidationState,
 } from "./stValidationRuntimeService";
 import type {
-  DeliveryWorkflow,
-  DeliveryWorkflowDescriptor,
-} from "../../workflow/deliveryCompatibility";
-import type {
+  WorkflowCompletionAdapter,
+  WorkflowContract,
   WorkflowDecisionContext,
+  WorkflowDescription,
   WorkflowDescriptor,
   WorkflowLocalMatch,
+  WorkflowRuntime,
   WorkflowToolRecord,
 } from "../../workflow/types";
 import {
@@ -49,7 +48,7 @@ export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
   "write_file",
 ] as const;
 
-function describeStWorkspaceDelivery(): DeliveryWorkflowDescriptor {
+function describeStWorkspaceDelivery(): WorkflowDescription {
   return {
     id: ST_WORKSPACE_DELIVERY_PIPELINE_PLAN.id,
     title: "ST 代码交付",
@@ -95,8 +94,8 @@ export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
   businessToolNames: ST_WORKSPACE_DELIVERY_TOOL_NAMES,
   pipelinePlan: ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
   describe: describeStWorkspaceDelivery,
-  matchesDeliveryContract: isStWorkspaceDeliveryContract,
-  createDeliveryContract: (options = {}) =>
+  matchesContract: isStWorkspaceDeliveryContract,
+  createContract: (options = {}) =>
     createStCodeDeliveryContract({
       reason: options.reason ??
         "识别为 ST 代码交付，运行时按固定流水线校验并保存到当前工作区",
@@ -109,7 +108,7 @@ export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
       : undefined,
 };
 
-export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
+export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   readonly id = ST_WORKSPACE_DELIVERY_WORKFLOW.id;
   readonly title = ST_WORKSPACE_DELIVERY_WORKFLOW.title;
 
@@ -121,6 +120,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   readonly requiredActionTool = "write_file";
   readonly services: ReadonlyMap<string, unknown>;
   readonly evidenceExtractors = ST_TOOL_EVIDENCE_EXTRACTORS;
+  readonly completionAdapter: WorkflowCompletionAdapter;
 
   /** @deprecated Use businessToolNames. */
   get visibleToolNames(): readonly string[] {
@@ -132,7 +132,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
   }
 
   constructor(
-    private readonly contract: DeliveryContract | undefined,
+    private readonly contract: WorkflowContract | undefined,
     validation: StValidationState | StValidationRuntimeService,
   ) {
     this.validationService = validation instanceof StValidationRuntimeService
@@ -143,6 +143,17 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
       ["st.validationState", this.state],
       ["st.validationRuntime", this.validationService],
     ]);
+    this.completionAdapter = {
+      selectRepairTool: (gate, records, availableToolNames) =>
+        this.selectRepairTool(gate, records, availableToolNames),
+      collectArtifacts: (records) => this.collectArtifacts(records),
+      resolveIssue: (issue, context) => this.resolveIssue(issue, context),
+      hasSuccessfulVerification: (toolName, context) =>
+        this.hasSuccessfulVerification(toolName, context),
+      finalMessage: (records) => this.finalMessage(records),
+      restore: (records) => this.restore(records),
+      collectActionArtifact: (call) => this.collectActionArtifact(call),
+    };
   }
 
   readonly state: StValidationState;
@@ -162,15 +173,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
       "不要并行调用工具，也不要调用当前 workflow 未暴露的工具。";
   }
 
-  recordSuccessfulValidation(content: string, hash: string): void {
-    this.validationService.recordSuccessfulValidation(content, hash);
-  }
-
-  canWriteContent(content: string): boolean {
-    return this.validationService.canWriteContent(content);
-  }
-
-  chooseRepairTool(
+  private selectRepairTool(
     _gate: Exclude<CompletionGateResult, { passed: true }>,
     records: WorkflowToolRecord[],
     availableToolNames: Set<string>,
@@ -183,13 +186,13 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     return undefined;
   }
 
-  collectArtifacts(records: WorkflowToolRecord[]): Artifact[] {
+  private collectArtifacts(records: WorkflowToolRecord[]): Artifact[] {
     return records
-      .map((record) => this.verifyRequiredAction(record))
+      .map((record) => this.collectActionArtifact(record))
       .filter((artifact): artifact is Artifact => artifact !== undefined);
   }
 
-  resolveIssue(
+  private resolveIssue(
     issue: CompletionGateIssue,
     context: CompletionGateWorkflowContext,
   ): boolean | undefined {
@@ -215,7 +218,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     return undefined;
   }
 
-  hasSuccessfulVerification(
+  private hasSuccessfulVerification(
     toolName: string,
     context: CompletionGateWorkflowContext,
   ): boolean | undefined {
@@ -226,7 +229,7 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     );
   }
 
-  authoritativeMessage(records: WorkflowToolRecord[]): string | undefined {
+  private finalMessage(records: WorkflowToolRecord[]): string | undefined {
     if (!isStCodeDeliveryContract(this.contract)) return undefined;
     const validationHashes = successfulStValidationHashes(records);
     if (!validationHashes.size) return undefined;
@@ -253,11 +256,11 @@ export class StWorkspaceDeliveryWorkflow implements DeliveryWorkflow {
     return undefined;
   }
 
-  hydrate(records: WorkflowToolRecord[]): void {
+  private restore(records: WorkflowToolRecord[]): void {
     this.validationService.restore(records);
   }
 
-  verifyRequiredAction(call: WorkflowToolRecord): Artifact | undefined {
+  private collectActionArtifact(call: WorkflowToolRecord): Artifact | undefined {
     if (call.name !== "write_file" || !call.result.ok) return undefined;
     const args = parseArgs(call.args);
     if (typeof args.path !== "string" || typeof args.content !== "string") {
