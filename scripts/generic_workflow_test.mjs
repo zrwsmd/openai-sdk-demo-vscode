@@ -6,12 +6,13 @@ import {
   AgentDecisionService,
   GENERIC_FILE_INSPECTION_TOOL_NAMES,
   GENERIC_FILE_INSPECTION_WORKFLOW,
-  ST_INSPECTION_WORKFLOW,
+  ST_WORKSPACE_DELIVERY_WORKFLOW,
   ToolCatalog,
   ToolRegistry,
   WorkflowDecisionService,
   WorkflowRegistry,
   createCoreToolProvider,
+  createStCodeDeliveryContract,
   createWorkflowRuntimeState,
   createWorkflowRuntime,
   createLegacyDeliveryWorkflowRuntime,
@@ -189,44 +190,15 @@ try {
     },
   );
 
-  const stState = createWorkflowRuntimeState();
-  const stRuntime = ST_INSPECTION_WORKFLOW.createRuntime?.(
-    undefined,
-    stState,
-    { userText: '分析这个 ST 文件的变更影响面' },
-  );
-  assert(stRuntime);
-  const stVisibility = resolveWorkflowBusinessToolPolicy(
-    [stRuntime, ST_INSPECTION_WORKFLOW],
-    {
-      userText: '分析这个 ST 文件的变更影响面',
-      state: stState,
-      toolCatalog: new ToolCatalog(),
-    },
-  );
-  assert.deepEqual(stVisibility, {
-    mode: 'allow_list',
-    names: ['st_change_impact'],
+  const stDeliveryContract = createStCodeDeliveryContract({
+    workspacePersistence: 'required',
   });
-  assert.equal(stRuntime.initialTool({ isResume: false }), 'st_change_impact');
-  assert.deepEqual(
-    resolveWorkflowBusinessToolPolicy(
-      [stRuntime, ST_INSPECTION_WORKFLOW],
-      {
-        userText: '查找变量的声明和引用位置',
-        state: stState,
-        toolCatalog: new ToolCatalog(),
-      },
-    ),
-    { mode: 'allow_list', names: ['st_symbol_references'] },
-  );
-
   const genericStRuntime = createWorkflowRuntime(
-    'st_inspection',
-    undefined,
+    'st_workspace_delivery',
+    stDeliveryContract,
     createWorkflowRuntimeState(),
-    new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
-    { userText: '分析这个 ST 文件的变更影响面' },
+    new WorkflowRegistry([ST_WORKSPACE_DELIVERY_WORKFLOW]),
+    { userText: '生成 ST 程序并保存到工作区' },
   );
   assert(genericStRuntime);
   assert.equal(genericStRuntime.completionAdapter, undefined);
@@ -246,11 +218,11 @@ try {
   );
 
   const legacyFacadeRuntime = createLegacyDeliveryWorkflowRuntime(
-    'st_inspection',
-    undefined,
+    'st_workspace_delivery',
+    stDeliveryContract,
     createWorkflowRuntimeState(),
-    new WorkflowRegistry([ST_INSPECTION_WORKFLOW]),
-    { userText: '分析这个 ST 文件的变更影响面' },
+    new WorkflowRegistry([ST_WORKSPACE_DELIVERY_WORKFLOW]),
+    { userText: '生成 ST 程序并保存到工作区' },
   );
   assert(legacyFacadeRuntime?.completionAdapter);
   assert.equal(

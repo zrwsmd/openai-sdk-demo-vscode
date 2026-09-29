@@ -50,7 +50,7 @@
 - [x] 16. 增量阶段：收紧 Delivery Facade，迁移内部兼容实现
 - [x] 17. 增量阶段：自动封锁公共层对旧 Delivery Facade 的依赖
 - [x] 18. 增量阶段：非 ST Workflow 脱离 Delivery 兼容接口
-- [ ] 19. 删除无用的 ST Inspection Workflow
+- [x] 19. 删除无用的 ST Inspection Workflow
 - [ ] 20. 建立 ST 私有运行时服务
 - [ ] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 - [ ] 22. 让 Agent 彻底移除 Delivery 适配调用
@@ -464,6 +464,26 @@ Delivery Workflow。
   `st_symbol_references` 工具。
 - ST 分析统一通过 `read_only + ToolCatalog` 选择工具。
 
+本阶段已完成：
+
+- 删除 `src/runtime/plugins/st/stInspectionWorkflow.ts`。
+- 删除测试入口中的 `ST_INSPECTION_WORKFLOW` 导出。
+- 删除通用 Workflow 测试对 `StInspectionWorkflow` 的依赖，兼容适配回归改用
+  仍在使用的 `ST_WORKSPACE_DELIVERY_WORKFLOW`。
+- Jev 测试不再伪造 `st_inspection` 路由，改用通用 `file_read` fallback 场景。
+- 边界测试增加实际插件文件不存在检查。
+- `st_dependency_map`、`st_change_impact` 和 `st_symbol_references` 工具及
+  `read_only + ToolCatalog` 选择逻辑未删除。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 分析工具实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run compile` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:st` 通过。
+- `npm run test:jev` 通过。
+
 ### 20. 建立 ST 私有运行时服务
 
 在 ST 插件内部整理 `StValidationRuntimeService`，集中管理：
@@ -834,8 +854,8 @@ npm run test:jev
 
 - 宿主 `src/app/workflowRegistry.ts` 不再注册 `st_inspection`；默认可路由的 ST
   Workflow 只保留 ST Delivery。
-- `stInspectionWorkflow.ts` 保留为兼容导出和独立测试用实现，但不再参与默认
-  Registry 的自动决策，不再创建固定 ST 分析阶段、运行时契约或 `initialTool`。
+- 当时曾保留 `stInspectionWorkflow.ts` 作为兼容导出和独立测试用实现；该兼容
+  实现已在后续第 19 阶段删除，不再参与任何 Registry 或运行时流程。
 - ST 依赖分析请求现在由通用决策链返回 `read_only`，再由 `ToolCatalog` 根据
   工具能力意图选择 `st_dependency_map`；影响分析和符号引用沿用同一机制，分别
   选择 `st_change_impact` 与 `st_symbol_references`。

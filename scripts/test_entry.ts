@@ -62,7 +62,6 @@ export * from '../src/runtime/plugins/st/stToolProvider';
 export * from '../src/runtime/contentHash';
 export * from '../src/runtime/plugins/st/stDeliveryContract';
 export * from '../src/runtime/plugins/st/stWorkspaceDeliveryWorkflow';
-export * from '../src/runtime/plugins/st/stInspectionWorkflow';
 export * from '../src/runtime/plugins/st/stCompletionEvidence';
 export * from '../src/runtime/plugins/testing/genericFileInspectionWorkflow';
 export * from '../src/app/settingsProfiles';

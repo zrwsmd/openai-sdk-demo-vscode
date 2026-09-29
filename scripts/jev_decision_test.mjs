@@ -304,12 +304,11 @@ globalThis.fetch = async () => response({
     },
     workflow: {
       type: 'choice',
-      choice: 'st_inspection',
+      choice: 'file_read',
       probabilities: {
-        st_inspection: 0.96,
+        file_read: 0.96,
         st_delivery: 0.01,
-        file_read: 0.02,
-        general_chat: 0.01,
+        general_chat: 0.03,
       },
       confidence: 0.96,
     },

@@ -131,6 +131,7 @@ for (const file of sourceFiles) {
 for (const legacyPath of [
   'src/runtime/workflows/stDeliveryContract.ts',
   'src/runtime/workflows/stInspectionWorkflow.ts',
+  'src/runtime/plugins/st/stInspectionWorkflow.ts',
   'src/runtime/workflows/stToolContext.ts',
   'src/runtime/workflows/stToolProvider.ts',
   'src/runtime/workflows/stWorkspaceDeliveryWorkflow.ts',
