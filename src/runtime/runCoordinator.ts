@@ -477,7 +477,10 @@ export class RunCoordinator {
         const compaction = await this.compactContext(
           this.session,
           { ...config, apiKey },
-          { signal: compactionController.signal },
+          {
+            signal: compactionController.signal,
+            modelContext: config.modelContext,
+          },
         );
         if (this.transitionController === compactionController) this.transitionController = undefined;
         if (this.isClearing(generation)) return;

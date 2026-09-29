@@ -107,6 +107,44 @@ try {
   }
 
   {
+    const session = new JsonFileSession(path.join(dir, 'profile-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: 'profile old user' },
+      { type: 'message', role: 'assistant', content: 'profile old assistant' },
+      { type: 'message', role: 'user', content: 'profile recent user' },
+      { type: 'message', role: 'assistant', content: 'profile recent assistant' },
+    ]);
+    let called = false;
+    const result = await ensureContextCompacted(session, cfg, {
+      modelContext: {
+        contextWindowTokens: 128_000,
+        compaction: {
+          maxItems: 3,
+          recentItems: 2,
+          maxSummaryInputCharacters: 2_000,
+        },
+      },
+      summarize: async (_config, older, recent, _signal, maxInputCharacters) => {
+        called = true;
+        assert.equal(older.length, 2);
+        assert.equal(recent.length, 2);
+        assert.equal(maxInputCharacters, 2_000);
+        return {
+          summary: 'profile summary',
+          userPreferences: [],
+          durableFacts: [],
+          importantFiles: [],
+          openTasks: [],
+          risks: [],
+        };
+      },
+    });
+    assert.equal(called, true);
+    assert.equal(result.compacted, true);
+    assert.equal((await session.getItems()).length, 3);
+  }
+
+  {
     const session = new JsonFileSession(path.join(dir, 'replace-session.json'));
     await session.addItems([{ type: 'message', role: 'user', content: 'stale' }]);
     await session.replaceItems([{ type: 'message', role: 'assistant', content: 'fresh' }]);

@@ -10,6 +10,26 @@ export interface ContextManagedSession {
   replaceItems(items: AgentInputItem[]): Promise<void>;
 }
 
+/** Configurable limits used by the current local compaction strategy. */
+export interface ContextCompactionBudget {
+  maxItems?: number;
+  maxCharacters?: number;
+  recentItems?: number;
+  maxSummaryInputCharacters?: number;
+}
+
+/** Model-route context metadata shared by local and provider-managed compaction. */
+export interface ModelContextProfile {
+  /** The model's total context window, consumed by the token-aware stage. */
+  contextWindowTokens?: number;
+  /** Input headroom reserved for the model's response. */
+  reservedOutputTokens?: number;
+  /** Extra input headroom kept as a safety margin. */
+  safetyMarginTokens?: number;
+  /** Current local-compaction limits; token-aware fields arrive in the next stage. */
+  compaction?: ContextCompactionBudget;
+}
+
 export const contextSummarySchema = z.object({
   summary: z.string().min(1),
   userPreferences: z.array(z.string()).default([]),
@@ -30,6 +50,9 @@ export type ContextSummarizer = (
 ) => Promise<ContextSummary>;
 
 export interface ContextManagerOptions {
+  /** New unified configuration entry point for context management. */
+  modelContext?: ModelContextProfile;
+  /** Direct fields remain supported for callers and older tests. */
   maxItems?: number;
   maxCharacters?: number;
   recentItems?: number;
@@ -60,8 +83,9 @@ export async function ensureContextCompacted(
 ): Promise<ContextCompactionResult> {
   const items = await session.getItems();
   const beforeCharacters = estimateItemsCharacters(items);
-  const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
-  const maxCharacters = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+  const budget = options.modelContext?.compaction;
+  const maxItems = options.maxItems ?? budget?.maxItems ?? DEFAULT_MAX_ITEMS;
+  const maxCharacters = options.maxCharacters ?? budget?.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
   const tooManyItems = items.length > maxItems;
   const tooManyCharacters = beforeCharacters > maxCharacters;
   if (!tooManyItems && !tooManyCharacters) {
@@ -74,7 +98,10 @@ export async function ensureContextCompacted(
     };
   }
 
-  const recentCount = Math.max(2, Math.min(items.length - 1, options.recentItems ?? DEFAULT_RECENT_ITEMS));
+  const recentCount = Math.max(
+    2,
+    Math.min(items.length - 1, options.recentItems ?? budget?.recentItems ?? DEFAULT_RECENT_ITEMS),
+  );
   const splitAt = Math.max(1, items.length - recentCount);
   const olderItems = items.slice(0, splitAt);
   const recentItems = items.slice(splitAt);
@@ -96,7 +123,9 @@ export async function ensureContextCompacted(
       olderItems,
       recentItems,
       options.signal,
-      options.maxSummaryInputCharacters ?? DEFAULT_SUMMARY_INPUT_CHARACTERS,
+      options.maxSummaryInputCharacters ??
+        budget?.maxSummaryInputCharacters ??
+        DEFAULT_SUMMARY_INPUT_CHARACTERS,
     );
     const compactedItems = [
       createSummaryItem(summary),

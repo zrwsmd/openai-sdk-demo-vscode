@@ -16,6 +16,17 @@ const config = {
     allowedDevices: ['plc-main'],
     dryRun: true,
   },
+  modelContext: {
+    contextWindowTokens: 128_000,
+    reservedOutputTokens: 4_096,
+    safetyMarginTokens: 1_024,
+    compaction: {
+      maxItems: 48,
+      maxCharacters: 80_000,
+      recentItems: 16,
+      maxSummaryInputCharacters: 60_000,
+    },
+  },
 };
 
 // Lifecycle records remain readable from a fresh store instance.
@@ -34,6 +45,13 @@ if (
   restored.config.policyContext.allowedDevices?.[0] !== 'plc-main'
 ) {
   throw new Error('policy context was not persisted with the durable run');
+}
+if (
+  restored.config.modelContext?.contextWindowTokens !== 128_000 ||
+  restored.config.modelContext.compaction?.maxItems !== 48 ||
+  restored.config.modelContext.compaction.recentItems !== 16
+) {
+  throw new Error('model context profile was not persisted with the durable run');
 }
 let activeConflict = false;
 try {

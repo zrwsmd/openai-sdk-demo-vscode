@@ -123,6 +123,48 @@
           "default": "auto",
           "description": "Agent 编排模式:single 保持单角色，team 启用规划/安全审查/受控执行三角色"
         },
+        "plcAgent.context.contextWindowTokens": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "模型上下文窗口 token 数；0 表示未知/未配置，后续由通用 token 预算阶段处理"
+        },
+        "plcAgent.context.reservedOutputTokens": {
+          "type": "number",
+          "minimum": 0,
+          "default": 4096,
+          "description": "为模型输出预留的 token 数"
+        },
+        "plcAgent.context.safetyMarginTokens": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1024,
+          "description": "上下文预算的额外安全余量 token 数"
+        },
+        "plcAgent.context.compaction.maxItems": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 48,
+          "description": "旧版兼容压缩触发的会话条目上限"
+        },
+        "plcAgent.context.compaction.maxCharacters": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 80000,
+          "description": "旧版兼容压缩触发的字符数上限"
+        },
+        "plcAgent.context.compaction.recentItems": {
+          "type": "integer",
+          "minimum": 2,
+          "default": 16,
+          "description": "压缩时原样保留的最近会话条目数"
+        },
+        "plcAgent.context.compaction.maxSummaryInputCharacters": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60000,
+          "description": "单次摘要请求最多读取的历史字符数"
+        },
         "plcAgent.jev.enabled": {
           "type": "boolean",
           "default": true,

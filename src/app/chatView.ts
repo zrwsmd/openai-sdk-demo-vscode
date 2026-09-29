@@ -236,6 +236,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       maxRetries: cfg.get<number>('jev.maxRetries') ?? undefined,
       minConfidence: cfg.get<number>('jev.minConfidence') ?? undefined,
     };
+    const configuredContextWindowTokens = cfg.get<number>('context.contextWindowTokens') ?? 0;
+    const modelContext = {
+      ...(configuredContextWindowTokens > 0
+        ? { contextWindowTokens: Math.floor(configuredContextWindowTokens) }
+        : {}),
+      reservedOutputTokens: Math.max(
+        0,
+        Math.floor(cfg.get<number>('context.reservedOutputTokens') ?? 4_096),
+      ),
+      safetyMarginTokens: Math.max(
+        0,
+        Math.floor(cfg.get<number>('context.safetyMarginTokens') ?? 1_024),
+      ),
+      compaction: {
+        maxItems: Math.max(1, Math.floor(cfg.get<number>('context.compaction.maxItems') ?? 48)),
+        maxCharacters: Math.max(
+          1,
+          Math.floor(cfg.get<number>('context.compaction.maxCharacters') ?? 80_000),
+        ),
+        recentItems: Math.max(
+          2,
+          Math.floor(cfg.get<number>('context.compaction.recentItems') ?? 16),
+        ),
+        maxSummaryInputCharacters: Math.max(
+          1,
+          Math.floor(cfg.get<number>('context.compaction.maxSummaryInputCharacters') ?? 60_000),
+        ),
+      },
+    };
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -329,6 +358,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
+      modelContext,
       jev,
       showThinking,
       savedInPlugin: !!storedProfile || useLegacyProfile || !!formatKeyValue,
@@ -420,6 +450,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
       policyContext: live.policyContext,
+      modelContext: live.modelContext,
       orchestration: live.orchestration,
       extensions: createStAnalyzerConfigExtension(this.context),
       jev: {

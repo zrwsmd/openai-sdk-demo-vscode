@@ -15,6 +15,7 @@ import type {
   AgentDecisionService,
   JevDecisionSettings,
 } from "./decision/agentDecision";
+import type { ModelContextProfile } from "./contextManager";
 
 export interface AgentConfig {
   /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
@@ -46,6 +47,8 @@ export interface AgentConfig {
   audit?: (event: Omit<AuditEvent, "id" | "timestamp">) => void | Promise<void>;
   orchestration?: IndustrialAgentMode;
   actionPolicy?: ActionPolicy;
+  /** Generic model context and local-compaction profile. */
+  modelContext?: ModelContextProfile;
   /** Optional semantic decision layer; absent means existing logic only. */
   decisionService?: AgentDecisionService;
   /** Internal Jev settings. The API key is host-injected, never UI-configured. */

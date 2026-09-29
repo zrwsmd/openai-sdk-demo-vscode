@@ -18,6 +18,7 @@ import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
 import type { JevDecisionSettings } from './decision/agentDecision';
 import type { WorkflowId } from './workflow/types';
+import type { ModelContextProfile } from './contextManager';
 
 export type DurableRunStatus =
   | 'running'
@@ -41,6 +42,8 @@ export interface DurableRunConfig {
   workspaceRoots?: string[];
   /** Host-configured policy limits persisted with the run for safe resume/retry. */
   policyContext?: ToolPolicyOverrides;
+  /** Generic model context and local-compaction profile persisted for resume/retry. */
+  modelContext?: ModelContextProfile;
   orchestration?: IndustrialAgentMode;
   /** Host/plugin-owned JSON settings persisted with the run for resume/retry. */
   extensions?: Record<string, unknown>;
@@ -203,6 +206,26 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && Object.values(value).every((item) => isJsonValue(item, 1));
 }
 
+function isFiniteNonNegative(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isContextCompactionBudget(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  for (const key of ['maxItems', 'maxCharacters', 'recentItems', 'maxSummaryInputCharacters'] as const) {
+    if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
+  }
+  return true;
+}
+
+function isModelContextProfile(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  for (const key of ['contextWindowTokens', 'reservedOutputTokens', 'safetyMarginTokens'] as const) {
+    if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
+  }
+  return value.compaction === undefined || isContextCompactionBudget(value.compaction);
+}
+
 function isJevSettings(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') return false;
@@ -300,6 +323,7 @@ export class JsonRunStore implements RunStore {
             (!Array.isArray(run.config.policyContext.allowedDevices) ||
               run.config.policyContext.allowedDevices.some((device) => typeof device !== 'string'))) ||
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
+      (run.config.modelContext !== undefined && !isModelContextProfile(run.config.modelContext)) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       (run.config.extensions !== undefined && !isJsonObject(run.config.extensions)) ||
       (run.config.jev !== undefined && !isJevSettings(run.config.jev)) ||
