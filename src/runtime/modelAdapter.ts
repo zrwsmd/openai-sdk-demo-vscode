@@ -1,6 +1,7 @@
 import {
   OpenAIResponsesModel,
   type Model,
+  type ModelSettings,
 } from '@openai/agents';
 import OpenAI from 'openai';
 import { createAnthropicMessagesModel } from './anthropicMessagesModel';
@@ -27,6 +28,28 @@ export type AgentApiFormat =
   | typeof AGENT_API_FORMAT_RESPONSES
   | typeof AGENT_API_FORMAT_MESSAGES;
 export type AgentApiFormatSetting = AgentApiFormat | typeof AGENT_API_FORMAT_AUTO;
+
+/**
+ * Only the official OpenAI Responses endpoint is allowed to receive the
+ * server-side compaction setting. Custom gateways may expose a Responses-like
+ * route without implementing the same context-management contract.
+ */
+export function usesOfficialOpenAIResponses(
+  config: Pick<ModelAdapterConfig, 'provider' | 'apiFormat' | 'baseUrl'>,
+): boolean {
+  const provider = resolveProvider(config.provider);
+  return provider === AGENT_PROVIDER_OPENAI &&
+    !config.baseUrl.trim() &&
+    resolveApiFormat(config.baseUrl, config.apiFormat, provider) === AGENT_API_FORMAT_RESPONSES;
+}
+
+export function officialResponsesCompactionSettings(
+  config: Pick<ModelAdapterConfig, 'provider' | 'apiFormat' | 'baseUrl'>,
+): Pick<ModelSettings, 'contextManagement'> | undefined {
+  return usesOfficialOpenAIResponses(config)
+    ? { contextManagement: [{ type: 'compaction' }] }
+    : undefined;
+}
 
 export interface ModelAdapterConfig {
   provider?: AgentProvider;

@@ -38,6 +38,40 @@ async function fixture(executeAgent, planTask, team = {}) {
   return { dir, session, store, events, coordinator };
 }
 
+// Official OpenAI Responses uses server-side context management. The
+// coordinator must not also run the local summary compactor for that route.
+{
+  let compactCalls = 0;
+  const test = await fixture(
+    async () => ({
+      status: 'completed',
+      output: 'ok',
+      usage,
+      result: completedAgentResult('ok'),
+    }),
+    undefined,
+    {
+      compactContext: async () => {
+        compactCalls += 1;
+        throw new Error('local compactor should not run for official Responses');
+      },
+    },
+  );
+  await test.coordinator.start(
+    '你好',
+    {
+      ...config,
+      baseUrl: '',
+      apiFormat: 'responses',
+    },
+    'key',
+  );
+  if (compactCalls !== 0) {
+    throw new Error('official Responses route still invoked the local context compactor');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 function completedAgentResult(message) {
   return {
     protocolVersion: 1,

@@ -22,7 +22,42 @@ import {
   getStoredApiProfile,
   readStoredApiSettings,
   saveStoredApiProfile,
+  officialResponsesCompactionSettings,
+  usesOfficialOpenAIResponses,
 } from './agent.testbundle.mjs';
+
+assert.equal(
+  usesOfficialOpenAIResponses({
+    provider: 'openai',
+    apiFormat: 'responses',
+    baseUrl: '',
+  }),
+  true,
+);
+assert.deepEqual(
+  officialResponsesCompactionSettings({
+    provider: 'openai',
+    apiFormat: 'responses',
+    baseUrl: '',
+  }),
+  { contextManagement: [{ type: 'compaction' }] },
+);
+assert.equal(
+  usesOfficialOpenAIResponses({
+    provider: 'openai',
+    apiFormat: 'responses',
+    baseUrl: 'https://gateway.example/v1',
+  }),
+  false,
+);
+assert.equal(
+  officialResponsesCompactionSettings({
+    provider: 'openai',
+    apiFormat: 'chat_completions',
+    baseUrl: '',
+  }),
+  undefined,
+);
 
 const policy = new DefaultToolPolicy();
 

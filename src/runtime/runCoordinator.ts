@@ -20,6 +20,7 @@ import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
 import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
 import type { AgentConfig } from './agentConfig';
+import { usesOfficialOpenAIResponses } from './modelAdapter';
 import type { DeliveryContract } from './deliveryContract';
 import { AgentDecisionService } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
@@ -469,28 +470,32 @@ export class RunCoordinator {
         `[run:${run.id}] 用户(${userText.length}字符): ${userText.replace(/\r?\n/g, '⏎')}`,
       );
       const compactionController = new AbortController();
-      this.transitionController = compactionController;
-      const compaction = await this.compactContext(
-        this.session,
-        { ...config, apiKey },
-        { signal: compactionController.signal },
-      );
-      if (this.transitionController === compactionController) this.transitionController = undefined;
-      if (this.isClearing(generation)) return;
-      if (this.stopRequested || compaction.reason === 'aborted') {
-        this.stopRequested = false;
-        await this.pausePending(run, false);
-        return;
-      }
-      if (compaction.compacted) {
-        this.writeLog(
-          `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
+      if (usesOfficialOpenAIResponses(config)) {
+        this.writeLog('[context] 使用 OpenAI Responses 服务端自动压缩，跳过本地摘要压缩');
+      } else {
+        this.transitionController = compactionController;
+        const compaction = await this.compactContext(
+          this.session,
+          { ...config, apiKey },
+          { signal: compactionController.signal },
         );
-        sessionItems = await this.session.getItems();
-        run.sessionItemCountBefore = sessionItems.length;
-        await this.store.update(run);
-      } else if (compaction.error) {
-        this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
+        if (this.transitionController === compactionController) this.transitionController = undefined;
+        if (this.isClearing(generation)) return;
+        if (this.stopRequested || compaction.reason === 'aborted') {
+          this.stopRequested = false;
+          await this.pausePending(run, false);
+          return;
+        }
+        if (compaction.compacted) {
+          this.writeLog(
+            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
+          );
+          sessionItems = await this.session.getItems();
+          run.sessionItemCountBefore = sessionItems.length;
+          await this.store.update(run);
+        } else if (compaction.error) {
+          this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
+        }
       }
       if (this.isClearing(generation)) return;
       let workflowDecision: WorkflowDecision | undefined;

@@ -56,6 +56,7 @@ import {
 } from "./output";
 import {
   createModelAdapter,
+  officialResponsesCompactionSettings,
   type ModelAdapter,
 } from "./modelAdapter";
 import {
@@ -2148,6 +2149,7 @@ export async function runAgent(
       forcedTool && availableToolNames.has(forcedTool) ? forcedTool : undefined;
     const modelSettings = {
       parallelToolCalls: workflowRuntime?.parallelToolCalls ?? true,
+      ...(officialResponsesCompactionSettings(cfg) ?? {}),
       ...(availableForcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: availableForcedTool }
         : {}),
