@@ -9,6 +9,7 @@ import {
   applyTokenEstimateCalibration,
   estimateItemsTokens,
   estimateItemsCharacters,
+  estimateModelRequestTokenBreakdown,
   estimateModelRequestTokens,
   estimateTextTokens,
   extractChatMessages,
@@ -18,6 +19,7 @@ import {
   resolveContextCompactionPolicy,
   resolveInputTokenBudget,
   updateTokenEstimateCalibration,
+  updateTokenEstimateCalibrationFromRequest,
 } from './agent.testbundle.mjs';
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-context-test-'));
@@ -45,6 +47,18 @@ try {
       modelSettings: {},
     });
     assert.ok(requestEstimate > chineseTokens);
+    const requestBreakdown = estimateModelRequestTokenBreakdown({
+      systemInstructions: 'You are a helpful assistant.',
+      input: [{ type: 'message', role: 'user', content: '读取 main.st' }],
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: { path: { type: 'string' } } } }],
+      handoffs: [],
+      outputType: 'text',
+      modelSettings: {},
+    });
+    assert.ok(requestBreakdown.rawInputTokens > 0);
+    assert.ok(requestBreakdown.rawFixedOverheadTokens > 0);
+    assert.equal(requestBreakdown.rawTotalTokens, requestBreakdown.rawInputTokens + requestBreakdown.rawFixedOverheadTokens);
+    assert.equal(requestBreakdown.totalTokens, requestBreakdown.inputTokens + requestBreakdown.fixedOverheadTokens);
 
     const routeKey = modelContextCalibrationRouteKey({
       provider: 'openai',
@@ -88,6 +102,23 @@ try {
     assert.equal(second.factor, 1.625);
     assert.equal(applyTokenEstimateCalibration(100, second), 163);
     assert.ok(estimateItemsTokens([{ type: 'message', role: 'user', content: '你好' }], second) > 0);
+    const requestCalibration = updateTokenEstimateCalibrationFromRequest(
+      undefined,
+      routeKey,
+      100,
+      40,
+      180,
+    );
+    assert.equal(requestCalibration.historyFactor, 1.4);
+    assert.equal(requestCalibration.fixedOverheadTokens, 40);
+    assert.equal(
+      estimateItemsTokens([{ type: 'message', role: 'user', content: '你好' }], {
+        ...requestCalibration,
+        factor: 2,
+        historyFactor: 1,
+      }),
+      estimateItemsTokens([{ type: 'message', role: 'user', content: '你好' }]),
+    );
 
     const otherRoute = updateTokenEstimateCalibration(second, 'other-route', 100, 110);
     assert.equal(otherRoute.samples, 1);
@@ -99,6 +130,15 @@ try {
         safetyMarginTokens: 1_024,
       }),
       122_880,
+    );
+    assert.equal(
+      resolveInputTokenBudget({
+        contextWindowTokens: 128_000,
+        reservedOutputTokens: 4_096,
+        safetyMarginTokens: 1_024,
+        fixedRequestOverheadTokens: 4_096,
+      }),
+      118_784,
     );
     assert.equal(
       resolveInputTokenBudget({

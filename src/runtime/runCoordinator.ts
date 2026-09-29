@@ -457,13 +457,20 @@ export class RunCoordinator {
         return;
       }
       if (this.isClearing(generation)) return;
-      const previousCalibration = (await this.store.getLast())?.config.modelContext?.tokenCalibration;
+      const previousContext = (await this.store.getLast())?.config.modelContext;
+      const mainCalibrationRouteKey = modelContextCalibrationRouteKey(config);
+      const previousCalibration = previousContext?.tokenCalibrations?.[mainCalibrationRouteKey] ??
+        previousContext?.tokenCalibration;
       if (
-        previousCalibration?.routeKey === modelContextCalibrationRouteKey(config)
+        previousCalibration?.routeKey === mainCalibrationRouteKey
       ) {
         config.modelContext = {
           ...config.modelContext,
           tokenCalibration: previousCalibration,
+          tokenCalibrations: {
+            ...(config.modelContext?.tokenCalibrations ?? {}),
+            [mainCalibrationRouteKey]: previousCalibration,
+          },
         };
       }
       let sessionItems = await this.session.getItems();

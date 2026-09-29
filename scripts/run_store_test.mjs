@@ -30,11 +30,24 @@ const config = {
     contextWindowTokens: 128_000,
     reservedOutputTokens: 4_096,
     safetyMarginTokens: 1_024,
+    fixedRequestOverheadTokens: 4_096,
     tokenCalibration: {
       routeKey: calibrationRouteKey,
       factor: 1.15,
+      historyFactor: 1.08,
+      fixedOverheadTokens: 3_500,
       samples: 3,
       updatedAt: '2026-09-29T00:00:00.000Z',
+    },
+    tokenCalibrations: {
+      [calibrationRouteKey]: {
+        routeKey: calibrationRouteKey,
+        factor: 1.15,
+        historyFactor: 1.08,
+        fixedOverheadTokens: 3_500,
+        samples: 3,
+        updatedAt: '2026-09-29T00:00:00.000Z',
+      },
     },
     compaction: {
       maxInputTokens: 100_000,
@@ -65,7 +78,10 @@ if (
 }
 if (
   restored.config.modelContext?.contextWindowTokens !== 128_000 ||
+  restored.config.modelContext.fixedRequestOverheadTokens !== 4_096 ||
   restored.config.modelContext.tokenCalibration?.factor !== 1.15 ||
+  restored.config.modelContext.tokenCalibration?.historyFactor !== 1.08 ||
+  restored.config.modelContext.tokenCalibrations?.[calibrationRouteKey]?.fixedOverheadTokens !== 3_500 ||
   restored.config.modelContext.compaction.maxInputTokens !== 100_000 ||
   restored.config.modelContext.compaction?.maxItems !== 48 ||
   restored.config.modelContext.compaction.recentItems !== 16

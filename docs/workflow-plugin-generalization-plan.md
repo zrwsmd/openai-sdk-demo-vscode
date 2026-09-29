@@ -1113,10 +1113,22 @@ npm run test:jev
   - 测试结果：`npx tsc --noEmit`、`npm run compile`、`node
     scripts/context_manager_test.mjs`、`npm run test:batch` 全部通过。
 
-- [ ] **第二批：固定开销与校准口径（问题 3、4，以及补充的校准样本隔离）**
+- [x] **第二批：固定开销与校准口径（问题 3、4，以及补充的校准样本隔离）**
   - 将系统指令、工具定义、输出 schema 等固定开销纳入预算。
   - 区分历史条目估算和完整请求估算。
   - 按主 Agent/规划/分类/摘要等请求用途隔离 usage 校准。
+  - 实际改动：`ModelContextProfile` 增加固定请求开销和按用途保存的校准槽；
+    `estimateModelRequestTokenBreakdown()` 分离历史输入与固定请求部分；
+    历史压缩只使用 `historyFactor`，不再直接套用完整请求的总校准因子。
+  - 主 Agent、规划器、交付判定、Workflow 判定、Team 角色和上下文摘要器使用
+    独立校准范围；旧的 `tokenCalibration` 字段继续作为主 Agent 兼容入口。
+  - 配置增加 `context.fixedRequestOverheadTokens`，默认预留 4096 token；运行时
+    还会结合主 Agent 最近观测到的固定开销使用。
+  - 测试结果：`npx tsc --noEmit`、`npm run compile`、上下文专项测试、SDK
+    foundation、run store、`npm run test:batch` 和 `npm run test:jev` 通过。
+    `npm run test:agent` 需要本机 `127.0.0.1:8790` mock gateway；本次启动该
+    gateway 后仍在既有“交付后重复写入”场景触发审批恢复超轮次，未发现与本批
+    token 预算/校准改动相关的调用栈。
 
 - [ ] **第三批：会话生命周期与单轮中途检查（问题 5、6）**
   - 明确本地 session 和官方 Responses 服务端压缩的职责边界。

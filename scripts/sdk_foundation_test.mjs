@@ -105,6 +105,42 @@ assert.equal(
   assert.ok(profile.tokenCalibration.factor < firstFactor);
 }
 
+{
+  class ScopedFakeModel {
+    async getResponse() {
+      return { output: [], usage: { inputTokens: 120 } };
+    }
+  }
+
+  const profile = {};
+  const createScopedAdapter = (usageScope) => createModelAdapter({
+    provider: 'openai',
+    apiFormat: 'chat_completions',
+    baseUrl: 'https://gateway.example/v1',
+    apiKey: 'key',
+    model: 'model-a',
+    modelContext: profile,
+    usageScope,
+  }, {
+    createChatCompletionsModel: () => new ScopedFakeModel(),
+  });
+  const request = {
+    systemInstructions: 'system',
+    input: [{ type: 'message', role: 'user', content: 'hello' }],
+    tools: [],
+    handoffs: [],
+    outputType: 'text',
+    modelSettings: {},
+  };
+
+  await createScopedAdapter('planner').model.getResponse(request);
+  assert.equal(profile.tokenCalibration, undefined);
+  assert.equal(Object.keys(profile.tokenCalibrations ?? {}).length, 1);
+  await createScopedAdapter('main_agent').model.getResponse(request);
+  assert.equal(profile.tokenCalibration.samples, 1);
+  assert.equal(Object.keys(profile.tokenCalibrations ?? {}).length, 2);
+}
+
 const policy = new DefaultToolPolicy();
 
 assert.deepEqual(policy.evaluate('read_file', { path: 'main.st' }, { workspaceRoot: '.' }), {

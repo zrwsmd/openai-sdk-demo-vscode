@@ -63,6 +63,8 @@ export interface ModelAdapterConfig {
   apiKey: string;
   model: string;
   modelContext?: ModelContextProfile;
+  /** Separates usage calibration for main execution and helper roles. */
+  usageScope?: string;
 }
 
 export interface ModelAdapter {
@@ -176,7 +178,12 @@ export function createModelAdapter(
     apiFormat: route.apiFormat,
   });
   Object.assign(adapter, {
-    model: observeModelUsage(adapter.model, config.modelContext, routeKey),
+    model: observeModelUsage(
+      adapter.model,
+      config.modelContext,
+      routeKey,
+      config.usageScope,
+    ),
   });
   return adapter;
 }

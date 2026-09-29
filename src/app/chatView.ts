@@ -249,6 +249,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         0,
         Math.floor(cfg.get<number>('context.safetyMarginTokens') ?? 1_024),
       ),
+      fixedRequestOverheadTokens: Math.max(
+        0,
+        Math.floor(cfg.get<number>('context.fixedRequestOverheadTokens') ?? 4_096),
+      ),
       compaction: {
         maxInputTokens: Math.max(
           0,

@@ -46,28 +46,76 @@ export function estimateItemsTokens(
   items: readonly AgentInputItem[],
   calibration?: TokenEstimateCalibration,
 ): number {
-  return applyTokenEstimateCalibration(estimateTextTokens(safeJson(items)), calibration);
+  const rawTokens = estimateTextTokens(safeJson(items));
+  return applyNumericCalibration(
+    rawTokens,
+    calibration?.historyFactor ?? calibration?.factor,
+  );
 }
 
-/** Estimates the complete generic SDK request, including instructions and tool schemas. */
-export function estimateModelRequestTokens(request: ModelRequest): number {
-  const requestBody = {
+export interface ModelRequestTokenBreakdown {
+  inputTokens: number;
+  fixedOverheadTokens: number;
+  totalTokens: number;
+  rawInputTokens: number;
+  rawFixedOverheadTokens: number;
+  rawTotalTokens: number;
+}
+
+/**
+ * Estimates the history and fixed request portions separately. Keeping the
+ * portions separate prevents a tool/schema-heavy request's total correction
+ * factor from being incorrectly applied to history alone.
+ */
+export function estimateModelRequestTokenBreakdown(
+  request: ModelRequest,
+  calibration?: TokenEstimateCalibration,
+): ModelRequestTokenBreakdown {
+  const rawInputTokens = estimateTextTokens(safeJson(request.input));
+  const rawFixedOverheadTokens = estimateTextTokens(safeJson({
     systemInstructions: request.systemInstructions,
-    input: request.input,
     tools: request.tools,
     handoffs: request.handoffs,
     outputType: request.outputType,
     modelSettings: request.modelSettings,
     prompt: request.prompt,
+  })) + 8;
+  const inputTokens = applyNumericCalibration(
+    rawInputTokens,
+    calibration?.historyFactor ?? calibration?.factor,
+  );
+  const fixedOverheadTokens = applyNumericCalibration(
+    rawFixedOverheadTokens,
+    calibration?.fixedOverheadTokens === undefined
+      ? undefined
+      : calibration.fixedOverheadTokens / Math.max(1, rawFixedOverheadTokens),
+  );
+  return {
+    inputTokens,
+    fixedOverheadTokens,
+    totalTokens: inputTokens + fixedOverheadTokens,
+    rawInputTokens,
+    rawFixedOverheadTokens,
+    rawTotalTokens: rawInputTokens + rawFixedOverheadTokens,
   };
-  return estimateTextTokens(safeJson(requestBody)) + 8;
+}
+
+/** Estimates the complete generic SDK request, including instructions and tool schemas. */
+export function estimateModelRequestTokens(request: ModelRequest): number {
+  return estimateModelRequestTokenBreakdown(request).totalTokens;
 }
 
 export function applyTokenEstimateCalibration(
   estimatedTokens: number,
   calibration?: TokenEstimateCalibration,
 ): number {
-  const factor = calibration?.factor;
+  return applyNumericCalibration(estimatedTokens, calibration?.factor);
+}
+
+function applyNumericCalibration(
+  estimatedTokens: number,
+  factor: number | undefined,
+): number {
   if (typeof factor !== 'number' || !Number.isFinite(factor) || factor <= 0) {
     return estimatedTokens;
   }
@@ -108,12 +156,76 @@ export function updateTokenEstimateCalibration(
   };
 }
 
+/**
+ * Updates separate request-shape calibration from one complete model call.
+ *
+ * Providers report only total input tokens, so the fixed portion is anchored
+ * to the structural estimate and the residual is used to learn historyFactor.
+ * This is intentionally conservative: it never applies the total-request
+ * factor directly to history.
+ */
+export function updateTokenEstimateCalibrationFromRequest(
+  previous: TokenEstimateCalibration | undefined,
+  routeKey: string,
+  estimatedHistoryTokens: number,
+  estimatedFixedOverheadTokens: number,
+  actualInputTokens: number,
+): TokenEstimateCalibration | undefined {
+  if (
+    !routeKey ||
+    !Number.isFinite(estimatedHistoryTokens) ||
+    estimatedHistoryTokens <= 0 ||
+    !Number.isFinite(estimatedFixedOverheadTokens) ||
+    estimatedFixedOverheadTokens < 0 ||
+    !Number.isFinite(actualInputTokens) ||
+    actualInputTokens <= 0
+  ) {
+    return previous?.routeKey === routeKey ? previous : undefined;
+  }
+
+  const rawTotal = estimatedHistoryTokens + estimatedFixedOverheadTokens;
+  const totalSampleFactor = clamp(
+    actualInputTokens / Math.max(1, rawTotal),
+    MIN_CALIBRATION_FACTOR,
+    MAX_CALIBRATION_FACTOR,
+  );
+  const residualHistoryTokens = Math.max(1, actualInputTokens - estimatedFixedOverheadTokens);
+  const historySampleFactor = clamp(
+    residualHistoryTokens / estimatedHistoryTokens,
+    MIN_CALIBRATION_FACTOR,
+    MAX_CALIBRATION_FACTOR,
+  );
+  const sameRoute = previous?.routeKey === routeKey;
+  const previousHistoryFactor = previous?.historyFactor ?? previous?.factor ?? 1;
+  const previousFixedOverhead = previous?.fixedOverheadTokens ?? estimatedFixedOverheadTokens;
+  const factor = sameRoute
+    ? previous.factor * (1 - CALIBRATION_ALPHA) + totalSampleFactor * CALIBRATION_ALPHA
+    : totalSampleFactor;
+  const historyFactor = sameRoute
+    ? previousHistoryFactor * (1 - CALIBRATION_ALPHA) + historySampleFactor * CALIBRATION_ALPHA
+    : historySampleFactor;
+  const fixedOverheadTokens = sameRoute
+    ? previousFixedOverhead * (1 - CALIBRATION_ALPHA) +
+      estimatedFixedOverheadTokens * CALIBRATION_ALPHA
+    : estimatedFixedOverheadTokens;
+
+  return {
+    routeKey,
+    factor: clamp(factor, MIN_CALIBRATION_FACTOR, MAX_CALIBRATION_FACTOR),
+    historyFactor: clamp(historyFactor, MIN_CALIBRATION_FACTOR, MAX_CALIBRATION_FACTOR),
+    fixedOverheadTokens: Math.max(0, Math.ceil(fixedOverheadTokens)),
+    samples: sameRoute ? Math.min(1_000, previous.samples + 1) : 1,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 export function modelContextCalibrationRouteKey(
   config: {
     provider?: string;
     apiFormat?: string;
     baseUrl: string;
     model: string;
+    usageScope?: string;
   },
 ): string {
   const provider = config.provider ?? 'openai';
@@ -126,11 +238,13 @@ export function modelContextCalibrationRouteKey(
         ? 'chat_completions'
         : 'responses'
     : configuredFormat;
+  const usageScope = config.usageScope?.trim() || 'main_agent';
   const route = JSON.stringify([
     provider,
     apiFormat,
     normalizedBaseUrl,
     config.model.trim(),
+    ...(usageScope === 'main_agent' ? [] : [usageScope]),
   ]);
   return `context-route-v1:${createHash('sha256').update(route).digest('hex').slice(0, 24)}`;
 }
@@ -140,6 +254,7 @@ export function observeModelUsage(
   model: string | Model,
   profile: ModelContextProfile | undefined,
   routeKey: string,
+  usageScope = 'main_agent',
 ): string | Model {
   if (typeof model === 'string' || !profile) return model;
 
@@ -148,17 +263,17 @@ export function observeModelUsage(
       const value = Reflect.get(target, property, target) as unknown;
       if (property === 'getResponse' && typeof value === 'function') {
         return async (request: ModelRequest): Promise<ModelResponse> => {
-          const estimate = estimateModelRequestTokens(request);
+          const estimate = estimateModelRequestTokenBreakdown(request);
           const response = await value.call(target, request) as ModelResponse;
-          recordUsage(profile, routeKey, estimate, response?.usage?.inputTokens);
+          recordUsage(profile, routeKey, usageScope, estimate, response?.usage?.inputTokens);
           return response;
         };
       }
       if (property === 'getStreamedResponse' && typeof value === 'function') {
         return (request: ModelRequest): AsyncIterable<StreamEvent> => {
-          const estimate = estimateModelRequestTokens(request);
+          const estimate = estimateModelRequestTokenBreakdown(request);
           const source = value.call(target, request) as AsyncIterable<StreamEvent>;
-          return observeStreamUsage(source, profile, routeKey, estimate);
+          return observeStreamUsage(source, profile, routeKey, usageScope, estimate);
         };
       }
       return typeof value === 'function' ? value.bind(target) : value;
@@ -170,14 +285,16 @@ async function* observeStreamUsage(
   source: AsyncIterable<StreamEvent>,
   profile: ModelContextProfile,
   routeKey: string,
-  estimatedTokens: number,
+  usageScope: string,
+  estimate: ModelRequestTokenBreakdown,
 ): AsyncGenerator<StreamEvent> {
   for await (const event of source) {
     if (event.type === 'response_done') {
       recordUsage(
         profile,
         routeKey,
-        estimatedTokens,
+        usageScope,
+        estimate,
         event.response?.usage?.inputTokens,
       );
     }
@@ -188,16 +305,28 @@ async function* observeStreamUsage(
 function recordUsage(
   profile: ModelContextProfile,
   routeKey: string,
-  estimatedTokens: number,
+  usageScope: string,
+  estimate: ModelRequestTokenBreakdown,
   actualInputTokens: number | undefined,
 ): void {
   if (typeof actualInputTokens !== 'number') return;
-  profile.tokenCalibration = updateTokenEstimateCalibration(
-    profile.tokenCalibration,
+  const previous = profile.tokenCalibrations?.[routeKey] ??
+    (profile.tokenCalibration?.routeKey === routeKey ? profile.tokenCalibration : undefined);
+  const calibration = updateTokenEstimateCalibrationFromRequest(
+    previous,
     routeKey,
-    estimatedTokens,
+    estimate.rawInputTokens,
+    estimate.rawFixedOverheadTokens,
     actualInputTokens,
   );
+  if (!calibration) return;
+  profile.tokenCalibrations = {
+    ...(profile.tokenCalibrations ?? {}),
+    [routeKey]: calibration,
+  };
+  if (usageScope === 'main_agent') {
+    profile.tokenCalibration = calibration;
+  }
 }
 
 function safeJson(value: unknown): string {

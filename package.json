@@ -141,6 +141,12 @@
           "default": 1024,
           "description": "上下文预算的额外安全余量 token 数"
         },
+        "plcAgent.context.fixedRequestOverheadTokens": {
+          "type": "number",
+          "minimum": 0,
+          "default": 4096,
+          "description": "系统指令、工具定义、输出 schema 等非历史输入的预留 token 数；运行时会结合主 Agent 最近观测值使用"
+        },
         "plcAgent.context.compaction.maxInputTokens": {
           "type": "integer",
           "minimum": 0,

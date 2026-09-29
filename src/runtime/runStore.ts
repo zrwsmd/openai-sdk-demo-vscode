@@ -220,22 +220,45 @@ function isContextCompactionBudget(value: unknown): boolean {
 
 function isModelContextProfile(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  for (const key of ['contextWindowTokens', 'reservedOutputTokens', 'safetyMarginTokens'] as const) {
+  for (const key of [
+    'contextWindowTokens',
+    'reservedOutputTokens',
+    'safetyMarginTokens',
+    'fixedRequestOverheadTokens',
+  ] as const) {
     if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
   }
   if (value.compaction !== undefined && !isContextCompactionBudget(value.compaction)) return false;
-  if (value.tokenCalibration === undefined) return true;
+  if (value.tokenCalibration !== undefined && !isTokenEstimateCalibration(value.tokenCalibration)) {
+    return false;
+  }
+  if (value.tokenCalibrations !== undefined) {
+    if (!isRecord(value.tokenCalibrations)) return false;
+    if (Object.values(value.tokenCalibrations).some((calibration) => !isTokenEstimateCalibration(calibration))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isTokenEstimateCalibration(value: unknown): boolean {
+  if (!isRecord(value)) return false;
   return (
-    isRecord(value.tokenCalibration) &&
-    typeof value.tokenCalibration.routeKey === 'string' &&
-    value.tokenCalibration.routeKey.length > 0 &&
-    typeof value.tokenCalibration.factor === 'number' &&
-    Number.isFinite(value.tokenCalibration.factor) &&
-    value.tokenCalibration.factor >= 0.5 &&
-    value.tokenCalibration.factor <= 3 &&
-    Number.isSafeInteger(value.tokenCalibration.samples) &&
-    (value.tokenCalibration.samples as number) > 0 &&
-    typeof value.tokenCalibration.updatedAt === 'string'
+    typeof value.routeKey === 'string' &&
+    value.routeKey.length > 0 &&
+    typeof value.factor === 'number' &&
+    Number.isFinite(value.factor) &&
+    value.factor >= 0.5 &&
+    value.factor <= 3 &&
+    (value.historyFactor === undefined ||
+      (typeof value.historyFactor === 'number' &&
+        Number.isFinite(value.historyFactor) &&
+        value.historyFactor >= 0.5 &&
+        value.historyFactor <= 3)) &&
+    (value.fixedOverheadTokens === undefined || isFiniteNonNegative(value.fixedOverheadTokens)) &&
+    Number.isSafeInteger(value.samples) &&
+    (value.samples as number) > 0 &&
+    typeof value.updatedAt === 'string'
   );
 }
 

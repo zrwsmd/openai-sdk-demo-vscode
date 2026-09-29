@@ -1334,8 +1334,11 @@ export type TurnUsage = UsageSummary;
 export const MAX_TURNS = 10;
 const MAX_COMPLETION_GATE_RETRIES = 3;
 
-export function buildModelAdapter(cfg: AgentConfig): ModelAdapter {
-  return createModelAdapter(cfg, {
+export function buildModelAdapter(
+  cfg: AgentConfig,
+  usageScope = "main_agent",
+): ModelAdapter {
+  return createModelAdapter({ ...cfg, usageScope }, {
     fetchImpl: makeLoggingFetch() as typeof fetch,
     createChatCompletionsModel: () => {
       // Keep the existing guarded gateway implementation unchanged. An
@@ -1365,7 +1368,7 @@ export async function planTask(
   history: AgentInputItem[] = [],
 ): Promise<TaskPlan | undefined> {
   if (isSimpleSingleTurnRequest(userText)) return undefined;
-  const adapter = buildModelAdapter(cfg);
+  const adapter = buildModelAdapter(cfg, "planner");
   const planner = new Agent({
     name: "通用任务规划器",
     model: adapter.model,
@@ -1419,7 +1422,7 @@ export async function classifyDeliveryContract(
       `[delivery] Jev 判断需要交付物(${hint.deliveryConfidence.toFixed(2)})，继续使用完整交付契约判定`,
     );
   }
-  const adapter = buildModelAdapter(cfg);
+  const adapter = buildModelAdapter(cfg, "delivery_classifier");
   const classifier = new Agent({
     name: "交付契约判定器",
     model: adapter.model,
@@ -1474,7 +1477,7 @@ export async function classifyWorkflowDecision(
   workflows: readonly WorkflowDescriptor[] = [],
 ): Promise<WorkflowModelDecision | undefined> {
   if (!workflows.length) return undefined;
-  const adapter = buildModelAdapter(cfg);
+  const adapter = buildModelAdapter(cfg, "workflow_classifier");
   const workflowList = workflows
     .map((workflow) =>
       `- ${workflow.id}: ${workflow.title}; ${workflow.description}; runtimeManaged=${workflow.runtimeManaged}`,
@@ -1723,7 +1726,7 @@ async function runTeamRole<T>(
   input: string | AgentInputItem[],
   signal?: AbortSignal,
 ): Promise<T> {
-  const adapter = buildModelAdapter(cfg);
+  const adapter = buildModelAdapter(cfg, "team_role");
   const role = new Agent({
     name,
     model: adapter.model,

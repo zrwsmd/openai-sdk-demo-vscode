@@ -33,6 +33,10 @@ export interface ContextCompactionBudget extends LegacyContextCompactionBudget {
 export interface TokenEstimateCalibration {
   routeKey: string;
   factor: number;
+  /** Calibration for the input history portion only. */
+  historyFactor?: number;
+  /** Estimated fixed request overhead for this route's request shape. */
+  fixedOverheadTokens?: number;
   samples: number;
   updatedAt: string;
 }
@@ -45,8 +49,16 @@ export interface ModelContextProfile {
   reservedOutputTokens?: number;
   /** Extra input headroom kept as a safety margin. */
   safetyMarginTokens?: number;
+  /**
+   * Baseline tokens consumed by system instructions, tools, schemas and other
+   * non-history request fields. The learned main-agent calibration can add to
+   * this value for the next turn.
+   */
+  fixedRequestOverheadTokens?: number;
   /** Automatically learned estimate correction for this model/API route. */
   tokenCalibration?: TokenEstimateCalibration;
+  /** Per-request-purpose calibration; tokenCalibration remains the legacy main-agent slot. */
+  tokenCalibrations?: Record<string, TokenEstimateCalibration>;
   /** Local-compaction limits; token budget takes precedence when available. */
   compaction?: ContextCompactionBudget;
 }
@@ -338,18 +350,26 @@ export function resolveInputTokenBudget(
 
   const explicit = positiveInteger(profile.compaction?.maxInputTokens);
   const contextWindow = positiveInteger(profile.contextWindowTokens);
+  const fixedRequestOverhead = Math.max(
+    nonNegativeInteger(profile.fixedRequestOverheadTokens),
+    nonNegativeInteger(profile.tokenCalibration?.fixedOverheadTokens),
+  );
   let derived: number | undefined;
   if (contextWindow !== undefined) {
     const reservedOutput = nonNegativeInteger(profile.reservedOutputTokens);
     const safetyMargin = nonNegativeInteger(profile.safetyMarginTokens);
-    const available = contextWindow - reservedOutput - safetyMargin;
+    const available = contextWindow - reservedOutput - safetyMargin - fixedRequestOverhead;
     if (available <= 0) return undefined;
     derived = available;
   }
 
-  if (explicit === undefined) return derived;
-  if (derived === undefined) return explicit;
-  return Math.min(explicit, derived);
+  const explicitAvailable = explicit === undefined
+    ? undefined
+    : explicit - fixedRequestOverhead;
+  if (explicitAvailable !== undefined && explicitAvailable <= 0) return undefined;
+  if (explicitAvailable === undefined) return derived;
+  if (derived === undefined) return explicitAvailable;
+  return Math.min(explicitAvailable, derived);
 }
 
 export async function summarizeContextWithModel(
@@ -362,7 +382,7 @@ export async function summarizeContextWithModel(
   protectedUserItems: AgentInputItem[] = [],
 ): Promise<ContextSummary> {
   signal?.throwIfAborted();
-  const adapter = buildModelAdapter(config);
+  const adapter = buildModelAdapter(config, 'context_summarizer');
   const summarizer = new Agent({
     name: 'PLC Context Summarizer',
     model: adapter.model,
