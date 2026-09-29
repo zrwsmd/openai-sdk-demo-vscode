@@ -1163,6 +1163,22 @@ npm run test:jev
     `sdk_foundation_test` 全部通过；新增回归覆盖字符串模型解析后的普通/流式
     usage 校准以及缺少解析器时的可见失败。
 
+- [x] **最终验收：兼容阈值收敛与发布边界确认**
+  - 确认 `maxItems` / `maxCharacters` 已不再参与有效 token 预算的竞争：
+    `resolveInputTokenBudget()` 返回有效预算时，压缩只按 token 判断。
+  - 确认没有模型上下文窗口、显式 token 上限或足够输入余量时，旧条数/字符阈值
+    仍作为确定性的安全回退，避免旧配置和历史运行记录失效。
+  - `recentItems` 与 `maxSummaryInputCharacters` 保留为摘要形状控制参数，不属于
+    旧触发阈值，不能跟 `maxItems` / `maxCharacters` 一起删除。
+  - VS Code 配置说明已明确旧字段只用于兼容 fallback，新配置应优先设置
+    `context.contextWindowTokens` 或 `context.compaction.maxInputTokens`。
+  - 本阶段不删除旧字段的读取和持久化校验；待所有宿主完成 token 预算迁移后，
+    再单独做配置项下线，避免无上下文配置时出现无保护的历史增长。
+  - 未修改 `st-analyze`、`src/analysis/*` 或 ST 工具业务实现。
+  - 最终验收结果：`npx tsc --noEmit`、`npm run compile`、上下文专项测试、
+    `npm run test:batch`、`npm run test:workflow`、`npm run test:st`、
+    `npm run test:jev` 和 `git diff --check` 均通过。
+
 ### 7.3 第一批验收标准
 
 - 压缩前较早历史中的用户消息在压缩后仍可逐字找到。

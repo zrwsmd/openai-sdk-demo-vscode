@@ -157,13 +157,13 @@
           "type": "integer",
           "minimum": 1,
           "default": 48,
-          "description": "旧版兼容压缩触发的会话条目上限"
+          "description": "兼容旧配置：仅在未配置有效模型上下文预算时作为条数兜底；token 预算有效时忽略"
         },
         "plcAgent.context.compaction.maxCharacters": {
           "type": "integer",
           "minimum": 1,
           "default": 80000,
-          "description": "旧版兼容压缩触发的字符数上限"
+          "description": "兼容旧配置：仅在未配置有效模型上下文预算时作为字符数兜底；token 预算有效时忽略"
         },
         "plcAgent.context.compaction.recentItems": {
           "type": "integer",
