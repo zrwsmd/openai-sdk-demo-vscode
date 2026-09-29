@@ -5,6 +5,7 @@ import type { AgentConfig } from './agentConfig';
 import { estimateItemsTokens } from './contextTokenEstimator';
 
 export const CONTEXT_SUMMARY_MARKER = '[plc-agent-context-summary:v1]';
+export const CONTEXT_TOOL_RESULT_CLIP_MARKER = '[tool-result-context-clipped]';
 
 export interface ContextManagedSession {
   getItems(limit?: number): Promise<AgentInputItem[]>;
@@ -67,6 +68,8 @@ export type ContextSummarizer = (
   recentItems: AgentInputItem[],
   signal?: AbortSignal,
   maxInputCharacters?: number,
+  priorSummaryItems?: AgentInputItem[],
+  protectedUserItems?: AgentInputItem[],
 ) => Promise<ContextSummary>;
 
 export interface ContextManagerOptions {
@@ -171,18 +174,28 @@ export async function ensureContextCompacted(
     };
   }
 
+  const priorSummaryItems = [...olderItems, ...recentItems].filter(isContextSummaryItem);
+  const olderContentItems = olderItems.filter((item) => !isContextSummaryItem(item));
+  const recentContentItems = recentItems.filter((item) => !isContextSummaryItem(item));
+  const protectedUserItems = olderContentItems.filter(isUserMessageItem);
+  const summaryInputOlderItems = olderContentItems.map(compactToolResultItem);
+  const summaryInputRecentItems = recentContentItems.map(compactToolResultItem);
+
   try {
     const summarize = options.summarize ?? summarizeContextWithModel;
     const summary = await summarize(
       config,
-      olderItems,
-      recentItems,
+      summaryInputOlderItems,
+      summaryInputRecentItems,
       options.signal,
       policy.legacy.maxSummaryInputCharacters,
+      priorSummaryItems,
+      protectedUserItems,
     );
     const compactedItems = [
       createSummaryItem(summary),
-      ...recentItems,
+      ...protectedUserItems,
+      ...recentContentItems.map(compactToolResultItem),
     ];
     await session.replaceItems(compactedItems);
     const afterCharacters = estimateItemsCharacters(compactedItems);
@@ -221,18 +234,51 @@ export async function ensureContextCompacted(
         reason: 'aborted',
       };
     }
-    return {
-      compacted: false,
-      beforeItems: items.length,
-      afterItems: items.length,
-      beforeCharacters,
-      afterCharacters: beforeCharacters,
-      beforeTokens,
-      afterTokens: beforeTokens,
-      inputBudgetTokens,
-      triggerMode,
-      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-    };
+    const originalError = error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error);
+    const fallbackItems = [
+      createEmergencySummaryItem(),
+      ...priorSummaryItems,
+      ...protectedUserItems,
+      ...recentContentItems.map(compactToolResultItem),
+    ];
+    try {
+      await session.replaceItems(fallbackItems);
+      const afterCharacters = estimateItemsCharacters(fallbackItems);
+      const afterTokens = inputBudgetTokens === undefined
+        ? undefined
+        : estimateItemsTokens(fallbackItems, modelContext?.tokenCalibration);
+      return {
+        compacted: true,
+        beforeItems: items.length,
+        afterItems: fallbackItems.length,
+        beforeCharacters,
+        afterCharacters,
+        beforeTokens,
+        afterTokens,
+        inputBudgetTokens,
+        triggerMode,
+        reason: 'summary_failed_emergency_fallback',
+        error: originalError,
+      };
+    } catch (fallbackError) {
+      const fallbackErrorText = fallbackError instanceof Error
+        ? `${fallbackError.name}: ${fallbackError.message}`
+        : String(fallbackError);
+      return {
+        compacted: false,
+        beforeItems: items.length,
+        afterItems: items.length,
+        beforeCharacters,
+        afterCharacters: beforeCharacters,
+        beforeTokens,
+        afterTokens: beforeTokens,
+        inputBudgetTokens,
+        triggerMode,
+        error: `${originalError}; emergency fallback failed: ${fallbackErrorText}`,
+      };
+    }
   }
 }
 
@@ -312,6 +358,8 @@ export async function summarizeContextWithModel(
   recentItems: AgentInputItem[],
   signal?: AbortSignal,
   maxInputCharacters = LEGACY_CONTEXT_COMPACTION_DEFAULTS.maxSummaryInputCharacters,
+  priorSummaryItems: AgentInputItem[] = [],
+  protectedUserItems: AgentInputItem[] = [],
 ): Promise<ContextSummary> {
   signal?.throwIfAborted();
   const adapter = buildModelAdapter(config);
@@ -323,7 +371,8 @@ export async function summarizeContextWithModel(
       '你是长对话上下文压缩器，只做摘要，不执行工具。' +
       '把较早历史压缩成后续任务仍需要的事实、约束、用户偏好、重要文件、未完成事项和风险。' +
       '不要发明历史里没有的信息；不要保留寒暄、重复内容或已经无关的细节。' +
-      '最近若干条原文会被完整保留，因此只摘要更早历史，并在摘要中承接已有的历史压缩摘要。' +
+      '最近若干条原文会被保留，因此只摘要更早历史。已有的历史压缩摘要和用户约束会单独提供，' +
+      '必须把它们当作已确认事实合并，不能把它们当普通对话重新压缩。' +
       '必须严格返回 schema，不要输出 markdown。',
   });
   const input = [
@@ -332,6 +381,12 @@ export async function summarizeContextWithModel(
       role: 'user',
       content: [
         '请压缩以下较早会话历史，供后续 PLC/工作区 Agent 继续使用。',
+        '',
+        '已有的历史压缩摘要（作为已确认事实合并，不要重新淡化）：',
+        serializeItemsForSummary(priorSummaryItems, Math.min(12_000, Math.floor(maxInputCharacters / 4))),
+        '',
+        '必须原样保留的用户消息/约束（不要改写成相反含义）：',
+        serializeItemsForSummary(protectedUserItems, Math.min(16_000, Math.floor(maxInputCharacters / 3))),
         '',
         '较早历史：',
         serializeItemsForSummary(olderItems, maxInputCharacters),
@@ -356,6 +411,23 @@ export function createSummaryItem(summary: ContextSummary): AgentInputItem {
     role: 'system',
     content: renderContextSummary(summary),
   } as unknown as AgentInputItem;
+}
+
+function createEmergencySummaryItem(): AgentInputItem {
+  return createSummaryItem({
+    summary: '上下文摘要模型失败，运行时已执行保守裁剪。未被保留的旧工具细节不可直接推断，必要时请重新读取。',
+    userPreferences: [],
+    durableFacts: [],
+    importantFiles: [],
+    openTasks: [],
+    risks: ['本条是摘要失败后的保底记录，不是完整历史摘要。'],
+  });
+}
+
+export function isContextSummaryItem(item: AgentInputItem): boolean {
+  const value = item as Record<string, unknown>;
+  if (value.type !== 'message' || value.role !== 'system') return false;
+  return messageText(value.content).includes(CONTEXT_SUMMARY_MARKER);
 }
 
 export function renderContextSummary(summary: ContextSummary): string {
@@ -388,6 +460,57 @@ function serializeItemsForSummary(items: AgentInputItem[], maxCharacters: number
     .map((item, index) => `#${index + 1} ${serializeItemForTranscript(item)}`)
     .join('\n');
   return middleClip(text, maxCharacters);
+}
+
+function isUserMessageItem(item: AgentInputItem): boolean {
+  const value = item as Record<string, unknown>;
+  return value.type === 'message' && value.role === 'user';
+}
+
+function isToolResultItem(item: AgentInputItem): boolean {
+  const value = item as Record<string, unknown>;
+  const type = typeof value.type === 'string' ? value.type : '';
+  return (
+    type === 'function_call_result' ||
+    type === 'function_call_output' ||
+    type === 'tool_result' ||
+    type === 'tool_output' ||
+    value.role === 'tool'
+  );
+}
+
+function compactToolResultItem(item: AgentInputItem): AgentInputItem {
+  if (!isToolResultItem(item)) return item;
+  const value = item as Record<string, unknown>;
+  const field = Object.prototype.hasOwnProperty.call(value, 'output')
+    ? 'output'
+    : Object.prototype.hasOwnProperty.call(value, 'content')
+      ? 'content'
+      : undefined;
+  if (!field) return item;
+  const original = messageText(value[field]);
+  const compacted = compactToolResultText(original);
+  if (compacted === original) return item;
+  return {
+    ...value,
+    [field]: compacted,
+  } as unknown as AgentInputItem;
+}
+
+function compactToolResultText(value: string, maxCharacters = 4_000): string {
+  const lines = value.split(/\r?\n/);
+  if (lines.length > 12) {
+    const head = lines.slice(0, 6).join('\n');
+    const tail = lines.slice(-6).join('\n');
+    return [
+      CONTEXT_TOOL_RESULT_CLIP_MARKER,
+      head,
+      `...[工具回执中间省略 ${Math.max(0, lines.length - 12)} 行]...`,
+      tail,
+    ].join('\n');
+  }
+  if (value.length <= maxCharacters) return value;
+  return `${CONTEXT_TOOL_RESULT_CLIP_MARKER}\n${middleClip(value, maxCharacters)}`;
 }
 
 function serializeItemForTranscript(item: AgentInputItem): string {

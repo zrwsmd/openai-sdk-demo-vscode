@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   CONTEXT_SUMMARY_MARKER,
+  CONTEXT_TOOL_RESULT_CLIP_MARKER,
   ensureContextCompacted,
   applyTokenEstimateCalibration,
   estimateItemsTokens,
@@ -165,14 +166,131 @@ try {
     assert.equal(result.triggerMode, 'legacy_threshold');
     assert.equal(summarizedOlder, 4);
     const items = await session.getItems();
-    assert.equal(items.length, 3);
+    assert.equal(items.length, 5);
     assert.equal(items[0].role, 'system');
     assert.match(items[0].content, new RegExp(CONTEXT_SUMMARY_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.equal(items[1].content, 'recent user');
-    assert.equal(items[2].content, 'recent assistant');
+    assert.equal(items[1].content, 'old user 1');
+    assert.equal(items[2].content, 'old user 2');
+    assert.equal(items[3].content, 'recent user');
+    assert.equal(items[4].content, 'recent assistant');
 
     const visible = extractChatMessages(items);
-    assert.deepEqual(visible.map((message) => message.text), ['recent user', 'recent assistant']);
+    assert.deepEqual(visible.map((message) => message.text), [
+      'old user 1',
+      'old user 2',
+      'recent user',
+      'recent assistant',
+    ]);
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'summary-merge-session.json'));
+    const largeToolOutput = Array.from({ length: 30 }, (_, index) => `tool-line-${index + 1}`).join('\n');
+    await session.addItems([
+      {
+        type: 'message',
+        role: 'system',
+        content: `${CONTEXT_SUMMARY_MARKER}\n已有事实：不能修改配置文件`,
+      },
+      { type: 'message', role: 'user', content: '必须保留这个用户约束：不要修改配置文件' },
+      { type: 'message', role: 'assistant', content: '收到' },
+      { type: 'function_call_output', call_id: 'call-1', name: 'read_file', output: largeToolOutput },
+      { type: 'message', role: 'user', content: '继续检查最近文件' },
+      { type: 'message', role: 'assistant', content: '继续' },
+    ]);
+
+    let capturedPriorSummaries = [];
+    let capturedProtectedUsers = [];
+    let capturedOlder = [];
+    const result = await ensureContextCompacted(session, cfg, {
+      maxItems: 4,
+      recentItems: 2,
+      summarize: async (_config, older, _recent, _signal, _maxChars, priorSummaries, protectedUsers) => {
+        capturedOlder = older;
+        capturedPriorSummaries = priorSummaries;
+        capturedProtectedUsers = protectedUsers;
+        return {
+          summary: '合并后的摘要',
+          userPreferences: [],
+          durableFacts: ['不能修改配置文件'],
+          importantFiles: [],
+          openTasks: [],
+          risks: [],
+        };
+      },
+    });
+
+    assert.equal(result.compacted, true);
+    assert.equal(capturedPriorSummaries.length, 1);
+    assert.equal(capturedProtectedUsers.length, 1);
+    assert.equal(capturedProtectedUsers[0].content, '必须保留这个用户约束：不要修改配置文件');
+    assert.equal(capturedOlder.some((item) => String(item.content ?? '').includes(CONTEXT_SUMMARY_MARKER)), false);
+    const capturedTool = capturedOlder.find((item) => item.type === 'function_call_output');
+    assert.ok(capturedTool);
+    assert.match(capturedTool.output, new RegExp(CONTEXT_TOOL_RESULT_CLIP_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(capturedTool.output, /tool-line-1/);
+    assert.match(capturedTool.output, /tool-line-30/);
+
+    const compacted = await session.getItems();
+    assert.equal(compacted.filter((item) => String(item.content ?? '').includes(CONTEXT_SUMMARY_MARKER)).length, 1);
+    assert.ok(compacted.some((item) => item.content === '必须保留这个用户约束：不要修改配置文件'));
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'tool-result-session.json'));
+    const largeToolOutput = Array.from({ length: 30 }, (_, index) => `recent-tool-line-${index + 1}`).join('\n');
+    await session.addItems([
+      { type: 'message', role: 'user', content: '旧请求' },
+      { type: 'message', role: 'assistant', content: '旧回复' },
+      { type: 'message', role: 'user', content: '最近读取结果' },
+      { type: 'function_call_output', call_id: 'call-2', name: 'read_file', output: largeToolOutput },
+    ]);
+    const result = await ensureContextCompacted(session, cfg, {
+      maxItems: 3,
+      recentItems: 2,
+      summarize: async () => ({
+        summary: '工具结果已压缩',
+        userPreferences: [],
+        durableFacts: [],
+        importantFiles: [],
+        openTasks: [],
+        risks: [],
+      }),
+    });
+    assert.equal(result.compacted, true);
+    const compacted = await session.getItems();
+    const tool = compacted.find((item) => item.type === 'function_call_output');
+    assert.ok(tool);
+    assert.match(tool.output, new RegExp(CONTEXT_TOOL_RESULT_CLIP_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(tool.output, /recent-tool-line-1/);
+    assert.match(tool.output, /recent-tool-line-30/);
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'summary-fallback-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: '必须保留的旧用户约束' },
+      { type: 'message', role: 'assistant', content: '旧回复' },
+      { type: 'message', role: 'user', content: '另一个旧请求' },
+      { type: 'message', role: 'assistant', content: '另一个旧回复' },
+      { type: 'message', role: 'user', content: '最近请求' },
+      { type: 'message', role: 'assistant', content: '最近回复' },
+    ]);
+    const result = await ensureContextCompacted(session, cfg, {
+      maxItems: 4,
+      recentItems: 2,
+      summarize: async () => {
+        throw new Error('summary service unavailable');
+      },
+    });
+    assert.equal(result.compacted, true);
+    assert.equal(result.reason, 'summary_failed_emergency_fallback');
+    assert.match(result.error, /summary service unavailable/);
+    const compacted = await session.getItems();
+    assert.ok(compacted.length < 6);
+    assert.ok(compacted.some((item) => item.content === '必须保留的旧用户约束'));
+    assert.match(compacted[0].content, new RegExp(CONTEXT_SUMMARY_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(compacted[0].content, /保底/);
   }
 
   {
@@ -260,7 +378,7 @@ try {
     assert.equal(result.beforeTokens, beforeTokens);
     assert.equal(result.inputBudgetTokens, beforeTokens - 1);
     assert.match(result.reason, /^tokens>/);
-    assert.equal((await session.getItems()).length, 3);
+    assert.equal((await session.getItems()).length, 4);
   }
 
   {

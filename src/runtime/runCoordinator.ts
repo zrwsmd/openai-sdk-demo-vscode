@@ -504,8 +504,11 @@ export class RunCoordinator {
             ? `, tokens ${compaction.beforeTokens}->${compaction.afterTokens ?? '?'} / budget ${compaction.inputBudgetTokens ?? '?'}`
             : '';
           this.writeLog(
-            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}${tokenDetail}`,
+            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}${tokenDetail}, reason=${compaction.reason ?? 'unknown'}`,
           );
+          if (compaction.error) {
+            this.writeLog(`[context] 摘要失败，已使用确定性保底裁剪: ${compaction.error}`);
+          }
           sessionItems = await this.session.getItems();
           run.sessionItemCountBefore = sessionItems.length;
           await this.store.update(run);
