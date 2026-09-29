@@ -6,7 +6,7 @@ import {
   JsonRunStore,
   RunCoordinator,
   createTeamTask,
-  createDeliveryContract,
+  normalizeWorkflowContract,
   AgentActionVerificationError,
 } from './agent.testbundle.mjs';
 
@@ -81,7 +81,7 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
 {
   let classifierCalls = 0;
   let receivedContract;
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求生成可交付代码',
     deliverables: [{

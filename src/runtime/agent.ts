@@ -82,7 +82,7 @@ import {
   type CompletionGateResult,
 } from "./completionGate";
 import {
-  createDeliveryContract,
+  normalizeWorkflowContract,
   deliveryContractDecisionSchema,
   renderDeliveryContract,
   type DeliveryContract,
@@ -1407,7 +1407,7 @@ export async function classifyDeliveryContract(
     agentLog(
       `[delivery] Jev 高置信度判断无需交付物(${hint.deliveryConfidence.toFixed(2)})，跳过交付契约模型判定`,
     );
-    return createDeliveryContract({
+    return normalizeWorkflowContract({
       requiresDeliverable: false,
       reason: 'Jev 判断本轮是问答、查询或只读操作，不要求交付物',
       deliverables: [],
@@ -1445,7 +1445,7 @@ export async function classifyDeliveryContract(
     maxTurns: 1,
     signal,
   });
-  return createDeliveryContract(result.finalOutput);
+  return normalizeWorkflowContract(result.finalOutput);
 }
 
 const workflowFallbackModeSchema = z.enum([

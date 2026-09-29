@@ -13,7 +13,7 @@ import {
   extractChatMessages,
   MaxTurnsExceededError,
   MAX_TURNS,
-  createDeliveryContract,
+  normalizeWorkflowContract,
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
   projectNewTurnSessionHistory,
@@ -169,7 +169,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // [3b] 需要内联交付时,模型通过通用 deliver_artifact 工具提交完整内容;
 // 即使最终结构化总结仍给出空 artifacts, runtime 也应从工具回执恢复交付物。
 {
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求生成可交付 ST 程序',
     deliverables: [{
@@ -201,7 +201,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // write_file 的审批恢复不能丢失前一步校验状态。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -243,7 +243,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // 校验哈希和写入哈希一致为准,且 ST 固定流水线不再额外 read/path 复核。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -287,7 +287,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // write_file 必须在落盘前内部重新校验这份写入内容,通过后才写。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -335,7 +335,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // 只有 errorCount=0 的草稿可以进入唯一一次 write_file 审批。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -396,7 +396,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // 相同的 write_file 审批。运行时应折叠成一个审批,且只执行第一条。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -446,7 +446,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // 运行时应基于 workflow 已完成状态自动拒绝,不再弹第二张审批卡。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -497,7 +497,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 {
   const asked = [];
   const capabilityLogStart = diagLines.length;
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码默认保存到当前工作区',
     deliverables: [{
@@ -548,7 +548,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // 强制验证工具,验证通过后再强制落盘,不能只把修复要求再交给模型自觉处理。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码并默认保存到工作区',
     deliverables: [{
@@ -586,7 +586,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
 // runtime 也要保留正文并进入交付闭环,不能把 SDK 的 schema 错误直接抛给用户。
 {
   const asked = [];
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '生成 ST 代码并默认保存到工作区',
     deliverables: [{

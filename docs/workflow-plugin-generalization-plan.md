@@ -55,7 +55,7 @@
 - [x] 21. 将 ST Workspace Delivery 迁移为通用 WorkflowRuntime
 - [x] 22. 让 Agent 彻底移除 Delivery 适配调用
 - [x] 23. 删除旧 Delivery 兼容层
-- [ ] 24. 清理协议中的旧 Delivery 兼容字段
+- [x] 24. 清理协议中的旧 Delivery 兼容字段
 - [ ] 25. 强化最终 Workflow 边界测试
 
 ## 0. 基线与边界
@@ -644,6 +644,30 @@ Agent 直接消费通用 `WorkflowRuntime`。ST 工具需要的专用能力通�
 `WorkflowContract`、`WorkflowCompletionAdapter`、`WorkflowRuntimeState` 和
 `WorkflowRuntimeContext`。`DeliveryContract` 是否继续保留，单独作为交付约束
 数据评估，不与旧 `DeliveryWorkflow` 接口删除混为一谈。
+
+本阶段已完成：
+
+- 从 `WorkflowDescriptor` 删除 `matchesDeliveryContract` 和
+  `createDeliveryContract`，Descriptor 只保留 `matchesContract` 和
+  `createContract` 两个通用契约钩子。
+- `WorkflowRegistry.findByContract` 不再回退调用旧 Delivery 匹配字段。
+- `WorkflowSelectedDecision` 的通用决策结果统一使用 `contract` 字段；
+  Coordinator 只从该通用字段读取 Workflow 契约。
+- 删除完成证据输入中的 `deliveryWorkflow` 兼容别名。
+- 将契约判定结果构造函数改名为 `normalizeWorkflowContract`，避免继续暴露
+  `createDeliveryContract` 这一旧 API 名称；交付约束数据结构
+  `DeliveryContract` 及 durable run 中的 `deliveryContract` 字段暂时保留，
+  用于完成门和历史运行记录兼容，不与已删除的旧 Workflow 接口混用。
+- 增加 Registry 回归断言：只有 `matchesContract` 能参与契约匹配，旧字段不会
+  被隐式重新启用；边界扫描同时封锁旧字段名称。
+- 未修改 `st-analyze`、`src/analysis/*` 或 ST 工具实现。
+
+阶段测试结果：
+
+- `npx tsc --noEmit` 通过。
+- `npm run test:workflow` 通过。
+- `npm run test:jev` 通过。
+- `npm run test:batch` 通过。
 
 ### 25. 强化最终 Workflow 边界测试
 

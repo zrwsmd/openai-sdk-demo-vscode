@@ -1,6 +1,6 @@
 import {
   createToolResult,
-  createDeliveryContract,
+  normalizeWorkflowContract,
   evaluateCompletionGate,
   createStValidationState,
   StWorkspaceDeliveryWorkflow,
@@ -17,7 +17,7 @@ const missingFile = createToolResult({
   risk: 'read',
 });
 
-const validationContract = createDeliveryContract({
+const validationContract = normalizeWorkflowContract({
   requiresDeliverable: true,
   reason: '用户要求生成并校验可交付程序',
   deliverables: [{
@@ -124,7 +124,7 @@ const validationContract = createDeliveryContract({
   assert(gate.passed, '恢复账本的重复局部序号不应阻断后续成功');
 }
 
-const codeContract = createDeliveryContract({
+const codeContract = normalizeWorkflowContract({
   requiresDeliverable: true,
   reason: '用户要求生成可交付代码',
   deliverables: [{
@@ -165,7 +165,7 @@ const codeContract = createDeliveryContract({
     userText: '生成一个 ST 程序',
     finalMessage: '已生成并保存程序。',
     toolResults: [],
-    deliveryContract: createDeliveryContract({
+    deliveryContract: normalizeWorkflowContract({
       requiresDeliverable: true,
       reason: '默认保存生成的代码',
       deliverables: [{
@@ -184,7 +184,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const writeContract = createDeliveryContract({
+  const writeContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求写入文件',
     deliverables: [{
@@ -210,7 +210,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求生成发布包',
     deliverables: [{
@@ -245,7 +245,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const contract = createDeliveryContract({
+  const contract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求写入指定文本文件',
     deliverables: [{
@@ -294,7 +294,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const stContract = createDeliveryContract({
+  const stContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求生成并保存 ST 程序',
     deliverables: [{
@@ -377,7 +377,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const stContract = createDeliveryContract({
+  const stContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求生成并保存 ST 程序',
     deliverables: [{
@@ -440,7 +440,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const genericStFileContract = createDeliveryContract({
+  const genericStFileContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '普通代码文件落盘',
     deliverables: [{
@@ -459,7 +459,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const docContract = createDeliveryContract({
+  const docContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求说明文档',
     deliverables: [{
@@ -488,7 +488,7 @@ const codeContract = createDeliveryContract({
 }
 
 {
-  const codeArtifactContract = createDeliveryContract({
+  const codeArtifactContract = normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: '用户要求内联 ST 程序',
     deliverables: [{

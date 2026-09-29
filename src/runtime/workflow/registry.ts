@@ -45,10 +45,7 @@ export class WorkflowRegistry {
 
   findByContract(contract: WorkflowContract | undefined): WorkflowDescriptor | undefined {
     if (!contract) return undefined;
-    return this.list().find((workflow) =>
-      (workflow.matchesContract?.(contract) ??
-        workflow.matchesDeliveryContract?.(contract)) === true,
-    );
+    return this.list().find((workflow) => workflow.matchesContract?.(contract) === true);
   }
 }
 

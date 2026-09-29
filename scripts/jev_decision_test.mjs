@@ -285,7 +285,7 @@ try {
   if (workflowDecision.kind !== 'workflow' || workflowDecision.workflow.id !== 'st_workspace_delivery') {
     throw new Error('Jev workflow decision did not route to registered ST workflow');
   }
-  if (!isStWorkspaceDeliveryContract(workflowDecision.deliveryContract)) {
+  if (!isStWorkspaceDeliveryContract(workflowDecision.contract)) {
     throw new Error('Jev workflow decision did not attach an ST delivery contract');
   }
 } finally {

@@ -1,5 +1,5 @@
 import {
-  createDeliveryContract,
+  normalizeWorkflowContract,
   type DeliveryContract,
 } from "../../deliveryContract";
 
@@ -8,7 +8,7 @@ export function createStCodeDeliveryContract(options: {
   workspacePersistence?: "required" | "not_required" | "optional";
 } = {}): DeliveryContract {
   const workspacePersistence = options.workspacePersistence ?? "required";
-  return createDeliveryContract({
+  return normalizeWorkflowContract({
     requiresDeliverable: true,
     reason: options.reason ?? (
       workspacePersistence === "required"

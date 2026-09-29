@@ -508,7 +508,7 @@ export class RunCoordinator {
         );
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
-          run.deliveryContract = workflowDecision.deliveryContract ??
+          run.deliveryContract = workflowDecision.contract ??
             createWorkflowContract(workflowDecision.workflow, {
               source: workflowDecision.source,
               reason: workflowDecision.reason,
@@ -980,7 +980,7 @@ export class RunCoordinator {
         );
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
-          run.deliveryContract = workflowDecision.deliveryContract ??
+          run.deliveryContract = workflowDecision.contract ??
             createWorkflowContract(workflowDecision.workflow, {
               source: workflowDecision.source,
               reason: workflowDecision.reason,

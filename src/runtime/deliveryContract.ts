@@ -77,7 +77,7 @@ function normalizeDeliverable(item: DeliveryItem) {
   };
 }
 
-export function createDeliveryContract(value: unknown): DeliveryContract | undefined {
+export function normalizeWorkflowContract(value: unknown): DeliveryContract {
   const decision = deliveryContractDecisionSchema.parse(value);
   if (!decision.requiresDeliverable) {
     return deliveryContractSchema.parse({

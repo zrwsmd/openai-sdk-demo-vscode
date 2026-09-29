@@ -29,6 +29,18 @@ assert.deepEqual(registry.findByContract(undefined), undefined);
 assert.deepEqual(registry.list(), [generic]);
 assert.throws(() => registry.register(generic), /already registered/);
 
+const legacyContractOnly = {
+  ...generic,
+  id: 'legacy_contract_only',
+  workflowRoute: 'legacy_contract_only',
+  matchesDeliveryContract: () => true,
+};
+assert.equal(
+  new WorkflowRegistry([legacyContractOnly]).findByContract({}),
+  undefined,
+  'Registry must only use the generic matchesContract hook',
+);
+
 const appRegistry = createAppWorkflowRegistry();
 assert.equal(appRegistry.get('st_workspace_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
 assert.equal(appRegistry.get('st_inspection'), undefined);

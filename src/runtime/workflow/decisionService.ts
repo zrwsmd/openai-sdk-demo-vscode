@@ -90,7 +90,7 @@ export class WorkflowDecisionService {
         confidence: hint.workflowConfidence,
         reason: `Jev 高置信度识别为 ${workflow.title}`,
         signals: signalsFromHint(hint),
-        ...(contract ? { deliveryContract: contract } : {}),
+        ...(contract ? { contract } : {}),
       };
     }
 
@@ -144,7 +144,7 @@ export class WorkflowDecisionService {
         confidence: match.confidence,
         reason: match.reason,
         signals: signalsFromHint(hint),
-        ...(contract ? { deliveryContract: contract } : {}),
+        ...(contract ? { contract } : {}),
       };
     }
     return undefined;
@@ -186,7 +186,7 @@ export class WorkflowDecisionService {
         confidence: decision.confidence,
         reason: decision.reason,
         signals: signalsFromHint(hint),
-        ...(contract ? { deliveryContract: contract } : {}),
+        ...(contract ? { contract } : {}),
       };
     }
     const allowedTools = decision.allowedTools

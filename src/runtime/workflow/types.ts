@@ -211,12 +211,6 @@ export interface WorkflowDescriptor {
     reason?: string;
     source?: WorkflowDecisionSource;
   }): WorkflowContract | undefined;
-  /** Compatibility hooks used by the current delivery runtime. */
-  matchesDeliveryContract?(contract: DeliveryContract | undefined): boolean;
-  createDeliveryContract?(options?: {
-    reason?: string;
-    source?: WorkflowDecisionSource;
-  }): DeliveryContract | undefined;
   localMatch?(context: WorkflowDecisionContext): WorkflowLocalMatch;
   createRuntime?(
     contract: WorkflowContract | undefined,
@@ -242,7 +236,7 @@ export function createWorkflowContract(
     source?: WorkflowDecisionSource;
   } = {},
 ): WorkflowContract | undefined {
-  return (workflow.createContract ?? workflow.createDeliveryContract)?.(options);
+  return workflow.createContract?.(options);
 }
 
 function normalizedToolNames(names: readonly string[] | undefined): readonly string[] {
@@ -313,7 +307,7 @@ export interface WorkflowSelectedDecision {
   confidence: number;
   reason: string;
   signals: WorkflowDecisionSignals;
-  deliveryContract?: DeliveryContract;
+  contract?: WorkflowContract;
 }
 
 export interface WorkflowFallbackDecision {

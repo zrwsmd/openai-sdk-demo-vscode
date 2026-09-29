@@ -36,8 +36,6 @@ export interface CompletionEvidenceInput {
   deliveredArtifacts: Artifact[];
   workflow?: WorkflowRuntime;
   deliveryContract?: DeliveryContract;
-  /** @deprecated Use workflow. */
-  deliveryWorkflow?: WorkflowRuntime;
   authoritativeMessage?: string;
   extractors?: readonly ToolEvidenceExtractor[];
 }
@@ -258,7 +256,7 @@ function extractWorkflowEvidenceFacts(input: CompletionEvidenceInput): EvidenceF
       "workflow",
     ));
   }
-  const workflow = input.workflow ?? input.deliveryWorkflow;
+  const workflow = input.workflow;
   if (workflow) {
     facts.push(fact("workflow.id", workflow.id, "workflow"));
     facts.push(fact("workflow.title", workflow.title, "workflow"));
