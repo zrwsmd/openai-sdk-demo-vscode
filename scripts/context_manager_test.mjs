@@ -13,6 +13,7 @@ import {
   extractChatMessages,
   JsonFileSession,
   modelContextCalibrationRouteKey,
+  resolveInputTokenBudget,
   updateTokenEstimateCalibration,
 } from './agent.testbundle.mjs';
 
@@ -88,6 +89,24 @@ try {
     const otherRoute = updateTokenEstimateCalibration(second, 'other-route', 100, 110);
     assert.equal(otherRoute.samples, 1);
     assert.equal(otherRoute.factor, 1.1);
+    assert.equal(
+      resolveInputTokenBudget({
+        contextWindowTokens: 128_000,
+        reservedOutputTokens: 4_096,
+        safetyMarginTokens: 1_024,
+      }),
+      122_880,
+    );
+    assert.equal(
+      resolveInputTokenBudget({
+        contextWindowTokens: 128_000,
+        reservedOutputTokens: 4_096,
+        safetyMarginTokens: 1_024,
+        compaction: { maxInputTokens: 10_000 },
+      }),
+      10_000,
+    );
+    assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
   }
 
   {
@@ -120,6 +139,7 @@ try {
     });
 
     assert.equal(result.compacted, true);
+    assert.equal(result.triggerMode, 'legacy_threshold');
     assert.equal(summarizedOlder, 4);
     const items = await session.getItems();
     assert.equal(items.length, 3);
@@ -184,11 +204,13 @@ try {
       { type: 'message', role: 'user', content: 'profile recent user' },
       { type: 'message', role: 'assistant', content: 'profile recent assistant' },
     ]);
+    const beforeTokens = estimateItemsTokens(await session.getItems());
     let called = false;
     const result = await ensureContextCompacted(session, cfg, {
       modelContext: {
         contextWindowTokens: 128_000,
         compaction: {
+          maxInputTokens: beforeTokens - 1,
           maxItems: 3,
           recentItems: 2,
           maxSummaryInputCharacters: 2_000,
@@ -211,7 +233,38 @@ try {
     });
     assert.equal(called, true);
     assert.equal(result.compacted, true);
+    assert.equal(result.triggerMode, 'token_budget');
+    assert.equal(result.beforeTokens, beforeTokens);
+    assert.equal(result.inputBudgetTokens, beforeTokens - 1);
+    assert.match(result.reason, /^tokens>/);
     assert.equal((await session.getItems()).length, 3);
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'token-precedence-session.json'));
+    await session.addItems([
+      { type: 'message', role: 'user', content: 'small 1' },
+      { type: 'message', role: 'assistant', content: 'small 2' },
+      { type: 'message', role: 'user', content: 'small 3' },
+      { type: 'message', role: 'assistant', content: 'small 4' },
+    ]);
+    let called = false;
+    const result = await ensureContextCompacted(session, cfg, {
+      modelContext: {
+        contextWindowTokens: 128_000,
+        compaction: {
+          maxItems: 1,
+          recentItems: 2,
+        },
+      },
+      summarize: async () => {
+        called = true;
+        throw new Error('token budget should prevent this legacy trigger');
+      },
+    });
+    assert.equal(result.compacted, false);
+    assert.equal(result.triggerMode, 'token_budget');
+    assert.equal(called, false);
   }
 
   {

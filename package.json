@@ -127,7 +127,7 @@
           "type": "number",
           "minimum": 0,
           "default": 0,
-          "description": "模型上下文窗口 token 数；0 表示未知/未配置，后续由通用 token 预算阶段处理"
+          "description": "模型上下文窗口 token 数；0 表示未知/未配置，此时回退旧版压缩阈值"
         },
         "plcAgent.context.reservedOutputTokens": {
           "type": "number",
@@ -140,6 +140,12 @@
           "minimum": 0,
           "default": 1024,
           "description": "上下文预算的额外安全余量 token 数"
+        },
+        "plcAgent.context.compaction.maxInputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "本地压缩的有效输入 token 上限；0 表示按模型上下文窗口减去输出预留和安全余量计算"
         },
         "plcAgent.context.compaction.maxItems": {
           "type": "integer",

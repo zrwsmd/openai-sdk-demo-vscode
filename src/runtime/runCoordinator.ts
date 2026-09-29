@@ -500,8 +500,11 @@ export class RunCoordinator {
           return;
         }
         if (compaction.compacted) {
+          const tokenDetail = compaction.beforeTokens !== undefined
+            ? `, tokens ${compaction.beforeTokens}->${compaction.afterTokens ?? '?'} / budget ${compaction.inputBudgetTokens ?? '?'}`
+            : '';
           this.writeLog(
-            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}`,
+            `[context] 已压缩历史: items ${compaction.beforeItems}->${compaction.afterItems}, chars ${compaction.beforeCharacters}->${compaction.afterCharacters}${tokenDetail}`,
           );
           sessionItems = await this.session.getItems();
           run.sessionItemCountBefore = sessionItems.length;

@@ -212,7 +212,7 @@ function isFiniteNonNegative(value: unknown): boolean {
 
 function isContextCompactionBudget(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  for (const key of ['maxItems', 'maxCharacters', 'recentItems', 'maxSummaryInputCharacters'] as const) {
+  for (const key of ['maxInputTokens', 'maxItems', 'maxCharacters', 'recentItems', 'maxSummaryInputCharacters'] as const) {
     if (value[key] !== undefined && !isFiniteNonNegative(value[key])) return false;
   }
   return true;

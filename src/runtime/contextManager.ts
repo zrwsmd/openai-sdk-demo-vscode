@@ -2,6 +2,7 @@ import { Agent, Runner, type AgentInputItem } from '@openai/agents';
 import { z } from 'zod';
 import { buildModelAdapter } from './agent';
 import type { AgentConfig } from './agentConfig';
+import { estimateItemsTokens } from './contextTokenEstimator';
 
 export const CONTEXT_SUMMARY_MARKER = '[plc-agent-context-summary:v1]';
 
@@ -12,6 +13,8 @@ export interface ContextManagedSession {
 
 /** Configurable limits used by the current local compaction strategy. */
 export interface ContextCompactionBudget {
+  /** Explicit effective input-token ceiling; 0/unset uses the model profile. */
+  maxInputTokens?: number;
   maxItems?: number;
   maxCharacters?: number;
   recentItems?: number;
@@ -35,7 +38,7 @@ export interface ModelContextProfile {
   safetyMarginTokens?: number;
   /** Automatically learned estimate correction for this model/API route. */
   tokenCalibration?: TokenEstimateCalibration;
-  /** Current local-compaction limits; token-aware fields arrive in the next stage. */
+  /** Local-compaction limits; token budget takes precedence when available. */
   compaction?: ContextCompactionBudget;
 }
 
@@ -76,6 +79,10 @@ export interface ContextCompactionResult {
   afterItems: number;
   beforeCharacters: number;
   afterCharacters: number;
+  beforeTokens?: number;
+  afterTokens?: number;
+  inputBudgetTokens?: number;
+  triggerMode?: 'token_budget' | 'legacy_threshold';
   reason?: string;
   error?: string;
 }
@@ -92,18 +99,35 @@ export async function ensureContextCompacted(
 ): Promise<ContextCompactionResult> {
   const items = await session.getItems();
   const beforeCharacters = estimateItemsCharacters(items);
-  const budget = options.modelContext?.compaction;
+  const modelContext = options.modelContext ?? config.modelContext;
+  const budget = modelContext?.compaction;
+  const inputBudgetTokens = resolveInputTokenBudget(modelContext);
+  const triggerMode = inputBudgetTokens === undefined ? 'legacy_threshold' : 'token_budget';
+  const beforeTokens = inputBudgetTokens === undefined
+    ? undefined
+    : estimateItemsTokens(items, modelContext?.tokenCalibration);
   const maxItems = options.maxItems ?? budget?.maxItems ?? DEFAULT_MAX_ITEMS;
   const maxCharacters = options.maxCharacters ?? budget?.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
   const tooManyItems = items.length > maxItems;
   const tooManyCharacters = beforeCharacters > maxCharacters;
-  if (!tooManyItems && !tooManyCharacters) {
+  const tooManyTokens =
+    inputBudgetTokens !== undefined &&
+    beforeTokens !== undefined &&
+    beforeTokens > inputBudgetTokens;
+  const shouldCompact = inputBudgetTokens === undefined
+    ? tooManyItems || tooManyCharacters
+    : tooManyTokens;
+  if (!shouldCompact) {
     return {
       compacted: false,
       beforeItems: items.length,
       afterItems: items.length,
       beforeCharacters,
       afterCharacters: beforeCharacters,
+      beforeTokens,
+      afterTokens: beforeTokens,
+      inputBudgetTokens,
+      triggerMode,
     };
   }
 
@@ -121,6 +145,10 @@ export async function ensureContextCompacted(
       afterItems: items.length,
       beforeCharacters,
       afterCharacters: beforeCharacters,
+      beforeTokens,
+      afterTokens: beforeTokens,
+      inputBudgetTokens,
+      triggerMode,
       reason: 'history_contains_only_recent_items',
     };
   }
@@ -142,16 +170,25 @@ export async function ensureContextCompacted(
     ];
     await session.replaceItems(compactedItems);
     const afterCharacters = estimateItemsCharacters(compactedItems);
+    const afterTokens = inputBudgetTokens === undefined
+      ? undefined
+      : estimateItemsTokens(compactedItems, modelContext?.tokenCalibration);
     return {
       compacted: true,
       beforeItems: items.length,
       afterItems: compactedItems.length,
       beforeCharacters,
       afterCharacters,
-      reason: [
-        tooManyItems ? `items>${maxItems}` : '',
-        tooManyCharacters ? `chars>${maxCharacters}` : '',
-      ].filter(Boolean).join(','),
+      beforeTokens,
+      afterTokens,
+      inputBudgetTokens,
+      triggerMode,
+      reason: inputBudgetTokens === undefined
+        ? [
+          tooManyItems ? `items>${maxItems}` : '',
+          tooManyCharacters ? `chars>${maxCharacters}` : '',
+        ].filter(Boolean).join(',')
+        : `tokens>${inputBudgetTokens}`,
     };
   } catch (error) {
     if (isAbortError(error) || options.signal?.aborted) {
@@ -161,6 +198,10 @@ export async function ensureContextCompacted(
         afterItems: items.length,
         beforeCharacters,
         afterCharacters: beforeCharacters,
+        beforeTokens,
+        afterTokens: beforeTokens,
+        inputBudgetTokens,
+        triggerMode,
         reason: 'aborted',
       };
     }
@@ -170,9 +211,41 @@ export async function ensureContextCompacted(
       afterItems: items.length,
       beforeCharacters,
       afterCharacters: beforeCharacters,
+      beforeTokens,
+      afterTokens: beforeTokens,
+      inputBudgetTokens,
+      triggerMode,
       error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
     };
   }
+}
+
+/**
+ * Resolve the effective local input budget.
+ *
+ * An explicit compaction max wins when it is below the model-derived ceiling.
+ * Invalid/insufficient model headroom returns undefined so old item/character
+ * thresholds remain the safe compatibility path.
+ */
+export function resolveInputTokenBudget(
+  profile?: ModelContextProfile,
+): number | undefined {
+  if (!profile) return undefined;
+
+  const explicit = positiveInteger(profile.compaction?.maxInputTokens);
+  const contextWindow = positiveInteger(profile.contextWindowTokens);
+  let derived: number | undefined;
+  if (contextWindow !== undefined) {
+    const reservedOutput = nonNegativeInteger(profile.reservedOutputTokens);
+    const safetyMargin = nonNegativeInteger(profile.safetyMarginTokens);
+    const available = contextWindow - reservedOutput - safetyMargin;
+    if (available <= 0) return undefined;
+    derived = available;
+  }
+
+  if (explicit === undefined) return derived;
+  if (derived === undefined) return explicit;
+  return Math.min(explicit, derived);
 }
 
 export async function summarizeContextWithModel(
@@ -316,4 +389,15 @@ function middleClip(value: string, maxCharacters: number): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+}
+
+function positiveInteger(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
+function nonNegativeInteger(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
 }

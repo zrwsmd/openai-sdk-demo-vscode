@@ -250,6 +250,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         Math.floor(cfg.get<number>('context.safetyMarginTokens') ?? 1_024),
       ),
       compaction: {
+        maxInputTokens: Math.max(
+          0,
+          Math.floor(cfg.get<number>('context.compaction.maxInputTokens') ?? 0),
+        ),
         maxItems: Math.max(1, Math.floor(cfg.get<number>('context.compaction.maxItems') ?? 48)),
         maxCharacters: Math.max(
           1,

@@ -37,6 +37,7 @@ const config = {
       updatedAt: '2026-09-29T00:00:00.000Z',
     },
     compaction: {
+      maxInputTokens: 100_000,
       maxItems: 48,
       maxCharacters: 80_000,
       recentItems: 16,
@@ -65,6 +66,7 @@ if (
 if (
   restored.config.modelContext?.contextWindowTokens !== 128_000 ||
   restored.config.modelContext.tokenCalibration?.factor !== 1.15 ||
+  restored.config.modelContext.compaction.maxInputTokens !== 100_000 ||
   restored.config.modelContext.compaction?.maxItems !== 48 ||
   restored.config.modelContext.compaction.recentItems !== 16
 ) {
