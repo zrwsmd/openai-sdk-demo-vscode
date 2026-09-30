@@ -19,6 +19,7 @@ import {
   projectNewTurnSessionHistory,
   isToolHistoryItem,
   composeToolSet,
+  isRetryableAgentError,
 } from './agent.testbundle.mjs';
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
@@ -114,6 +115,20 @@ setAgentLogger((line) => diagLines.push(line));
   }));
   if (!empty.emptyTail) throw new Error('真正空的非流式响应没有保留原文尾部');
   console.log('[0b] 非流式响应诊断:通过 |', summary.summary);
+}
+
+// [0e] Node/undici 会把流式响应中途断开包装成 TypeError: terminated。
+// 这是瞬时连接错误，应该允许 coordinator 继续或安全重试，而不是直接判死。
+{
+  const error = new TypeError('terminated');
+  error.cause = Object.assign(new Error('other side closed'), {
+    name: 'SocketError',
+    code: 'UND_ERR_SOCKET',
+  });
+  if (!isRetryableAgentError(error)) {
+    throw new Error('TypeError: terminated 没有被识别为可恢复连接错误');
+  }
+  console.log('[0e] 流式连接 terminated 可恢复分类:通过');
 }
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-test-'));

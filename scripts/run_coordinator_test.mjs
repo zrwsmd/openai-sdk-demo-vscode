@@ -1609,6 +1609,34 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// Node/undici reports a stream body that closes mid-response as
+// TypeError: terminated. Treat it like the gateway/network interruption it is.
+{
+  const test = await fixture(async (_cfg, session, userText) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    const error = new TypeError('terminated');
+    error.cause = Object.assign(new Error('other side closed'), {
+      name: 'SocketError',
+      code: 'UND_ERR_SOCKET',
+    });
+    throw error;
+  });
+  await test.coordinator.start('stream terminated', config, 'key');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || paused.state !== undefined || !paused.canContinue) {
+    throw new Error('terminated stream failure was not preserved for safe continuation');
+  }
+  if ((await test.session.getItems()).length !== 0) {
+    throw new Error('terminated stream failure did not rollback its partial session');
+  }
+  if (!/流式连接中断/.test(paused.error || '')) {
+    throw new Error(`terminated stream failure used an unclear error message: ${paused.error}`);
+  }
+  if (!test.events.some((event) => event.type === 'error' && event.canContinue === true)) {
+    throw new Error('terminated stream failure did not expose continue');
+  }
+}
+
 // Runs persisted by the previous build as failed should also recognize a 502
 // message and become continuable after the extension is updated.
 {

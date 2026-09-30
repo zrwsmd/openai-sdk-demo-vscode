@@ -530,11 +530,20 @@ export function isRetryableAgentError(error: unknown): boolean {
   if (names.some((name) => /^(?:APIConnectionError|APIConnectionTimeoutError|ModelTimeoutError)$/i.test(name))) {
     return true;
   }
-  if (codes.some((code) => /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT)$/i.test(code))) {
+  if (codes.some((code) => /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|UND_ERR_BODY_TIMEOUT|UND_ERR_HEADERS_TIMEOUT)$/i.test(code))) {
+    return true;
+  }
+  if (
+    messages.some((message) => /\bterminated\b/i.test(message)) &&
+    (
+      names.some((name) => /^(?:TypeError|SocketError)$/i.test(name)) ||
+      codes.some((code) => /^UND_ERR_/i.test(code))
+    )
+  ) {
     return true;
   }
   const text = messages.join(' ');
-  return /\b(?:408|409|425|429|5\d\d)\b|gateway\s+(?:is\s+)?unavailable|connection\s+(?:error|failed|reset|refused)|network\s+error|fetch\s+failed|timed?\s*out/i.test(text);
+  return /\b(?:408|409|425|429|5\d\d)\b|gateway\s+(?:is\s+)?unavailable|connection\s+(?:error|failed|reset|refused|terminated)|network\s+error|fetch\s+failed|timed?\s*out/i.test(text);
 }
 
 function isAgentCancellationError(error: unknown): boolean {

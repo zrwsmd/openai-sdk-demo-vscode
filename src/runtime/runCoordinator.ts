@@ -2494,6 +2494,13 @@ export class RunCoordinator {
     ) {
       return '模型没有返回符合协议的最终结果，本轮未确认完成；已保留运行状态，可以重试。';
     }
+    if (
+      error instanceof Error &&
+      /\bterminated\b/i.test(error.message) &&
+      isRetryableAgentError(error)
+    ) {
+      return '模型流式连接中断（TypeError: terminated）。本轮已保留恢复点，可以继续或重试。';
+    }
     return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   }
 
