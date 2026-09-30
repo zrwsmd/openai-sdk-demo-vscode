@@ -538,6 +538,44 @@ function truncateText(text, max = 140) {
   return compact.length > max ? `${compact.slice(0, max)}…` : compact;
 }
 
+function stripInlineMarkdown(text) {
+  return String(text ?? '')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
+      const cleanLabel = String(label).trim();
+      const cleanUrl = String(url).trim();
+      if (!cleanUrl || cleanLabel === cleanUrl) return cleanLabel || cleanUrl;
+      return `${cleanLabel} (${cleanUrl})`;
+    })
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/\*\*([^*\n][\s\S]*?[^*\n])\*\*/g, '$1')
+    .replace(/__([^_\n][\s\S]*?[^_\n])__/g, '$1')
+    .replace(/~~([^~\n][\s\S]*?[^~\n])~~/g, '$1')
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?=$|[^\w*])/g, '$1$2')
+    .replace(/(^|[^\w_])_([^_\n]+)_(?=$|[^\w_])/g, '$1$2');
+}
+
+function stripMarkdownBlockMarkers(text) {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(/^\s{0,3}#{1,6}\s+/, '')
+      .replace(/^\s{0,3}>\s?/, '')
+      .replace(/^\s{0,3}[-*+]\s+/, '• '))
+    .filter((line) => !/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line))
+    .join('\n');
+}
+
+function stripMarkdownForDisplay(text) {
+  const parts = String(text ?? '').split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part) => {
+      if (part.startsWith('```') && part.endsWith('```')) return part;
+      return stripMarkdownBlockMarkers(stripInlineMarkdown(part));
+    })
+    .join('');
+}
+
 function sanitizeAssistantText(text) {
   const raw = String(text ?? '');
   const trimmed = raw.trim();
@@ -547,7 +585,9 @@ function sanitizeAssistantText(text) {
     /^Please approve this write operation to save\b/i,
     /^Tool call ["'][^"']+["'] .* has no available artifacts\./i,
   ];
-  return internalPatterns.some((pattern) => pattern.test(trimmed)) ? '' : raw;
+  return internalPatterns.some((pattern) => pattern.test(trimmed))
+    ? ''
+    : stripMarkdownForDisplay(raw);
 }
 
 function byteLength(text) {
@@ -1824,7 +1864,7 @@ window.addEventListener('message', (event) => {
       hadToolThisTurn = false;
       agentBubble = addMessage('agent', '');
       rememberFinalAnswerAnchor(currentRunId, agentBubble);
-      renderRich(agentBubble, agentText);
+      renderRich(agentBubble, sanitizeAssistantText(agentText));
       agentBubble.classList.add('streaming');
       setRuntimeMode('running');
       break;
