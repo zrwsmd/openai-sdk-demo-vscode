@@ -389,6 +389,31 @@ function createThinkingView(key, runId) {
   return view;
 }
 
+function firstThinkingNodeForRun(runId) {
+  if (!runId) return null;
+  const thinkingNodes = new Set();
+  for (const view of thinkingViews.values()) {
+    if (view.runId === runId && view.el?.parentNode === messagesEl) {
+      thinkingNodes.add(view.el);
+    }
+  }
+  for (const state of thinkingSegments.values()) {
+    if (state.runId === runId && state.inlineView?.parentNode === messagesEl) {
+      thinkingNodes.add(state.inlineView);
+    }
+  }
+  return [...messagesEl.children].find((node) => thinkingNodes.has(node)) || null;
+}
+
+function insertBeforeRunThinkingOrFinalAnswer(node, runId) {
+  const thinkingAnchor = firstThinkingNodeForRun(runId);
+  if (thinkingAnchor?.parentNode === messagesEl) {
+    messagesEl.insertBefore(node, thinkingAnchor);
+    return;
+  }
+  insertBeforeFinalAnswer(node, runId);
+}
+
 function addThinkingUpdate(event) {
   if (!showThinking) return;
   const payload = event.payload || {};
@@ -690,11 +715,7 @@ function createWorkflowStageView(runId, workflow) {
     });
   }
   root.append(header, list);
-  if (agentBubble && agentBubble.parentElement === messagesEl) {
-    messagesEl.insertBefore(root, agentBubble);
-  } else {
-    messagesEl.appendChild(root);
-  }
+  insertBeforeRunThinkingOrFinalAnswer(root, runId);
   workflowViews.set(runId, view);
   renderWorkflowStageView(view);
   scrollBottom();
