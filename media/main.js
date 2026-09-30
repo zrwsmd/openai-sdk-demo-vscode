@@ -40,6 +40,9 @@ let showThinking = true;
 let knownSessions = [];
 let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
+let selectedSessionId = null;
+let renamingSessionId = null;
+let pendingDeleteSessionId = null;
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 const workflowViews = new Map();
@@ -72,9 +75,79 @@ function setSessionHistoryOpen(open) {
   sessionHistoryBtn?.classList.toggle('active', sessionHistoryOpen);
   sessionHistoryBtn?.setAttribute('aria-expanded', sessionHistoryOpen ? 'true' : 'false');
   if (sessionHistoryOpen) {
+    selectedSessionId = selectedSessionId || activeSessionId;
     renderSessions();
     requestAnimationFrame(() => sessionSearchEl?.focus());
+  } else {
+    renamingSessionId = null;
+    pendingDeleteSessionId = null;
   }
+}
+
+function filteredSessions() {
+  const sessions = Array.isArray(knownSessions) ? knownSessions : [];
+  const query = sessionSearchQuery.trim().toLowerCase();
+  return query
+    ? sessions.filter((session) => String(session?.title || '新会话').toLowerCase().includes(query))
+    : sessions;
+}
+
+function sessionGroupLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '更早';
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.floor((startOfToday - startOfDate) / 86_400_000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 7) return '近 7 天';
+  if (days < 30) return '近 30 天';
+  return '更早';
+}
+
+function switchToSession(sessionId) {
+  if (runtimeMode !== 'idle' || sessionId === activeSessionId) return;
+  setSessionHistoryOpen(false);
+  vscode.postMessage({ type: 'switchSession', sessionId });
+}
+
+function renameSession(sessionId, title) {
+  const clean = String(title ?? '').replace(/\s+/g, ' ').trim();
+  renamingSessionId = null;
+  if (!clean) {
+    renderSessions();
+    return;
+  }
+  vscode.postMessage({ type: 'renameSession', sessionId, title: clean });
+}
+
+function requestDeleteSession(session) {
+  if (runtimeMode !== 'idle' || !session?.id) return;
+  pendingDeleteSessionId = session.id;
+  renamingSessionId = null;
+  selectedSessionId = session.id;
+  renderSessions();
+}
+
+function commitDeleteSession(session) {
+  if (runtimeMode !== 'idle' || !session?.id) return;
+  if (selectedSessionId === session.id) selectedSessionId = null;
+  if (renamingSessionId === session.id) renamingSessionId = null;
+  if (pendingDeleteSessionId === session.id) pendingDeleteSessionId = null;
+  vscode.postMessage({ type: 'deleteSession', sessionId: session.id });
+}
+
+function moveSessionSelection(delta) {
+  const sessions = filteredSessions().filter((session) => session && typeof session.id === 'string');
+  if (!sessions.length) return;
+  const currentIndex = Math.max(0, sessions.findIndex((session) => session.id === selectedSessionId));
+  const nextIndex = (currentIndex + delta + sessions.length) % sessions.length;
+  selectedSessionId = sessions[nextIndex].id;
+  renderSessions();
+  requestAnimationFrame(() => {
+    sessionListEl?.querySelector(`[data-session-id="${CSS.escape(selectedSessionId)}"]`)?.focus();
+  });
 }
 
 function renderSessions() {
@@ -82,10 +155,10 @@ function renderSessions() {
   sessionListEl.textContent = '';
   const sessions = Array.isArray(knownSessions) ? knownSessions : [];
   sessionHistoryBtn.textContent = sessions.length ? `Chat history · ${sessions.length}` : 'Chat history';
-  const query = sessionSearchQuery.trim().toLowerCase();
-  const filtered = query
-    ? sessions.filter((session) => String(session?.title || '新会话').toLowerCase().includes(query))
-    : sessions;
+  const filtered = filteredSessions();
+  if (filtered.length && !filtered.some((session) => session.id === selectedSessionId)) {
+    selectedSessionId = filtered.find((session) => session.id === activeSessionId)?.id || filtered[0].id;
+  }
   if (!filtered.length) {
     const empty = document.createElement('div');
     empty.className = 'session-empty';
@@ -93,24 +166,123 @@ function renderSessions() {
     sessionListEl.appendChild(empty);
     return;
   }
+  let lastGroup = '';
   for (const session of filtered) {
     if (!session || typeof session.id !== 'string') continue;
-    const item = document.createElement('button');
-    item.className = `session-item${session.id === activeSessionId ? ' active' : ''}`;
-    item.type = 'button';
-    item.disabled = runtimeMode !== 'idle' || session.id === activeSessionId;
+    const group = sessionGroupLabel(session.updatedAt);
+    if (group !== lastGroup) {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'session-group';
+      groupEl.textContent = group;
+      sessionListEl.appendChild(groupEl);
+      lastGroup = group;
+    }
+    const item = document.createElement('div');
+    item.className = [
+      'session-item',
+      session.id === activeSessionId ? 'active' : '',
+      session.id === selectedSessionId ? 'selected' : '',
+    ].filter(Boolean).join(' ');
+    item.tabIndex = 0;
+    item.role = 'button';
     item.dataset.sessionId = session.id;
-    const title = document.createElement('span');
-    title.className = 'session-title';
-    title.textContent = session.title || '新会话';
+    const main = document.createElement('div');
+    main.className = 'session-main';
+    if (renamingSessionId === session.id) {
+      const input = document.createElement('input');
+      input.className = 'session-rename-input';
+      input.value = session.title || '新会话';
+      input.spellcheck = false;
+      input.addEventListener('click', (event) => event.stopPropagation());
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') renameSession(session.id, input.value);
+        if (event.key === 'Escape') {
+          renamingSessionId = null;
+          renderSessions();
+        }
+      });
+      input.addEventListener('blur', () => {
+        if (renamingSessionId === session.id) renameSession(session.id, input.value);
+      });
+      main.appendChild(input);
+      requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    } else {
+      const title = document.createElement('span');
+      title.className = 'session-title';
+      title.textContent = session.title || '新会话';
+      main.appendChild(title);
+    }
     const time = document.createElement('span');
     time.className = 'session-time';
     time.textContent = formatSessionTime(session.updatedAt);
-    item.append(title, time);
+    const actions = document.createElement('div');
+    actions.className = 'session-actions';
+    if (pendingDeleteSessionId === session.id) {
+      actions.classList.add('confirming');
+      const confirmDelete = document.createElement('button');
+      confirmDelete.type = 'button';
+      confirmDelete.className = 'session-action-text danger';
+      confirmDelete.title = '确认删除';
+      confirmDelete.textContent = '删除';
+      confirmDelete.addEventListener('click', (event) => {
+        event.stopPropagation();
+        commitDeleteSession(session);
+      });
+      const cancelDelete = document.createElement('button');
+      cancelDelete.type = 'button';
+      cancelDelete.className = 'session-action-text';
+      cancelDelete.title = '取消删除';
+      cancelDelete.textContent = '取消';
+      cancelDelete.addEventListener('click', (event) => {
+        event.stopPropagation();
+        pendingDeleteSessionId = null;
+        renderSessions();
+      });
+      actions.append(confirmDelete, cancelDelete);
+    } else {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'session-action';
+      edit.title = '重命名';
+      edit.textContent = '✎';
+      edit.addEventListener('click', (event) => {
+        event.stopPropagation();
+        pendingDeleteSessionId = null;
+        renamingSessionId = session.id;
+        selectedSessionId = session.id;
+        renderSessions();
+      });
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'session-action danger';
+      del.title = '删除';
+      del.textContent = '×';
+      del.disabled = runtimeMode !== 'idle';
+      del.addEventListener('click', (event) => {
+        event.stopPropagation();
+        requestDeleteSession(session);
+      });
+      actions.append(edit, del);
+    }
+    item.append(main, time, actions);
     item.addEventListener('click', () => {
-      if (runtimeMode !== 'idle' || session.id === activeSessionId) return;
-      setSessionHistoryOpen(false);
-      vscode.postMessage({ type: 'switchSession', sessionId: session.id });
+      selectedSessionId = session.id;
+      if (renamingSessionId) return;
+      switchToSession(session.id);
+    });
+    item.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') switchToSession(session.id);
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveSessionSelection(1);
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveSessionSelection(-1);
+      }
     });
     sessionListEl.appendChild(item);
   }
@@ -1434,7 +1606,22 @@ sessionSearchEl.addEventListener('input', () => {
   renderSessions();
 });
 sessionSearchEl.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') setSessionHistoryOpen(false);
+  if (event.key === 'Escape') {
+    setSessionHistoryOpen(false);
+    return;
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    moveSessionSelection(1);
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    moveSessionSelection(-1);
+  }
+  if (event.key === 'Enter' && selectedSessionId) {
+    event.preventDefault();
+    switchToSession(selectedSessionId);
+  }
 });
 document.addEventListener('click', (event) => {
   if (!sessionHistoryOpen || !sessionsEl) return;

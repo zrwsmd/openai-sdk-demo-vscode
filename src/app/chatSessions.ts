@@ -76,6 +76,42 @@ export class ChatSessionCatalog {
     return session;
   }
 
+  async rename(sessionId: string, title: string): Promise<ChatSessionSummary> {
+    const index = await this.initialize();
+    const session = index.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`会话不存在: ${sessionId}`);
+    session.title = normalizeTitle(title);
+    await this.writeIndex(index);
+    return session;
+  }
+
+  async delete(sessionId: string): Promise<ChatSessionIndex> {
+    const index = await this.initialize();
+    const session = index.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`会话不存在: ${sessionId}`);
+    const remaining = index.sessions.filter((item) => item.id !== sessionId);
+    await fs.rm(this.pathsFor(sessionId).dir, { recursive: true, force: true });
+    if (!remaining.length) {
+      const now = new Date().toISOString();
+      const replacement: ChatSessionSummary = {
+        id: randomUUID(),
+        title: DEFAULT_TITLE,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await fs.mkdir(this.pathsFor(replacement.id).dir, { recursive: true });
+      index.sessions = [replacement];
+      index.activeSessionId = replacement.id;
+    } else {
+      index.sessions = remaining;
+      if (index.activeSessionId === sessionId || !remaining.some((item) => item.id === index.activeSessionId)) {
+        index.activeSessionId = remaining[0].id;
+      }
+    }
+    await this.writeIndex(index);
+    return this.readIndex();
+  }
+
   async touch(sessionId: string, titleHint?: string): Promise<void> {
     const index = await this.initialize();
     const session = index.sessions.find((item) => item.id === sessionId);

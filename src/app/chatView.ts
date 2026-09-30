@@ -43,6 +43,7 @@ import {
  * 会话持久化:每个工作区维护多会话索引,每个会话独立保存 SDK Session 与运行状态。
  * 消息协议:
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'newSession'} / {type:'switchSession', sessionId}
+ *                   {type:'renameSession', sessionId, title} / {type:'deleteSession', sessionId}
  *                   {type:'stop'} / {type:'retry'}
  *                   {type:'continue'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
@@ -100,6 +101,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.newSession();
       } else if (msg.type === 'switchSession' && typeof msg.sessionId === 'string') {
         void this.switchSession(msg.sessionId);
+      } else if (msg.type === 'renameSession' && typeof msg.sessionId === 'string' && typeof msg.title === 'string') {
+        void this.renameSession(msg.sessionId, msg.title);
+      } else if (msg.type === 'deleteSession' && typeof msg.sessionId === 'string') {
+        void this.deleteSession(msg.sessionId);
       } else if (msg.type === 'approvalResponse') {
         void this.resolveApproval(msg);
       } else if (msg.type === 'stop') {
@@ -210,6 +215,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.activateRuntime(sessionId);
     await this.postSessions();
     await this.coordinator!.initialize();
+  }
+
+  private async renameSession(sessionId: string, title: string): Promise<void> {
+    await this.sessionCatalog.rename(sessionId, title);
+    await this.postSessions();
+  }
+
+  private async deleteSession(sessionId: string): Promise<void> {
+    if (sessionId === this.activeSessionId && !(await this.canLeaveActiveSession())) return;
+    const index = await this.sessionCatalog.delete(sessionId);
+    if (this.activeSessionId !== index.activeSessionId) {
+      this.activateRuntime(index.activeSessionId);
+      await this.postSessions();
+      await this.coordinator!.initialize();
+      return;
+    }
+    await this.postSessions();
   }
 
   /** 配置优先级:插件内保存 > VSCode 设置 > 环境变量 > 默认值 */

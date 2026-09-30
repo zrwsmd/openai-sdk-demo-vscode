@@ -91,15 +91,15 @@ body { display: flex; flex-direction: column; }
   padding: 0 2px;
 }
 .session-search {
-  height: 34px;
+  height: 42px;
   display: flex;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--box);
   color: var(--muted);
-  padding: 0 10px;
+  padding: 0 12px;
 }
 .session-search input {
   width: 100%;
@@ -115,29 +115,44 @@ body { display: flex; flex-direction: column; }
 .session-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   overflow-y: auto;
   min-height: 0;
   padding: 2px 0;
 }
 
+.session-group {
+  margin: 10px 4px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.session-group:first-child { margin-top: 2px; }
+
 .session-item {
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   text-align: left;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: var(--fg);
-  padding: 7px 9px;
+  padding: 7px 8px 7px 10px;
   cursor: pointer;
 }
 .session-item:hover:not(:disabled) {
   background: color-mix(in srgb, var(--box) 78%, transparent);
+}
+.session-item:focus-visible,
+.session-item.selected {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .session-item.active {
   border-color: var(--accent);
@@ -145,6 +160,9 @@ body { display: flex; flex-direction: column; }
   cursor: default;
 }
 .session-item:disabled:not(.active) { opacity: 0.45; cursor: default; }
+.session-main {
+  min-width: 0;
+}
 .session-title {
   display: block;
   overflow: hidden;
@@ -152,11 +170,82 @@ body { display: flex; flex-direction: column; }
   white-space: nowrap;
   font-size: 13px;
 }
+.session-rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--box);
+  color: var(--fg);
+  padding: 0 7px;
+  font: inherit;
+}
 .session-time {
   display: block;
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+}
+.session-actions {
+  display: inline-flex;
+  gap: 3px;
+  opacity: 0;
+  pointer-events: none;
+  justify-content: flex-end;
+}
+.session-item:hover .session-actions,
+.session-item:focus-within .session-actions,
+.session-item.selected .session-actions,
+.session-actions.confirming {
+  opacity: 1;
+  pointer-events: auto;
+}
+.session-action {
+  width: 23px;
+  height: 23px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+}
+.session-action:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--box) 86%, transparent);
+}
+.session-action.danger:hover:not(:disabled) {
+  color: var(--vscode-errorForeground, #f66);
+  border-color: color-mix(in srgb, var(--vscode-errorForeground, #f66) 58%, transparent);
+}
+.session-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.session-action-text {
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--box) 88%, transparent);
+  color: var(--fg);
+  cursor: pointer;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+}
+.session-action-text:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--box));
+}
+.session-action-text.danger {
+  color: var(--vscode-errorForeground, #f66);
+  border-color: color-mix(in srgb, var(--vscode-errorForeground, #f66) 52%, transparent);
+}
+.session-action-text.danger:hover {
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f66) 12%, var(--box));
 }
 .session-empty { color: var(--muted); font-size: 12px; padding: 12px 4px; }
 

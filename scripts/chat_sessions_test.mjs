@@ -46,4 +46,20 @@ const finalIndex = await catalog.list();
 assert(finalIndex.activeSessionId === firstIndex.activeSessionId, 'switching active session failed');
 assert(finalIndex.sessions.length === 2, 'session list lost history session');
 
-console.log('chat session tests passed: legacy migration, creation, title update, switching');
+await catalog.rename(second.id, '重命名后的会话');
+const renamedIndex = await catalog.list();
+assert(
+  renamedIndex.sessions.find((session) => session.id === second.id)?.title === '重命名后的会话',
+  'session rename was not persisted',
+);
+
+const afterDeletingInactive = await catalog.delete(second.id);
+assert(afterDeletingInactive.activeSessionId === firstIndex.activeSessionId, 'deleting inactive session changed active session');
+assert(afterDeletingInactive.sessions.every((session) => session.id !== second.id), 'deleted inactive session remained in index');
+
+const afterDeletingLast = await catalog.delete(firstIndex.activeSessionId);
+assert(afterDeletingLast.sessions.length === 1, 'deleting the last session should create a replacement session');
+assert(afterDeletingLast.activeSessionId === afterDeletingLast.sessions[0].id, 'replacement session should become active');
+assert(afterDeletingLast.sessions[0].title === '新会话', 'replacement session should use default title');
+
+console.log('chat session tests passed: legacy migration, creation, title update, switching, rename, delete');
