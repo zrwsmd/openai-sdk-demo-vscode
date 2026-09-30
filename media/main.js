@@ -312,14 +312,15 @@ function renderInlineThinking(state, text) {
   scrollBottom();
 }
 
-function finalizeThinkingSegment(state) {
-  const text = state.text.trim();
+function compactThinkingSegment(state) {
+  const text = String(state.text ?? '').trim();
   if (!text) {
+    if (state.inlineView) {
+      state.inlineView.remove();
+      thinkingInlineViews.delete(state.key);
+      state.inlineView = null;
+    }
     detachThinkingCard(state);
-    return;
-  }
-  if (isShortThinkingText(text)) {
-    renderInlineThinking(state, text);
     return;
   }
   if (state.inlineView) {
@@ -328,6 +329,14 @@ function finalizeThinkingSegment(state) {
     state.inlineView = null;
   }
   ensureThinkingCard(state);
+  if (state.view?.el) state.view.el.open = false;
+}
+
+function compactThinkingForRun(runId) {
+  if (!runId) return;
+  for (const state of thinkingSegments.values()) {
+    if (state.runId === runId) compactThinkingSegment(state);
+  }
 }
 
 function closeThinkingSegment(runId) {
@@ -336,11 +345,12 @@ function closeThinkingSegment(runId) {
   if (active) {
     const state = thinkingSegments.get(active);
     if (state) {
-      finalizeThinkingSegment(state);
+      compactThinkingSegment(state);
       state.finalized = true;
     }
   }
   activeThinkingSegments.delete(runId);
+  compactThinkingForRun(runId);
 }
 
 function nextThinkingSegmentKey(runId) {
