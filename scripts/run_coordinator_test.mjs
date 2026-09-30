@@ -442,6 +442,161 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A paused run owns its workflow/delivery decision. Follow-up text after a
+// manual stop is treated as a supplement by state, not by enumerating phrases
+// such as "continue" or "use Chinese".
+{
+  let executorCalls = 0;
+  let receivedText;
+  let receivedContract;
+  let receivedWorkflowId;
+  let receivedResumeInstruction;
+  let workflowClassifierCalls = 0;
+  let deliveryClassifierCalls = 0;
+  const contract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '原始任务需要交付物',
+    deliverables: [{
+      kind: 'code',
+      title: '程序',
+      description: '需要保存到工作区的程序',
+      required: true,
+      acceptableEvidence: ['successful_write'],
+    }],
+  });
+  const test = await fixture(async (_cfg, _session, userText, options) => {
+    executorCalls += 1;
+    receivedText = userText;
+    receivedContract = options.deliveryContract;
+    receivedWorkflowId = options.workflowId;
+    receivedResumeInstruction = options.resumeInstruction;
+    return {
+      status: 'completed',
+      output: 'continued delivery',
+      usage,
+      result: completedAgentResult('continued delivery'),
+    };
+  }, undefined, {
+    classifyWorkflowDecision: async () => {
+      workflowClassifierCalls += 1;
+      return {
+        kind: 'fallback',
+        mode: 'general_chat',
+        source: 'model',
+        confidence: 0.99,
+        reason: 'wrong new-task classification',
+        signals: {},
+      };
+    },
+    classifyDeliveryContract: async () => {
+      deliveryClassifierCalls += 1;
+      return undefined;
+    },
+  });
+  const paused = await test.store.begin(
+    '生成一个需要保存的程序',
+    config,
+    0,
+    'operation-paused-delivery',
+    undefined,
+    undefined,
+    contract,
+    'st_workspace_delivery',
+  );
+  paused.status = 'paused';
+  paused.canContinue = true;
+  paused.result = { protocolVersion: 1, status: 'cancelled', reason: 'user_paused', usage };
+  await test.store.update(paused);
+  await test.coordinator.start('把解释写得更详细，保留所有边界条件', config, 'key');
+  const completed = await test.store.getLast();
+  const userEvent = test.events.find((event) => event.type === 'user');
+  if (
+    executorCalls !== 1 ||
+    receivedText !== '生成一个需要保存的程序' ||
+    receivedContract?.requiresDeliverable !== true ||
+    receivedWorkflowId !== 'st_workspace_delivery' ||
+    receivedResumeInstruction !== '把解释写得更详细，保留所有边界条件' ||
+    workflowClassifierCalls !== 0 ||
+    deliveryClassifierCalls !== 0 ||
+    completed?.status !== 'completed' ||
+    userEvent?.text !== '把解释写得更详细，保留所有边界条件'
+  ) {
+    throw new Error('paused run supplement did not preserve the original delivery context');
+  }
+}
+
+// If the user explicitly discards the paused task, start a fresh request
+// instead of carrying over the previous workflow contract.
+{
+  let executorCalls = 0;
+  let receivedText;
+  let receivedContract;
+  let receivedWorkflowId;
+  let receivedResumeInstruction;
+  const contract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '旧任务需要交付物',
+    deliverables: [{
+      kind: 'code',
+      title: '程序',
+      description: '旧任务程序',
+      required: true,
+      acceptableEvidence: ['successful_write'],
+    }],
+  });
+  const test = await fixture(async (_cfg, _session, userText, options) => {
+    executorCalls += 1;
+    receivedText = userText;
+    receivedContract = options.deliveryContract;
+    receivedWorkflowId = options.workflowId;
+    receivedResumeInstruction = options.resumeInstruction;
+    return {
+      status: 'completed',
+      output: 'fresh task',
+      usage,
+      result: completedAgentResult('fresh task'),
+    };
+  }, undefined, {
+    classifyWorkflowDecision: async () => ({
+      kind: 'fallback',
+      mode: 'general_chat',
+      source: 'model',
+      confidence: 0.99,
+      reason: 'fresh explicit task',
+      signals: {},
+    }),
+  });
+  const paused = await test.store.begin(
+    '生成一个需要保存的程序',
+    config,
+    0,
+    'operation-paused-discard',
+    undefined,
+    undefined,
+    contract,
+    'st_workspace_delivery',
+  );
+  paused.status = 'paused';
+  paused.canContinue = true;
+  paused.result = { protocolVersion: 1, status: 'cancelled', reason: 'user_paused', usage };
+  await test.store.update(paused);
+  await test.coordinator.start('新任务：读取 yy.txt', config, 'key');
+  const completed = await test.store.getLast();
+  const userEvent = test.events.find((event) => event.type === 'user');
+  if (
+    executorCalls !== 1 ||
+    receivedText !== '新任务：读取 yy.txt' ||
+    receivedContract !== undefined ||
+    receivedWorkflowId !== undefined ||
+    receivedResumeInstruction !== undefined ||
+    completed?.status !== 'completed' ||
+    userEvent?.text !== '新任务：读取 yy.txt' ||
+    userEvent?.continuation === true
+  ) {
+    throw new Error('explicit fresh request incorrectly resumed paused context');
+  }
+}
+
 // If a simple request was misplanned and the executor never advances the
 // linear plan, fall back to the ordinary single-agent path instead of failing
 // the run with AgentActionVerificationError.

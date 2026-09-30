@@ -155,6 +155,32 @@ function shouldSuppressAutoPreparation(
       decision.source === 'model');
 }
 
+function shouldStartFreshInsteadOfResume(text: string | undefined): boolean {
+  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  return (
+    /(?:不要|不用|别|别再)(?:继续|接着|恢复|续跑|执行|做)(?:了|啦)?[。！!,.，、\s]*$/u.test(normalized) ||
+    /(?:取消|放弃)(?:刚才|上次|前面|当前|本轮|这个)?(?:任务|运行|请求|生成|交付|继续|续跑)?[。！!,.，、\s]*$/u.test(normalized) ||
+    /(?:重新来|重来|从头开始|重新开始|开新任务|新任务|另一个任务|换个任务|改做另一个)/u.test(normalized)
+  );
+}
+
+function hasSelectedRunContext(run: DurableRunRecord | undefined): boolean {
+  return !!run && (
+    !!run.workflowId ||
+    !!run.deliveryContract ||
+    (run.toolAllowlist?.length ?? 0) > 0 ||
+    !!run.plan ||
+    !!run.teamTask
+  );
+}
+
+function resumeInstructionFromDisplayText(text: string | undefined): string | undefined {
+  const normalized = String(text ?? '').trim();
+  if (!normalized || shouldStartFreshInsteadOfResume(normalized)) return undefined;
+  return normalized;
+}
+
 export type DeliveryContractClassifier = (
   cfg: AgentConfig,
   userText: string,
@@ -467,6 +493,14 @@ export class RunCoordinator {
     if (this.busy || this.transitioning || this.clearing) return;
     const generation = this.beginTransition();
     try {
+      const continuable = await this.store.getContinuable();
+      if (continuable && !shouldStartFreshInsteadOfResume(userText)) {
+        this.emit({ type: 'user', text: userText, runId: continuable.id, continuation: true });
+        await this.continueFromPrevious(continuable, apiKey, userText, generation, {
+          preserveSelectedContextForSupplement: true,
+        });
+        return;
+      }
       if (await this.store.getActive()) return;
       const error = validateConfig(this.agentConfig(config, apiKey));
       if (error) {
@@ -933,85 +967,105 @@ export class RunCoordinator {
         this.emit({ type: 'error', message: '没有可续跑的任务断点，请使用重试重新执行。' });
         return;
       }
-      if (validateConfig({ ...previous.config, apiKey })) {
-        this.emit({
-          type: 'error',
-          message: '继续失败：当前没有可用的 API Key。',
-          canContinue: true,
-        });
-        return;
-      }
-      if (this.isClearing(generation)) return;
-      const hasSdkState = typeof previous.state === 'string' && previous.state.length > 0;
-      // Only a current paused record is eligible for SDK RunState.resume.
-      // Legacy retryable `failed` records may contain a stale serialized
-      // state, but their session boundary is the only safe continuation.
-      const canResumeSdkState = previous.status === 'paused' && hasSdkState;
-      if (!canResumeSdkState) {
-        // An immediate stop can happen before the SDK has a serializable
-        // RunState. The stopped turn was already rolled back, so claim a new
-        // attempt in the same operation lineage; the effect journal prevents
-        // completed or uncertain side effects from being duplicated.
-        await this.session.truncate(previous.sessionItemCountBefore);
-      }
-      if (this.isClearing(generation)) return;
-      const run = canResumeSdkState
-        ? await this.store.resume(previous.id)
-        : await this.store.begin(
-          previous.userText,
-          previous.config,
-          previous.sessionItemCountBefore,
-          previous.operationId,
-          restartTaskPlan(previous.plan),
-          continueTeamTask(previous.teamTask),
-          previous.deliveryContract,
-          previous.workflowId,
-        );
-      run.resumeStage = previous.resumeStage;
-      await this.store.update(run);
-      if (this.isClearing(generation)) return;
-      await this.audit('run_resumed', run, {
-        resumedRunId: previous.id,
-        strategy: canResumeSdkState ? 'sdk_state' : 'safe_restart',
-      });
-      if (this.isClearing(generation)) return;
-      this.emit({
-        type: 'resumeStarted',
-        runId: run.id,
-        continued: true,
-        restartedFromBoundary: !canResumeSdkState,
-        userText: run.userText,
-        displayText: displayText?.trim() || undefined,
-      });
-      if (run.plan) {
-        this.ensureProtocolFactory(run);
-        this.emitProtocol(this.protocolFactory!.next({
-          type: 'run.progress',
-          payload: { stage: 'plan.restored', plan: run.plan },
-        }));
-      }
-      if (run.teamTask) this.emitTeamProgress(run, 'team.restored', '已恢复 Team 任务图');
-      if (run.resumeStage) {
-        const ready = await this.resumePreflight(run, apiKey, generation);
-        if (!ready || this.isClearing(generation)) return;
-      }
-      if (this.stopRequested) {
-        this.stopRequested = false;
-        await this.pausePending(run, false);
-        return;
-      }
-      await this.execute(
-        run,
-        apiKey,
-        canResumeSdkState
-          ? { initialState: run.state }
-          : { preserveToolHistory: true },
-      );
+      await this.continueFromPrevious(previous, apiKey, displayText, generation);
     } catch (error) {
       this.emit({ type: 'error', message: this.formatError(error), canRetry: true });
     } finally {
       this.endTransition();
     }
+  }
+
+  private async continueFromPrevious(
+    previous: DurableRunRecord,
+    apiKey: string,
+    displayText: string | undefined,
+    generation: number,
+    options: { preserveSelectedContextForSupplement?: boolean } = {},
+  ): Promise<void> {
+    if (validateConfig({ ...previous.config, apiKey })) {
+      this.emit({
+        type: 'error',
+        message: '继续失败：当前没有可用的 API Key。',
+        canContinue: true,
+      });
+      return;
+    }
+    if (this.isClearing(generation)) return;
+    const hasSdkState = typeof previous.state === 'string' && previous.state.length > 0;
+    // Only a current paused record is eligible for SDK RunState.resume.
+    // Legacy retryable `failed` records may contain a stale serialized
+    // state, but their session boundary is the only safe continuation.
+    const canResumeSdkState = previous.status === 'paused' && hasSdkState;
+    if (!canResumeSdkState) {
+      // An immediate stop can happen before the SDK has a serializable
+      // RunState. The stopped turn was already rolled back, so claim a new
+      // attempt in the same operation lineage; the effect journal prevents
+      // completed or uncertain side effects from being duplicated.
+      await this.session.truncate(previous.sessionItemCountBefore);
+    }
+    if (this.isClearing(generation)) return;
+    const run = canResumeSdkState
+      ? await this.store.resume(previous.id)
+      : await this.store.begin(
+        previous.userText,
+        previous.config,
+        previous.sessionItemCountBefore,
+        previous.operationId,
+        restartTaskPlan(previous.plan),
+        continueTeamTask(previous.teamTask),
+        previous.deliveryContract,
+        previous.workflowId,
+      );
+    const preserveSelectedContext =
+      options.preserveSelectedContextForSupplement === true &&
+      !!resumeInstructionFromDisplayText(displayText) &&
+      hasSelectedRunContext(previous);
+    run.resumeStage = preserveSelectedContext ? undefined : previous.resumeStage;
+    await this.store.update(run);
+    if (this.isClearing(generation)) return;
+    await this.audit('run_resumed', run, {
+      resumedRunId: previous.id,
+      strategy: canResumeSdkState ? 'sdk_state' : 'safe_restart',
+    });
+    if (this.isClearing(generation)) return;
+    this.emit({
+      type: 'resumeStarted',
+      runId: run.id,
+      continued: true,
+      restartedFromBoundary: !canResumeSdkState,
+      userText: run.userText,
+      displayText: displayText?.trim() || undefined,
+    });
+    if (run.plan) {
+      this.ensureProtocolFactory(run);
+      this.emitProtocol(this.protocolFactory!.next({
+        type: 'run.progress',
+        payload: { stage: 'plan.restored', plan: run.plan },
+      }));
+    }
+    if (run.teamTask) this.emitTeamProgress(run, 'team.restored', '已恢复 Team 任务图');
+    if (run.resumeStage) {
+      const ready = await this.resumePreflight(run, apiKey, generation);
+      if (!ready || this.isClearing(generation)) return;
+    }
+    if (this.stopRequested) {
+      this.stopRequested = false;
+      await this.pausePending(run, false);
+      return;
+    }
+    await this.execute(
+      run,
+      apiKey,
+      canResumeSdkState
+        ? {
+          initialState: run.state,
+          resumeInstruction: resumeInstructionFromDisplayText(displayText),
+        }
+        : {
+          preserveToolHistory: true,
+          resumeInstruction: resumeInstructionFromDisplayText(displayText),
+        },
+    );
   }
 
   private async pauseBeforeSdkTurn(
@@ -1359,7 +1413,7 @@ export class RunCoordinator {
   private async execute(
     run: DurableRunRecord,
     apiKey: string,
-    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'> = {},
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction'> = {},
   ): Promise<void> {
     if (this.busy) return;
     this.busy = true;
@@ -1483,7 +1537,10 @@ export class RunCoordinator {
         }
       }
       const executeSingleAgent = (
-        agentOptions: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'>,
+        agentOptions: Pick<
+          AgentRunOptions,
+          'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction'
+        >,
       ): Promise<AgentRunResult> =>
         this.executeAgent(
           {

@@ -179,6 +179,12 @@ export interface AgentRunOptions {
   toolRegistry?: ToolRegistry;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
+  /**
+   * Supplemental instruction supplied while resuming a paused run. It refines
+   * presentation or execution preferences without replacing the original
+   * task, workflow, or delivery contract.
+   */
+  resumeInstruction?: string;
   /** Persists validated step transitions outside the SDK session. */
   onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
@@ -2158,6 +2164,11 @@ export async function runAgent(
         : {}),
     };
     const runtimeInstructions = [
+      options.resumeInstruction?.trim()
+        ? "本轮是从暂停断点继续。以下是用户对同一任务的补充指令，" +
+          "只能作为表达方式、约束或执行偏好的增量；不得用它替换原始用户目标、workflow 或交付契约：\n" +
+          options.resumeInstruction.trim()
+        : "",
       runtimeCompletionRepairInstruction
         ? "运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
           runtimeCompletionRepairInstruction
