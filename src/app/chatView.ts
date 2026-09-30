@@ -225,6 +225,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.context.globalState.get<unknown>(LEGACY_SETTINGS_STATE_KEY),
     );
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
+    const runCommandModeSetting = cfg.get<'local' | 'dockerSandbox'>('runCommand.mode') ?? 'local';
+    const runCommandMode: 'local' | 'dockerSandbox' = runCommandModeSetting === 'dockerSandbox' ? 'dockerSandbox' : 'local';
+    const runCommandDockerImage = (cfg.get<string>('runCommand.dockerImage') ?? '').trim();
+    const runCommandNetworkMode = cfg.get<'default' | 'none'>('runCommand.networkMode') ?? 'default';
+    const runCommand: NonNullable<DurableRunConfig['runCommand']> = {
+      mode: runCommandMode,
+      ...(runCommandDockerImage ? { dockerImage: runCommandDockerImage } : {}),
+      ...(runCommandNetworkMode === 'none' ? { networkMode: 'none' as const } : {}),
+    };
     const allowedDevices = stringListSetting(cfg, 'allowedDevices');
     const showThinking = cfg.get<boolean>('ui.showThinking') ?? true;
     const jev = {
@@ -366,6 +375,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         allowedDevices,
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
+      runCommand,
       modelContext,
       jev,
       showThinking,
@@ -458,6 +468,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       workspaceRoot: workspaceRoots[0] ?? '',
       workspaceRoots,
       policyContext: live.policyContext,
+      runCommand: live.runCommand,
       modelContext: live.modelContext,
       orchestration: live.orchestration,
       extensions: createStAnalyzerConfigExtension(this.context),

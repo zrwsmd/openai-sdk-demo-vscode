@@ -26,6 +26,11 @@ const config = {
     allowedDevices: ['plc-main'],
     dryRun: true,
   },
+  runCommand: {
+    mode: 'dockerSandbox',
+    dockerImage: 'openai/sandbox:latest',
+    networkMode: 'none',
+  },
   modelContext: {
     contextWindowTokens: 128_000,
     reservedOutputTokens: 4_096,
@@ -75,6 +80,13 @@ if (
   restored.config.policyContext.allowedDevices?.[0] !== 'plc-main'
 ) {
   throw new Error('policy context was not persisted with the durable run');
+}
+if (
+  restored.config.runCommand?.mode !== 'dockerSandbox' ||
+  restored.config.runCommand.dockerImage !== 'openai/sandbox:latest' ||
+  restored.config.runCommand.networkMode !== 'none'
+) {
+  throw new Error('run_command backend config was not persisted with the durable run');
 }
 if (
   restored.config.modelContext?.contextWindowTokens !== 128_000 ||

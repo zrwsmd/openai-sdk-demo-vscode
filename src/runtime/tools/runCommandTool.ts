@@ -1,6 +1,5 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { runCommand } from "../../tools/workspaceTools";
 import {
   commandToolResult,
   type ToolBuildContext,
@@ -11,6 +10,7 @@ export function createRunCommandTool(ctx: ToolBuildContext) {
     guard,
     guardrails,
     workspace,
+    commandRunner,
     withEffect,
   } = ctx;
 
@@ -29,12 +29,12 @@ export function createRunCommandTool(ctx: ToolBuildContext) {
           withEffect("run_command", { command }, "execute", async () =>
             commandToolResult(
               command,
-              await runCommand(
-                workspace.primaryRoot,
+              await commandRunner.run({
+                cwd: workspace.primaryRoot,
                 command,
-                60_000,
-                details?.signal,
-              ),
+                timeoutMs: 60_000,
+                signal: details?.signal,
+              }),
             ),
           ),
         "execute",

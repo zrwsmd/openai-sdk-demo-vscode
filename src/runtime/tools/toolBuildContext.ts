@@ -16,6 +16,8 @@ import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/wo
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
 import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
 import type { Diagnostic } from "../../protocol/results";
+import type { CommandRunner } from "../../tools/commandRunner";
+import { LocalCommandRunner } from "../../tools/workspaceTools";
 import {
   EMPTY_RUNTIME_SERVICES,
   type RuntimeServiceContainer,
@@ -124,6 +126,7 @@ export interface ToolBuildContext {
   services: RuntimeServiceContainer;
   policy: ToolPolicy;
   plc: PlcAdapter;
+  commandRunner: CommandRunner;
   workspace: WorkspaceScope;
   guardrails: ToolGuardrails;
   workflowContract?: WorkflowContract;
@@ -325,6 +328,7 @@ export function createToolBuildContext(
 ): ToolBuildContext {
   const policy = cfg.policy ?? new DefaultToolPolicy(options.riskByTool);
   const plc = cfg.plcAdapter ?? new MockPlcAdapter();
+  const commandRunner = cfg.commandRunner ?? new LocalCommandRunner();
   const workspace = workspaceScopeFromRoots(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
@@ -385,6 +389,7 @@ export function createToolBuildContext(
     services: cfg.services ?? EMPTY_RUNTIME_SERVICES,
     policy,
     plc,
+    commandRunner,
     workspace,
     guardrails,
     workflowContract: options.workflowContract,

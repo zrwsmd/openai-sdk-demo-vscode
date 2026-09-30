@@ -18,7 +18,13 @@ import {
 import { AgentOutputValidationError } from './output';
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
-import type { DurableRunConfig, DurableRunRecord, DurableRunResumeStage, RunStore } from './runStore';
+import type {
+  DurableRunCommandConfig,
+  DurableRunConfig,
+  DurableRunRecord,
+  DurableRunResumeStage,
+  RunStore,
+} from './runStore';
 import type { AgentConfig } from './agentConfig';
 import { usesOfficialOpenAIResponses } from './modelAdapter';
 import { modelContextCalibrationRouteKey } from './contextTokenEstimator';
@@ -66,6 +72,8 @@ import {
   getDefaultToolRegistry,
   type ToolRegistry,
 } from './toolRegistry';
+import type { CommandRunner } from '../tools/commandRunner';
+import { SandboxCommandRunner } from '../tools/sandboxCommandRunner';
 import {
   applyTeamPlannerReport,
   checkpointTeamVerification,
@@ -153,6 +161,14 @@ function shouldSuppressAutoPreparation(
     (decision.mode === 'blocked_high_risk' ||
       decision.mode === 'command_query' ||
       decision.source === 'model');
+}
+
+function commandRunnerFromConfig(config: DurableRunCommandConfig | undefined): CommandRunner | undefined {
+  if (!config || config.mode === 'local') return undefined;
+  return new SandboxCommandRunner({
+    ...(config.dockerImage?.trim() ? { image: config.dockerImage.trim() } : {}),
+    ...(config.networkMode ? { networkMode: config.networkMode } : {}),
+  });
 }
 
 function shouldStartFreshInsteadOfResume(text: string | undefined): boolean {
@@ -370,6 +386,7 @@ export class RunCoordinator {
       ...config,
       apiKey,
       decisionService: this.decisionService,
+      commandRunner: commandRunnerFromConfig(config.runCommand),
       services: this.createRuntimeServices?.(config),
     };
   }

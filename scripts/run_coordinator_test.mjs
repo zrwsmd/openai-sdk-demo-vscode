@@ -442,6 +442,42 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// run_command backend selection is injected at runtime. The durable config
+// stays JSON-only, while the AgentConfig receives the selected runner object.
+{
+  let receivedRunnerId;
+  const test = await fixture(async (cfg) => {
+    receivedRunnerId = cfg.commandRunner?.id;
+    return {
+      status: 'completed',
+      output: 'sandbox runner selected',
+      usage,
+      result: completedAgentResult('sandbox runner selected'),
+    };
+  }, undefined, {
+    classifyWorkflowDecision: async () => ({
+      kind: 'fallback',
+      mode: 'command_query',
+      confidence: 0.95,
+      reason: 'test command query route',
+    }),
+  });
+  await test.coordinator.start(
+    '查看 node 版本',
+    {
+      ...config,
+      runCommand: {
+        mode: 'dockerSandbox',
+        networkMode: 'none',
+      },
+    },
+    'key',
+  );
+  if (receivedRunnerId !== 'dockerSandbox') {
+    throw new Error('dockerSandbox run_command config did not inject SandboxCommandRunner');
+  }
+}
+
 // A paused run owns its workflow/delivery decision. Follow-up text after a
 // manual stop is treated as a supplement by state, not by enumerating phrases
 // such as "continue" or "use Chinese".

@@ -31,6 +31,14 @@ export type DurableRunStatus =
 
 export type DurableRunResumeStage = 'workflow' | 'delivery' | 'routing' | 'planning' | 'execution';
 
+export type DurableRunCommandMode = 'local' | 'dockerSandbox';
+
+export interface DurableRunCommandConfig {
+  mode: DurableRunCommandMode;
+  dockerImage?: string;
+  networkMode?: 'none';
+}
+
 export interface DurableRunConfig {
   baseUrl: string;
   model: string;
@@ -42,6 +50,8 @@ export interface DurableRunConfig {
   workspaceRoots?: string[];
   /** Host-configured policy limits persisted with the run for safe resume/retry. */
   policyContext?: ToolPolicyOverrides;
+  /** run_command execution backend; omitted keeps the historical local runner. */
+  runCommand?: DurableRunCommandConfig;
   /** Generic model context and local-compaction profile persisted for resume/retry. */
   modelContext?: ModelContextProfile;
   orchestration?: IndustrialAgentMode;
@@ -275,6 +285,15 @@ function isJevSettings(value: unknown): boolean {
   return true;
 }
 
+function isRunCommandConfig(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    (value.mode === 'local' || value.mode === 'dockerSandbox') &&
+    (value.dockerImage === undefined || typeof value.dockerImage === 'string') &&
+    (value.networkMode === undefined || value.networkMode === 'none')
+  );
+}
+
 export class JsonRunStore implements RunStore {
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -359,6 +378,7 @@ export class JsonRunStore implements RunStore {
             (!Array.isArray(run.config.policyContext.allowedDevices) ||
               run.config.policyContext.allowedDevices.some((device) => typeof device !== 'string'))) ||
           (run.config.policyContext.dryRun !== undefined && typeof run.config.policyContext.dryRun !== 'boolean'))) ||
+      (run.config.runCommand !== undefined && !isRunCommandConfig(run.config.runCommand)) ||
       (run.config.modelContext !== undefined && !isModelContextProfile(run.config.modelContext)) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       (run.config.extensions !== undefined && !isJsonObject(run.config.extensions)) ||

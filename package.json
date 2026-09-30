@@ -207,6 +207,29 @@
           "default": 0.78,
           "description": "采用 Jev 路由判断的最低置信度；低于该值交给现有模型/规则"
         },
+        "plcAgent.runCommand.mode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "dockerSandbox"
+          ],
+          "default": "local",
+          "description": "run_command 的执行后端；local 使用当前工作区本机 shell，dockerSandbox 使用 OpenAI Agents SDK Docker sandbox"
+        },
+        "plcAgent.runCommand.dockerImage": {
+          "type": "string",
+          "default": "",
+          "description": "dockerSandbox 模式使用的 Docker 镜像；留空使用 SDK 默认镜像"
+        },
+        "plcAgent.runCommand.networkMode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "none"
+          ],
+          "default": "default",
+          "description": "dockerSandbox 模式的网络策略；none 禁止容器网络，default 使用 SDK/Docker 默认网络"
+        },
         "plcAgent.allowedCommands": {
           "type": "array",
           "items": {
