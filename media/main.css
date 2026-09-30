@@ -157,6 +157,13 @@ body { display: flex; flex-direction: column; }
 }
 .thinking-card summary::-webkit-details-marker { display: none; }
 .thinking-card summary::marker { content: ''; }
+.thinking-card summary::after {
+  content: '>';
+  margin-left: 2px;
+}
+.thinking-card[open] summary::after {
+  content: '⌄';
+}
 .thinking-inline {
   margin: 4px 6px;
   color: var(--muted);

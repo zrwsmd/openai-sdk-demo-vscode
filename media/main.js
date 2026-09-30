@@ -25,6 +25,7 @@ let runtimeMode = 'idle';
 let currentRunId = null;
 let canRetry = false;
 let canContinue = false;
+let pauseNoticeEl = null;
 let settingsRequestId = 0;
 let settingsSavePending = false;
 let pendingLocalUserText = null;
@@ -194,6 +195,17 @@ function addNote(className, text) {
   messagesEl.appendChild(el);
   scrollBottom();
   return el;
+}
+
+function clearPauseNotice() {
+  if (pauseNoticeEl?.isConnected) pauseNoticeEl.remove();
+  pauseNoticeEl = null;
+}
+
+function showPauseNotice(text) {
+  clearPauseNotice();
+  pauseNoticeEl = addNote('tool-note', text);
+  return pauseNoticeEl;
 }
 
 function setShowThinking(value) {
@@ -372,7 +384,7 @@ function createThinkingView(key, runId) {
   details.className = 'thinking-card';
   details.dataset.thinkingKey = key;
   const summary = document.createElement('summary');
-  summary.textContent = 'Thinking >';
+  summary.textContent = 'Thinking';
   const body = document.createElement('div');
   body.className = 'thinking-body hidden';
   details.append(summary, body);
@@ -1104,6 +1116,7 @@ function send() {
   if (runtimeMode !== 'idle') return;
   const text = inputEl.value.trim();
   if (!text) return;
+  clearPauseNotice();
   inputEl.value = '';
   autoGrow();
   pendingLocalUserText = text;
@@ -1126,6 +1139,7 @@ retryBtn.addEventListener('click', () => {
 });
 continueBtn.addEventListener('click', () => {
   if (runtimeMode !== 'idle' || !canContinue) return;
+  clearPauseNotice();
   vscode.postMessage({ type: 'continue' });
 });
 inputEl.addEventListener('keydown', (e) => {
@@ -1663,6 +1677,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'cleared':
       clearPendingRunAck();
+      clearPauseNotice();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -1689,6 +1704,7 @@ window.addEventListener('message', (event) => {
     case 'history': {
       // 面板重开:host 回放持久化历史
       clearPendingRunAck();
+      clearPauseNotice();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -1765,6 +1781,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'resumeStarted':
+      clearPauseNotice();
       canContinue = false;
       currentRunId = msg.runId || currentRunId;
       if (typeof msg.displayText === 'string' && msg.displayText.trim()) {
@@ -1812,8 +1829,7 @@ window.addEventListener('message', (event) => {
         if (!agentText) agentBubble.remove();
       }
       agentBubble = null;
-      addNote(
-        'tool-note',
+      showPauseNotice(
         msg.resumeStrategy === 'safe_restart'
           ? '本轮停止较早；输入“继续”会从最近安全位置恢复，也可以重试本轮'
           : '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮',
