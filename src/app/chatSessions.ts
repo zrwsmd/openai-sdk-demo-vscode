@@ -51,6 +51,18 @@ export class ChatSessionCatalog {
     return this.initialize();
   }
 
+  async listHistory(): Promise<ChatSessionIndex> {
+    const index = await this.initialize();
+    const sessions: ChatSessionSummary[] = [];
+    for (const session of index.sessions) {
+      if (!(await this.isEmptyPlaceholderSession(session))) sessions.push(session);
+    }
+    return {
+      ...index,
+      sessions,
+    };
+  }
+
   async create(title = DEFAULT_TITLE): Promise<ChatSessionSummary> {
     const index = await this.initialize();
     const now = new Date().toISOString();
@@ -65,6 +77,12 @@ export class ChatSessionCatalog {
     index.activeSessionId = session.id;
     await this.writeIndex(index);
     return session;
+  }
+
+  async activeSessionIsEmpty(): Promise<boolean> {
+    const index = await this.initialize();
+    const session = index.sessions.find((item) => item.id === index.activeSessionId);
+    return session ? this.isEmptyPlaceholderSession(session) : true;
   }
 
   async setActive(sessionId: string): Promise<ChatSessionSummary> {
@@ -194,6 +212,39 @@ export class ChatSessionCatalog {
     };
     await this.writeIndex(index);
     return index;
+  }
+
+  private async isEmptyPlaceholderSession(session: ChatSessionSummary): Promise<boolean> {
+    if (normalizeTitle(session.title) !== DEFAULT_TITLE) return false;
+    const [hasMessages, hasRuns] = await Promise.all([
+      this.hasSessionItems(session.id),
+      this.hasRunHistory(session.id),
+    ]);
+    return !hasMessages && !hasRuns;
+  }
+
+  private async hasSessionItems(sessionId: string): Promise<boolean> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.pathsFor(sessionId).sessionFile, 'utf8')) as { items?: unknown };
+      return Array.isArray(parsed.items) && parsed.items.length > 0;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      return true;
+    }
+  }
+
+  private async hasRunHistory(sessionId: string): Promise<boolean> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.pathsFor(sessionId).runStoreFile, 'utf8')) as {
+        active?: unknown;
+        last?: unknown;
+        historyEvents?: unknown;
+      };
+      return !!parsed.active || !!parsed.last || (Array.isArray(parsed.historyEvents) && parsed.historyEvents.length > 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      return true;
+    }
   }
 }
 

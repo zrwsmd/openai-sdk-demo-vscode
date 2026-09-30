@@ -35,11 +35,23 @@ assert(JSON.parse(await fs.readFile(firstPaths.runStoreFile, 'utf8')).schemaVers
 
 const second = await catalog.create();
 assert(second.title === '新会话', 'new session should use default title');
+assert(await catalog.activeSessionIsEmpty(), 'new empty session should be treated as an empty placeholder');
+const historyWithoutEmpty = await catalog.listHistory();
+assert(
+  historyWithoutEmpty.sessions.every((session) => session.id !== second.id),
+  'empty placeholder session should not appear in chat history',
+);
 await catalog.touch(second.id, titleFromUserText('设计一个三台水泵自动手动冗余切换运行时间均衡故障保护液位控制完整 PLC 程序'));
 const withSecond = await catalog.list();
 assert(withSecond.activeSessionId === second.id, 'new session should become active');
 assert(withSecond.sessions[0].id === second.id, 'touched session should sort first');
 assert(withSecond.sessions[0].title.endsWith('…'), 'long title should be compacted');
+assert(!(await catalog.activeSessionIsEmpty()), 'touched session should no longer be treated as empty');
+const historyWithSecond = await catalog.listHistory();
+assert(
+  historyWithSecond.sessions.some((session) => session.id === second.id),
+  'touched session should appear in chat history',
+);
 
 await catalog.setActive(firstIndex.activeSessionId);
 const finalIndex = await catalog.list();
@@ -61,5 +73,7 @@ const afterDeletingLast = await catalog.delete(firstIndex.activeSessionId);
 assert(afterDeletingLast.sessions.length === 1, 'deleting the last session should create a replacement session');
 assert(afterDeletingLast.activeSessionId === afterDeletingLast.sessions[0].id, 'replacement session should become active');
 assert(afterDeletingLast.sessions[0].title === '新会话', 'replacement session should use default title');
+const historyAfterDeletingLast = await catalog.listHistory();
+assert(historyAfterDeletingLast.sessions.length === 0, 'empty replacement session should not appear in chat history');
 
-console.log('chat session tests passed: legacy migration, creation, title update, switching, rename, delete');
+console.log('chat session tests passed: legacy migration, creation, empty placeholders, title update, switching, rename, delete');

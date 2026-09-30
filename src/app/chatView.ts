@@ -183,7 +183,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async postSessions(): Promise<void> {
-    const index = await this.sessionCatalog.list();
+    const index = await this.sessionCatalog.listHistory();
     this.post({
       type: 'sessions',
       activeSessionId: index.activeSessionId,
@@ -202,6 +202,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async newSession(): Promise<void> {
     if (!(await this.canLeaveActiveSession())) return;
+    if (await this.sessionCatalog.activeSessionIsEmpty()) {
+      await this.postSessions();
+      await this.coordinator!.initialize();
+      return;
+    }
     const session = await this.sessionCatalog.create();
     this.activateRuntime(session.id);
     await this.postSessions();
