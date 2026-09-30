@@ -27,6 +27,7 @@ async function fixture(executeAgent, planTask, team = {}) {
   const session = new JsonFileSession(path.join(dir, 'session.json'));
   const store = new JsonRunStore(path.join(dir, 'runs.json'));
   const events = [];
+  const logs = [];
   const coordinator = new RunCoordinator({
     session,
     store,
@@ -34,8 +35,9 @@ async function fixture(executeAgent, planTask, team = {}) {
     planTask,
     ...team,
     emit: (event) => events.push(event),
+    log: (line) => logs.push(line),
   });
-  return { dir, session, store, events, coordinator };
+  return { dir, session, store, events, logs, coordinator };
 }
 
 // Official OpenAI Responses uses the SDK compaction session when the model id
@@ -546,6 +548,7 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   await test.coordinator.start('把解释写得更详细，保留所有边界条件', config, 'key');
   const completed = await test.store.getLast();
   const userEvent = test.events.find((event) => event.type === 'user');
+  const supplementLog = test.logs.find((line) => line.includes('[run:') && line.includes('恢复补充(17字符): 把解释写得更详细，保留所有边界条件'));
   if (
     executorCalls !== 1 ||
     receivedText !== '生成一个需要保存的程序' ||
@@ -555,7 +558,8 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     workflowClassifierCalls !== 0 ||
     deliveryClassifierCalls !== 0 ||
     completed?.status !== 'completed' ||
-    userEvent?.text !== '把解释写得更详细，保留所有边界条件'
+    userEvent?.text !== '把解释写得更详细，保留所有边界条件' ||
+    !supplementLog
   ) {
     throw new Error('paused run supplement did not preserve the original delivery context');
   }

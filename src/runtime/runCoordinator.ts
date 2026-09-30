@@ -1040,6 +1040,12 @@ export class RunCoordinator {
     run.resumeStage = preserveSelectedContext ? undefined : previous.resumeStage;
     await this.store.update(run);
     if (this.isClearing(generation)) return;
+    const resumeSupplement = displayText?.trim();
+    if (resumeSupplement) {
+      this.writeLog(
+        `[run:${run.id}] 恢复补充(${resumeSupplement.length}字符): ${resumeSupplement.replace(/\r?\n/g, '⏎')}`,
+      );
+    }
     await this.audit('run_resumed', run, {
       resumedRunId: previous.id,
       strategy: canResumeSdkState ? 'sdk_state' : 'safe_restart',
