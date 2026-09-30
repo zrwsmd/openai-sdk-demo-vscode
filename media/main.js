@@ -1180,7 +1180,81 @@ function showUsage(usage) {
   );
 }
 
-// 极简 markdown:围栏代码块,其余按纯文本(成熟化时换 marked/highlight.js)
+function appendParagraph(bubble, lines) {
+  const text = lines.join('\n').trim();
+  if (!text) return;
+  const p = document.createElement('p');
+  p.textContent = text;
+  if (
+    lines.length === 1 &&
+    text.length <= 48 &&
+    !/[。！？!?；;：:]$/.test(text) &&
+    !/^\d+[.)、]/.test(text)
+  ) {
+    p.className = 'agent-section-title';
+  }
+  bubble.appendChild(p);
+}
+
+function appendListBlock(bubble, items, ordered, start) {
+  if (!items.length) return;
+  const list = document.createElement(ordered ? 'ol' : 'ul');
+  if (ordered && Number.isFinite(start) && start > 1) list.start = start;
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.textContent = item;
+    list.appendChild(li);
+  }
+  bubble.appendChild(list);
+}
+
+function appendPlainText(bubble, text) {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  let paragraph = [];
+  let listItems = [];
+  let listOrdered = false;
+  let listStart = 1;
+
+  const flushParagraph = () => {
+    appendParagraph(bubble, paragraph);
+    paragraph = [];
+  };
+  const flushList = () => {
+    appendListBlock(bubble, listItems, listOrdered, listStart);
+    listItems = [];
+    listOrdered = false;
+    listStart = 1;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const orderedMatch = trimmed.match(/^(\d+)[.)、]\s+(.+)$/);
+    const unorderedMatch = trimmed.match(/^•\s+(.+)$/);
+    if (orderedMatch || unorderedMatch) {
+      flushParagraph();
+      const ordered = !!orderedMatch;
+      const value = orderedMatch ? orderedMatch[2] : unorderedMatch[1];
+      if (listItems.length && listOrdered !== ordered) flushList();
+      if (!listItems.length) {
+        listOrdered = ordered;
+        listStart = orderedMatch ? Number(orderedMatch[1]) : 1;
+      }
+      listItems.push(value);
+      continue;
+    }
+    flushList();
+    paragraph.push(trimmed);
+  }
+  flushParagraph();
+  flushList();
+}
+
+// 极简富文本:仅识别围栏代码块;普通文本按段落/列表排版,不展示 Markdown 标记。
 function renderRich(bubble, text) {
   bubble.textContent = '';
   const parts = String(text).split(/```/);
@@ -1190,7 +1264,7 @@ function renderRich(bubble, text) {
       pre.textContent = part.replace(/^[a-zA-Z0-9+#-]*\n/, '');
       bubble.appendChild(pre);
     } else if (part) {
-      bubble.appendChild(document.createTextNode(part));
+      appendPlainText(bubble, part);
     }
   });
 }

@@ -97,7 +97,7 @@ body { display: flex; flex-direction: column; }
   padding: 12px 12px 4px;
 }
 
-.msg { margin: 6px 0; line-height: 1.55; word-break: break-word; white-space: pre-wrap; }
+.msg { margin: 6px 0; line-height: 1.55; word-break: break-word; }
 .msg.user { text-align: right; }
 .msg.user .bubble {
   display: inline-block;
@@ -107,14 +107,16 @@ body { display: flex; flex-direction: column; }
   border-radius: 10px 10px 2px 10px;
   padding: 8px 12px;
   max-width: 88%;
+  white-space: pre-wrap;
 }
 .msg.agent .bubble {
   display: inline-block;
   background: var(--agent-bubble);
   border: 1px solid var(--border);
   border-radius: 10px 10px 10px 2px;
-  padding: 8px 12px;
-  max-width: 96%;
+  padding: 10px 14px;
+  max-width: min(96%, 860px);
+  white-space: normal;
 }
 .msg.agent .bubble.streaming::after {
   content: '▍';
@@ -123,13 +125,40 @@ body { display: flex; flex-direction: column; }
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+.msg.agent p {
+  margin: 0 0 10px;
+  white-space: pre-line;
+}
+.msg.agent p:last-child,
+.msg.agent ol:last-child,
+.msg.agent ul:last-child,
+.msg.agent pre:last-child {
+  margin-bottom: 0;
+}
+.msg.agent .agent-section-title {
+  margin-top: 4px;
+  margin-bottom: 6px;
+  color: var(--fg);
+  font-weight: 600;
+}
+.msg.agent ol,
+.msg.agent ul {
+  margin: 4px 0 12px;
+  padding-left: 24px;
+}
+.msg.agent li {
+  margin: 3px 0;
+  padding-left: 2px;
+}
 .msg.agent pre {
   background: #1a1a1a;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px;
+  margin: 8px 0 12px;
   overflow-x: auto;
   font-size: 12px;
+  white-space: pre;
 }
 
 .tool-note {
