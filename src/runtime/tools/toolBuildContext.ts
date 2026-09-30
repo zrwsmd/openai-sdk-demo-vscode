@@ -17,7 +17,7 @@ import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
 import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
 import type { Diagnostic } from "../../protocol/results";
 import type { CommandRunner } from "../../tools/commandRunner";
-import { LocalCommandRunner } from "../../tools/workspaceTools";
+import { LocalCommandRunner } from "../../tools/localCommandRunner";
 import {
   EMPTY_RUNTIME_SERVICES,
   type RuntimeServiceContainer,

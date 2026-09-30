@@ -4,13 +4,10 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import type {
-  CommandRunner,
-  CommandRunnerOptions,
-  CommandRunnerResult,
-} from './commandRunner';
+import type { CommandRunnerResult } from './commandRunner';
+import { LocalCommandRunner } from './localCommandRunner';
+export { LocalCommandRunner } from './localCommandRunner';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.vscode', 'dist', 'out', 'build', 'bin', 'obj', '.venv', '__pycache__']);
 /** 文本搜索时跳过的二进制/资源扩展名 */
@@ -466,88 +463,6 @@ export async function searchText(
   }
   if (!results.length) results.push('(未找到匹配)');
   return results;
-}
-
-export class LocalCommandRunner implements CommandRunner {
-  readonly id = 'local';
-
-  async run(options: CommandRunnerOptions): Promise<CommandRunnerResult> {
-    const {
-      cwd,
-      command,
-      timeoutMs,
-      signal,
-    } = options;
-    if (!cwd) throw new ToolError('未打开工作区文件夹,无法执行命令');
-    signal?.throwIfAborted();
-    return new Promise((resolve, reject) => {
-      const isWindows = process.platform === 'win32';
-      const child = spawn(command, {
-        cwd,
-        shell: true,
-        windowsHide: true,
-        detached: !isWindows,
-      });
-      let out = '';
-      let killed = false;
-      let settled = false;
-      const cleanup = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-      };
-      const terminateTree = () => {
-        if (!child.pid) return;
-        if (isWindows) {
-          const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
-            windowsHide: true,
-            stdio: 'ignore',
-          });
-          killer.once('error', () => child.kill('SIGKILL'));
-          return;
-        }
-        try {
-          process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          child.kill('SIGKILL');
-        }
-      };
-      const onAbort = () => {
-        if (settled) return;
-        killed = true;
-        terminateTree();
-        settled = true;
-        cleanup();
-        reject(signal?.reason ?? new DOMException('The operation was aborted', 'AbortError'));
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-      const timer = setTimeout(() => {
-        if (settled) return;
-        killed = true;
-        terminateTree();
-        settled = true;
-        cleanup();
-        const text = out.length > 20_000 ? out.slice(0, 20_000) + '\n…(输出截断)' : out;
-        resolve({ exitCode: null, output: `命令超时(${timeoutMs}ms)被终止:\n${text}` });
-      }, timeoutMs);
-      child.stdout?.on('data', (d) => (out += d));
-      child.stderr?.on('data', (d) => (out += d));
-      child.on('error', (e) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new ToolError(`命令启动失败:${e.message}`));
-      });
-      child.on('close', (code) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        const text = out.length > 20_000 ? out.slice(0, 20_000) + '\n…(输出截断)' : out;
-        resolve({ exitCode: killed ? null : code, output: text });
-      });
-      // Close the race between the initial throwIfAborted() and listener setup.
-      if (signal?.aborted) onAbort();
-    });
-  }
 }
 
 const defaultLocalCommandRunner = new LocalCommandRunner();
