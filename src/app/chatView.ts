@@ -532,10 +532,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="sessions" class="sessions">
     <div class="sessions-head">
-      <span>历史会话</span>
+      <button id="session-history" class="session-history" type="button" aria-expanded="false">Chat history</button>
       <button id="session-new" class="session-new" title="新建会话">＋</button>
     </div>
-    <div id="session-list" class="session-list"></div>
+    <div id="session-panel" class="session-panel hidden">
+      <div class="session-panel-title">Chats</div>
+      <label class="session-search">
+        <span>⌕</span>
+        <input id="session-search" type="search" placeholder="Search recent chats" spellcheck="false" />
+      </label>
+      <div id="session-list" class="session-list"></div>
+    </div>
   </div>
   <div id="messages" aria-live="polite"></div>
 

@@ -2,6 +2,10 @@
 const vscode = acquireVsCodeApi();
 
 const messagesEl = document.getElementById('messages');
+const sessionsEl = document.getElementById('sessions');
+const sessionHistoryBtn = document.getElementById('session-history');
+const sessionPanelEl = document.getElementById('session-panel');
+const sessionSearchEl = document.getElementById('session-search');
 const sessionListEl = document.getElementById('session-list');
 const sessionNewBtn = document.getElementById('session-new');
 const inputEl = document.getElementById('input');
@@ -34,6 +38,8 @@ let stopRequestedBeforeRunAck = false;
 let activeSessionId = null;
 let showThinking = true;
 let knownSessions = [];
+let sessionHistoryOpen = false;
+let sessionSearchQuery = '';
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 const workflowViews = new Map();
@@ -60,18 +66,34 @@ function setRuntimeMode(mode) {
   renderSessions();
 }
 
+function setSessionHistoryOpen(open) {
+  sessionHistoryOpen = !!open;
+  sessionPanelEl?.classList.toggle('hidden', !sessionHistoryOpen);
+  sessionHistoryBtn?.classList.toggle('active', sessionHistoryOpen);
+  sessionHistoryBtn?.setAttribute('aria-expanded', sessionHistoryOpen ? 'true' : 'false');
+  if (sessionHistoryOpen) {
+    renderSessions();
+    requestAnimationFrame(() => sessionSearchEl?.focus());
+  }
+}
+
 function renderSessions() {
   if (!sessionListEl) return;
   sessionListEl.textContent = '';
   const sessions = Array.isArray(knownSessions) ? knownSessions : [];
-  if (!sessions.length) {
+  sessionHistoryBtn.textContent = sessions.length ? `Chat history · ${sessions.length}` : 'Chat history';
+  const query = sessionSearchQuery.trim().toLowerCase();
+  const filtered = query
+    ? sessions.filter((session) => String(session?.title || '新会话').toLowerCase().includes(query))
+    : sessions;
+  if (!filtered.length) {
     const empty = document.createElement('div');
     empty.className = 'session-empty';
-    empty.textContent = '暂无历史会话';
+    empty.textContent = sessions.length ? '没有匹配的历史会话' : '暂无历史会话';
     sessionListEl.appendChild(empty);
     return;
   }
-  for (const session of sessions) {
+  for (const session of filtered) {
     if (!session || typeof session.id !== 'string') continue;
     const item = document.createElement('button');
     item.className = `session-item${session.id === activeSessionId ? ' active' : ''}`;
@@ -87,6 +109,7 @@ function renderSessions() {
     item.append(title, time);
     item.addEventListener('click', () => {
       if (runtimeMode !== 'idle' || session.id === activeSessionId) return;
+      setSessionHistoryOpen(false);
       vscode.postMessage({ type: 'switchSession', sessionId: session.id });
     });
     sessionListEl.appendChild(item);
@@ -97,10 +120,16 @@ function formatSessionTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
   const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-  if (sameDay) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
+  const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
+  if (seconds < 60) return 'now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks}w`;
   return date.toLocaleDateString([], { month: '2-digit', day: '2-digit' });
 }
 
@@ -1392,10 +1421,26 @@ function updateModelChip(model) {
 const newchatEl = document.getElementById('newchat');
 function createNewSession() {
   if (runtimeMode !== 'idle') return;
+  setSessionHistoryOpen(false);
   vscode.postMessage({ type: 'newSession' });
 }
 newchatEl.addEventListener('click', createNewSession);
 sessionNewBtn.addEventListener('click', createNewSession);
+sessionHistoryBtn.addEventListener('click', () => {
+  setSessionHistoryOpen(!sessionHistoryOpen);
+});
+sessionSearchEl.addEventListener('input', () => {
+  sessionSearchQuery = sessionSearchEl.value;
+  renderSessions();
+});
+sessionSearchEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') setSessionHistoryOpen(false);
+});
+document.addEventListener('click', (event) => {
+  if (!sessionHistoryOpen || !sessionsEl) return;
+  if (sessionsEl.contains(event.target)) return;
+  setSessionHistoryOpen(false);
+});
 
 function showWelcomeHint() {
   if (messagesEl.querySelector('.hint')) return;
