@@ -927,8 +927,11 @@ npm run test:jev
 - 工具声明 `risk: "plan"`、`effect: "none"`，因此自动进入 `general_chat` /
   `needs_clarification` / `blocked_high_risk` 三个安全 fallback 工具集，
   决策服务与 `ToolCatalog` 的查询逻辑均未改动。
-- 未新建 Workflow；`stWorkspaceDeliveryWorkflow` 的白名单仍只有 `validate_st_code` 与
-  `write_file`（该白名单过窄是既有问题，与本次改动无关，另行处理）。
+- 未新建 Workflow；初始实现里 `stWorkspaceDeliveryWorkflow` 的白名单仍只有
+  `validate_st_code` 与 `write_file`。后续已在 ST Delivery 插件边界把
+  `st_library_symbol`、`st_dependency_map`、`st_change_impact`、
+  `st_symbol_references` 作为只读辅助工具开放给交付流程；它们不改变
+  `validate_st_code -> write_file` 主链路。
 
 阶段测试结果：
 

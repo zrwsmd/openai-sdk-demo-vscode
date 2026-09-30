@@ -43,9 +43,21 @@ import {
 } from "./stDeliveryContract";
 import { ST_TOOL_EVIDENCE_EXTRACTORS } from "./stCompletionEvidence";
 
-export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
+export const ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES = [
   "validate_st_code",
   "write_file",
+] as const;
+
+export const ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES = [
+  "st_dependency_map",
+  "st_change_impact",
+  "st_symbol_references",
+  "st_library_symbol",
+] as const;
+
+export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
+  ...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
+  ...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
 ] as const;
 
 function describeStWorkspaceDelivery(): WorkflowDescription {
@@ -180,7 +192,11 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   instructions(): string {
     return (
       "\n本轮 .st 工作区交付由运行时按固定流水线执行：" +
-      "先调用 validate_st_code 的 code 参数校验完整内存草稿；" +
+      "主交付链路仍然是 validate_st_code -> write_file。" +
+      "编写或修复草稿时，如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol；" +
+      "如需要理解当前工作区 ST 文件依赖、影响范围或符号声明引用，可按需调用 st_dependency_map、st_change_impact、st_symbol_references。" +
+      "这些查询工具只作为只读辅助证据，不能替代校验或写入阶段。" +
+      "形成完整草稿后，调用 validate_st_code 的 code 参数校验完整内存草稿；" +
       "code 必须是完整 ST 源码，不要传文件路径、工具错误回执、JSON 包装或摘要。" +
       "校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。" +
       "校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，" +

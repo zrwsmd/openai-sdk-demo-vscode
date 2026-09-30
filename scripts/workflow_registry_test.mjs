@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import {
+  ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
+  ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
+  ST_WORKSPACE_DELIVERY_TOOL_NAMES,
   ST_WORKSPACE_DELIVERY_WORKFLOW,
   WorkflowRegistry,
   ToolRegistry,
@@ -49,6 +52,20 @@ assert.deepEqual(
   ['st_workspace_delivery'],
 );
 assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
+assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
+  'validate_st_code',
+  'write_file',
+]);
+assert.deepEqual([...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES], [
+  'st_dependency_map',
+  'st_change_impact',
+  'st_symbol_references',
+  'st_library_symbol',
+]);
+assert.deepEqual([...ST_WORKSPACE_DELIVERY_TOOL_NAMES], [
+  ...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
+  ...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
+]);
 
 // A separately constructed registry is isolated from the host's built-in list.
 assert.equal(registry.get('st_workspace_delivery'), undefined);
