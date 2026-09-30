@@ -139,6 +139,37 @@ function finalAnswerNodeFor(runId) {
   return null;
 }
 
+function detachAgentBubbleFromTimeline() {
+  if (!agentBubble) return;
+  const wrapper = agentBubble.parentElement;
+  if (wrapper?.parentNode === messagesEl && wrapper.classList.contains('msg')) {
+    wrapper.remove();
+    return;
+  }
+  if (agentBubble.parentNode === messagesEl || wrapper) agentBubble.remove();
+}
+
+function appendAgentBubbleToTimelineEnd() {
+  if (!agentBubble) return;
+  const wrapper = agentBubble.parentElement;
+  if (wrapper?.parentNode === messagesEl && wrapper.classList.contains('msg')) {
+    messagesEl.appendChild(wrapper);
+    return;
+  }
+  if (agentBubble.parentNode === messagesEl) {
+    messagesEl.appendChild(agentBubble);
+    return;
+  }
+  if (wrapper?.classList.contains('msg')) {
+    messagesEl.appendChild(wrapper);
+    return;
+  }
+  const newWrapper = document.createElement('div');
+  newWrapper.className = 'msg agent';
+  newWrapper.appendChild(agentBubble);
+  messagesEl.appendChild(newWrapper);
+}
+
 function insertBeforeFinalAnswer(node, runId) {
   // Provider streams may deliver reasoning after final text; keep the UI
   // order stable by anchoring Thinking before this run's answer bubble.
@@ -351,6 +382,14 @@ function closeThinkingSegment(runId) {
   }
   activeThinkingSegments.delete(runId);
   compactThinkingForRun(runId);
+}
+
+function closeThinkingAtBoundary(runId) {
+  const runIds = new Set();
+  if (runId) runIds.add(runId);
+  if (currentRunId) runIds.add(currentRunId);
+  for (const activeRunId of activeThinkingSegments.keys()) runIds.add(activeRunId);
+  for (const id of runIds) closeThinkingSegment(id);
 }
 
 function nextThinkingSegmentKey(runId) {
@@ -1331,7 +1370,7 @@ function markApprovalCard(id, approved, statusText) {
 function showApprovals(runId, approvals) {
   if (agentBubble) {
     agentBubble.classList.remove('streaming');
-    if (!agentText) agentBubble.remove();
+    if (!agentText) detachAgentBubbleFromTimeline();
     agentBubble = null;
   }
   currentRunId = runId;
@@ -1378,7 +1417,7 @@ function handleProtocolEvent(event) {
         } else {
           agentText += text;
           const visibleText = sanitizeAssistantText(agentText);
-          if (hadToolThisTurn && visibleText) messagesEl.appendChild(agentBubble);
+          if (hadToolThisTurn && visibleText) appendAgentBubbleToTimelineEnd();
           renderRich(agentBubble, visibleText);
         }
         scrollBottom();
@@ -1388,19 +1427,18 @@ function handleProtocolEvent(event) {
     case 'tool.started': {
       const name = payload.toolName || 'tool';
       if (name === 'report_plan_progress') break;
-      closeThinkingSegment(event.runId || currentRunId);
+      if (agentBubble) {
+        agentText = '';
+        renderRich(agentBubble, '');
+        agentBubble.classList.remove('streaming');
+        detachAgentBubbleFromTimeline();
+      }
+      closeThinkingAtBoundary(event.runId || currentRunId);
       rememberToolRun(name, payload);
       updateWorkflowStage(event.runId, name, 'running');
       addNote('tool-note', startToolHeadline(name, payload.arguments));
       hadToolThisTurn = true;
       pendingToolCount += 1;
-      if (agentText) {
-        agentText = '';
-        if (agentBubble) {
-          renderRich(agentBubble, '');
-          if (agentBubble.parentElement) agentBubble.remove();
-        }
-      }
       break;
     }
     case 'tool.completed': {
@@ -1418,11 +1456,11 @@ function handleProtocolEvent(event) {
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
-      closeThinkingSegment(event.runId || currentRunId);
+      closeThinkingAtBoundary(event.runId || currentRunId);
       break;
     }
     case 'run.completed': {
-      closeThinkingSegment(event.runId || currentRunId);
+      closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'completed');
       const result = payload.result;
       if (result && typeof result === 'object') {
@@ -1447,16 +1485,16 @@ function handleProtocolEvent(event) {
     }
     case 'run.failed':
       // The host error control message owns the detailed error bubble.
-      closeThinkingSegment(event.runId || currentRunId);
+      closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'failed');
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
-      closeThinkingSegment(event.runId || currentRunId);
+      closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'cancelled');
       break;
     case 'approval.requested':
-      closeThinkingSegment(event.runId || currentRunId);
+      closeThinkingAtBoundary(event.runId || currentRunId);
       if (payload.approvalId && payload.toolName) {
         addApprovalCard(event.runId || currentRunId, {
           id: payload.approvalId,
@@ -1527,11 +1565,11 @@ function renderAgentText(text) {
     if (!agentText) {
       renderRich(agentBubble, '');
       agentBubble.classList.remove('streaming');
-      if (agentBubble.parentElement) agentBubble.remove();
+      detachAgentBubbleFromTimeline();
       agentBubble = null;
       return;
     }
-    if (hadToolThisTurn) messagesEl.appendChild(agentBubble);
+    if (hadToolThisTurn) appendAgentBubbleToTimelineEnd();
     renderRich(agentBubble, agentText);
     agentBubble.classList.remove('streaming');
   }
@@ -1631,7 +1669,7 @@ window.addEventListener('message', (event) => {
       const empty = !sanitizeAssistantText(agentText).trim() && !waitingForToolResult;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (empty) agentBubble.remove(); // 空气泡看起来像卡死,换成明确说明
+        if (empty) detachAgentBubbleFromTimeline(); // 空气泡看起来像卡死,换成明确说明
       }
       if (empty) {
         addNote(
@@ -1654,7 +1692,7 @@ window.addEventListener('message', (event) => {
       pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (!agentText) agentBubble.remove();
+        if (!agentText) detachAgentBubbleFromTimeline();
       }
       agentBubble = null;
       addNote('error-note', msg.message);
@@ -1822,7 +1860,7 @@ window.addEventListener('message', (event) => {
       pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (!agentText) agentBubble.remove();
+        if (!agentText) detachAgentBubbleFromTimeline();
       }
       agentBubble = null;
       finishApprovalCards('rejected', '已取消');
@@ -1837,7 +1875,7 @@ window.addEventListener('message', (event) => {
       pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (!agentText) agentBubble.remove();
+        if (!agentText) detachAgentBubbleFromTimeline();
       }
       agentBubble = null;
       showPauseNotice(
@@ -1855,7 +1893,7 @@ window.addEventListener('message', (event) => {
       pendingLocalUserText = null;
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
-        if (!agentText) agentBubble.remove();
+        if (!agentText) detachAgentBubbleFromTimeline();
       }
       agentBubble = null;
       finishApprovalCards('rejected', '已拒绝');
