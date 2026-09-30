@@ -78,7 +78,7 @@ body { display: flex; flex-direction: column; }
   max-height: min(58vh, 520px);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -91,19 +91,28 @@ body { display: flex; flex-direction: column; }
   padding: 0 2px;
 }
 .session-search {
-  height: 42px;
+  min-height: 34px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 9px;
   background: var(--box);
   color: var(--muted);
-  padding: 0 12px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+.session-search span {
+  flex: 0 0 auto;
+  width: 20px;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1;
 }
 .session-search input {
   width: 100%;
   min-width: 0;
+  height: 100%;
   border: 0;
   outline: 0;
   background: transparent;
@@ -136,13 +145,13 @@ body { display: flex; flex-direction: column; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   text-align: left;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: var(--fg);
-  padding: 7px 8px 7px 10px;
+  padding: 5px 8px 5px 10px;
   cursor: pointer;
 }
 .session-item:hover:not(:disabled) {
@@ -203,8 +212,8 @@ body { display: flex; flex-direction: column; }
   pointer-events: auto;
 }
 .session-action {
-  width: 23px;
-  height: 23px;
+  width: 21px;
+  height: 21px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -226,7 +235,7 @@ body { display: flex; flex-direction: column; }
   cursor: default;
 }
 .session-action-text {
-  height: 24px;
+  height: 22px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: color-mix(in srgb, var(--box) 88%, transparent);
