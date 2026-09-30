@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import {
+  createStValidationState,
+  StWorkspaceDeliveryWorkflow,
   ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
   ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
   ST_WORKSPACE_DELIVERY_TOOL_NAMES,
@@ -66,6 +68,16 @@ assert.deepEqual([...ST_WORKSPACE_DELIVERY_TOOL_NAMES], [
   ...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
   ...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
 ]);
+const stDeliveryRuntime = new StWorkspaceDeliveryWorkflow(
+  undefined,
+  createStValidationState(),
+);
+assert.equal(stDeliveryRuntime.initialTool({ isResume: false }), undefined);
+const stDeliveryInstructions = stDeliveryRuntime.instructions();
+assert.match(stDeliveryInstructions, /严格禁止臆造外部\/标准库功能块/u);
+assert.match(stDeliveryInstructions, /st_library_symbol/u);
+assert.match(stDeliveryInstructions, /inputs\/outputs\/usage/u);
+assert.match(stDeliveryInstructions, /matchCount=0/u);
 
 // A separately constructed registry is isolated from the host's built-in list.
 assert.equal(registry.get('st_workspace_delivery'), undefined);

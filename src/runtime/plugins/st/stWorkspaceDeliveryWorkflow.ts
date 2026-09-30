@@ -185,8 +185,8 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   readonly state: StValidationState;
   readonly validationService: StValidationRuntimeService;
 
-  initialTool(options: { isResume: boolean }): string | undefined {
-    return options.isResume ? undefined : "validate_st_code";
+  initialTool(_options: { isResume: boolean }): string | undefined {
+    return undefined;
   }
 
   instructions(): string {
@@ -196,6 +196,9 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       "编写或修复草稿时，如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol；" +
       "如需要理解当前工作区 ST 文件依赖、影响范围或符号声明引用，可按需调用 st_dependency_map、st_change_impact、st_symbol_references。" +
       "这些查询工具只作为只读辅助证据，不能替代校验或写入阶段。" +
+      "严格禁止臆造外部/标准库功能块、函数或类型；凡是用户没有提供定义、工作区符号查询没有确认、且不属于你刚刚从 st_library_symbol 命中的标准库符号，都不得生成。" +
+      "使用标准库符号时，必须按 st_library_symbol 返回的 inputs/outputs/usage 精确填写输入输出参数名、方向和类型；matchCount=0 或查询不可用时，不得用同名符号硬写代码，应改用已确认的工作区符号或向用户说明缺少库定义。" +
+      "如果 validate_st_code 对未知可调用对象、参数名或类型给出诊断，必须优先用 st_library_symbol 或 st_symbol_references 核对后再修改草稿。" +
       "形成完整草稿后，调用 validate_st_code 的 code 参数校验完整内存草稿；" +
       "code 必须是完整 ST 源码，不要传文件路径、工具错误回执、JSON 包装或摘要。" +
       "校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。" +

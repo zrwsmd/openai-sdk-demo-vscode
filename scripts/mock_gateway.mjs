@@ -333,6 +333,10 @@ const server = http.createServer((req, res) => {
       .find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
       ?.tool_calls?.[0]?.function?.name;
     const hasAssistantToolCall = (name) => serializedMessages.includes(`"name":"${name}"`);
+    const assistantToolCallCount = (name) => messages.reduce((count, message) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) return count;
+      return count + message.tool_calls.filter((call) => call?.function?.name === name).length;
+    }, 0);
     const forcedToolChoice = typeof req_body.tool_choice === 'string'
       ? req_body.tool_choice
       : req_body.tool_choice?.function?.name;
@@ -474,6 +478,33 @@ const server = http.createServer((req, res) => {
       hasAssistantToolCall('write_file')
     ) {
       await streamStructuredText(res, model, '已通过写入前校验并保存 PumpControl.st。');
+    } else if (
+      userText.includes('标准库辅助回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已查询 TON 标准库接口，完成校验并保存 PumpControl.st。');
+    } else if (userText.includes('标准库辅助回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'st_library_symbol', JSON.stringify({
+        symbol: 'TON',
+      }));
+    } else if (
+      userText.includes('标准库辅助回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'st_library_symbol'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('标准库辅助回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
     } else if (userText.includes('预写校验回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
         code: BAD_ST_CODE,
@@ -540,11 +571,6 @@ const server = http.createServer((req, res) => {
       ]);
     } else if (
       userText.includes('交付后重复写入回归') &&
-      serializedMessages.includes('运行时交付工作流')
-    ) {
-      await streamStructuredText(res, model, '已校验并保存 PumpControl.st。');
-    } else if (
-      userText.includes('交付后重复写入回归') &&
       last.role !== 'tool'
     ) {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
@@ -560,6 +586,11 @@ const server = http.createServer((req, res) => {
         path: 'PumpControl.st',
         content: ST_CODE,
       }));
+    } else if (
+      userText.includes('交付后重复写入回归') &&
+      assistantToolCallCount('write_file') > 1
+    ) {
+      await streamStructuredText(res, model, '已校验并保存 PumpControl.st。');
     } else if (
       userText.includes('交付后重复写入回归') &&
       last.role === 'tool' &&

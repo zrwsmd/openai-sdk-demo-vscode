@@ -283,6 +283,44 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c2a] ST Delivery 允许先用只读标准库工具确认功能块接口,
+// 再进入 validate_st_code -> write_file 主交付链路。
+{
+  const asked = [];
+  const contract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
+    }],
+  });
+  const r = await runTestTurn(
+    '标准库辅助回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'st-library-assisted-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3c2a] ST 标准库辅助:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,write_file') {
+    throw new Error('ST Delivery 没有允许先查询标准库再校验写入');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 标准库辅助场景的审批工具不正确');
+  }
+}
+
 // [3c2b] 模型在显式校验失败后直接写入一份修正后的 ST 内容时,
 // write_file 必须在落盘前内部重新校验这份写入内容,通过后才写。
 {
