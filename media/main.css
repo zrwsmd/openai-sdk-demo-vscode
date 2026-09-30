@@ -226,6 +226,13 @@ body { display: flex; flex-direction: column; }
   border-color: var(--border);
   background: color-mix(in srgb, var(--box) 86%, transparent);
 }
+.session-action.accept {
+  color: var(--vscode-testing-iconPassed, #4caf7d);
+}
+.session-action.accept:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #4caf7d) 58%, transparent);
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed, #4caf7d) 12%, var(--box));
+}
 .session-action.danger:hover:not(:disabled) {
   color: var(--vscode-errorForeground, #f66);
   border-color: color-mix(in srgb, var(--vscode-errorForeground, #f66) 58%, transparent);

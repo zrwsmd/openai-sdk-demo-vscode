@@ -42,6 +42,7 @@ let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
 let selectedSessionId = null;
 let renamingSessionId = null;
+let renameDraftTitle = '';
 let pendingDeleteSessionId = null;
 const toolRuns = new Map();
 const anonymousToolRuns = new Map();
@@ -80,6 +81,7 @@ function setSessionHistoryOpen(open) {
     requestAnimationFrame(() => sessionSearchEl?.focus());
   } else {
     renamingSessionId = null;
+    renameDraftTitle = '';
     pendingDeleteSessionId = null;
   }
 }
@@ -115,6 +117,7 @@ function switchToSession(sessionId) {
 function renameSession(sessionId, title) {
   const clean = String(title ?? '').replace(/\s+/g, ' ').trim();
   renamingSessionId = null;
+  renameDraftTitle = '';
   if (!clean) {
     renderSessions();
     return;
@@ -122,10 +125,17 @@ function renameSession(sessionId, title) {
   vscode.postMessage({ type: 'renameSession', sessionId, title: clean });
 }
 
+function cancelRenameSession() {
+  renamingSessionId = null;
+  renameDraftTitle = '';
+  renderSessions();
+}
+
 function requestDeleteSession(session) {
   if (runtimeMode !== 'idle' || !session?.id) return;
   pendingDeleteSessionId = session.id;
   renamingSessionId = null;
+  renameDraftTitle = '';
   selectedSessionId = session.id;
   renderSessions();
 }
@@ -134,6 +144,7 @@ function commitDeleteSession(session) {
   if (runtimeMode !== 'idle' || !session?.id) return;
   if (selectedSessionId === session.id) selectedSessionId = null;
   if (renamingSessionId === session.id) renamingSessionId = null;
+  renameDraftTitle = '';
   if (pendingDeleteSessionId === session.id) pendingDeleteSessionId = null;
   vscode.postMessage({ type: 'deleteSession', sessionId: session.id });
 }
@@ -191,18 +202,23 @@ function renderSessions() {
     if (renamingSessionId === session.id) {
       const input = document.createElement('input');
       input.className = 'session-rename-input';
-      input.value = session.title || '新会话';
+      input.value = renameDraftTitle || session.title || '新会话';
       input.spellcheck = false;
       input.addEventListener('click', (event) => event.stopPropagation());
-      input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') renameSession(session.id, input.value);
-        if (event.key === 'Escape') {
-          renamingSessionId = null;
-          renderSessions();
-        }
+      input.addEventListener('input', () => {
+        renameDraftTitle = input.value;
       });
-      input.addEventListener('blur', () => {
-        if (renamingSessionId === session.id) renameSession(session.id, input.value);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          renameSession(session.id, input.value);
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          cancelRenameSession();
+        }
       });
       main.appendChild(input);
       requestAnimationFrame(() => {
@@ -242,6 +258,27 @@ function renderSessions() {
         renderSessions();
       });
       actions.append(confirmDelete, cancelDelete);
+    } else if (renamingSessionId === session.id) {
+      actions.classList.add('confirming');
+      const acceptRename = document.createElement('button');
+      acceptRename.type = 'button';
+      acceptRename.className = 'session-action accept';
+      acceptRename.title = '确认重命名';
+      acceptRename.textContent = '✓';
+      acceptRename.addEventListener('click', (event) => {
+        event.stopPropagation();
+        renameSession(session.id, renameDraftTitle);
+      });
+      const cancelRename = document.createElement('button');
+      cancelRename.type = 'button';
+      cancelRename.className = 'session-action';
+      cancelRename.title = '恢复原名称';
+      cancelRename.textContent = '↶';
+      cancelRename.addEventListener('click', (event) => {
+        event.stopPropagation();
+        cancelRenameSession();
+      });
+      actions.append(acceptRename, cancelRename);
     } else {
       const edit = document.createElement('button');
       edit.type = 'button';
@@ -252,6 +289,7 @@ function renderSessions() {
         event.stopPropagation();
         pendingDeleteSessionId = null;
         renamingSessionId = session.id;
+        renameDraftTitle = session.title || '新会话';
         selectedSessionId = session.id;
         renderSessions();
       });
