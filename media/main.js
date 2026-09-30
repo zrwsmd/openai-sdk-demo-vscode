@@ -1395,10 +1395,11 @@ function handleProtocolEvent(event) {
       hadToolThisTurn = true;
       pendingToolCount += 1;
       if (agentText) {
-        const visibleText = sanitizeAssistantText(agentText);
-        if (visibleText) pendingAgentText = visibleText + pendingAgentText;
         agentText = '';
-        if (agentBubble) renderRich(agentBubble, '');
+        if (agentBubble) {
+          renderRich(agentBubble, '');
+          if (agentBubble.parentElement) agentBubble.remove();
+        }
       }
       break;
     }
