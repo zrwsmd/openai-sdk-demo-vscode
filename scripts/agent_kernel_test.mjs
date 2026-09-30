@@ -321,6 +321,44 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3c2a2] 辅助工具之后如果 ST 草稿校验失败,运行时必须把下一轮拉回
+// validate_st_code 修复闭环,不能让模型继续发散到依赖/引用查询直到耗尽 turns。
+{
+  const asked = [];
+  const contract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码默认保存到当前工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '当前工作区中的 ST 程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
+    }],
+  });
+  const r = await runTestTurn(
+    '辅助失败修正回归',
+    async (name, args) => {
+      asked.push({ name, args });
+      return true;
+    },
+    { deliveryContract: contract },
+    new JsonFileSession(path.join(dir, 'st-assisted-repair-session.json')),
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3c2a2] ST 辅助后修正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
+  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,validate_st_code,write_file') {
+    throw new Error('ST 辅助查询后校验失败没有强制回 validate_st_code 修复闭环');
+  }
+  if (asked.length !== 1 || asked[0].name !== 'write_file') {
+    throw new Error('ST 辅助后修正场景的审批工具不正确');
+  }
+}
+
 // [3c2b] 模型在显式校验失败后直接写入一份修正后的 ST 内容时,
 // write_file 必须在落盘前内部重新校验这份写入内容,通过后才写。
 {

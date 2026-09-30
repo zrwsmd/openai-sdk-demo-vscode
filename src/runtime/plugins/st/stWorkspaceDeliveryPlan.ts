@@ -29,12 +29,20 @@ export const ST_WORKSPACE_DELIVERY_STAGES: WorkflowStage[] = [
 
 export const ST_WORKSPACE_DELIVERY_PIPELINE_PLAN: PipelineStagePlan = {
   id: "st_workspace_delivery",
-  resultTransitions: [{
-    fromToolName: "validate_st_code",
-    toToolName: "write_file",
-    reason: "validate_st_code 通过，下一轮强制工具: write_file",
-    canTransition: isSuccessfulStValidation,
-  }],
+  resultTransitions: [
+    {
+      fromToolName: "validate_st_code",
+      toToolName: "write_file",
+      reason: "validate_st_code 通过，下一轮强制工具: write_file",
+      canTransition: isSuccessfulStValidation,
+    },
+    {
+      fromToolName: "validate_st_code",
+      toToolName: "validate_st_code",
+      reason: "validate_st_code 未通过，下一轮强制继续修正并重新校验完整草稿",
+      canTransition: isFailedStValidation,
+    },
+  ],
   duplicateToolFingerprints: [{
     toolName: "validate_st_code",
     fingerprint: stValidationFingerprint,
@@ -48,6 +56,10 @@ function isSuccessfulStValidation(result: ToolResult): boolean {
     : {};
   return data.errorCount === 0 &&
     typeof data.validatedContentHash === "string";
+}
+
+function isFailedStValidation(result: ToolResult): boolean {
+  return !isSuccessfulStValidation(result);
 }
 
 function stValidationFingerprint(

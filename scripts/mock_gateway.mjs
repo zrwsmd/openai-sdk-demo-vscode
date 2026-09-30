@@ -483,6 +483,52 @@ const server = http.createServer((req, res) => {
       hasAssistantToolCall('write_file')
     ) {
       await streamStructuredText(res, model, '已查询 TON 标准库接口，完成校验并保存 PumpControl.st。');
+    } else if (
+      userText.includes('辅助失败修正回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      await streamStructuredText(res, model, '已查询 TON 标准库接口，修复校验诊断并保存 PumpControl.st。');
+    } else if (userText.includes('辅助失败修正回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'st_library_symbol', JSON.stringify({
+        symbol: 'TON',
+      }));
+    } else if (
+      userText.includes('辅助失败修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'st_library_symbol'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: BAD_ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('辅助失败修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      forcedToolChoice === 'write_file'
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
+      }));
+    } else if (
+      userText.includes('辅助失败修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      forcedToolChoice === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('辅助失败修正回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'st_dependency_map', JSON.stringify({
+        path: '',
+      }));
     } else if (userText.includes('标准库辅助回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'st_library_symbol', JSON.stringify({
         symbol: 'TON',

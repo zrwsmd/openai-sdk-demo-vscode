@@ -92,7 +92,7 @@ export function createStGraphTools(context: StToolBuildContext) {
     description:
       '查询 ST 工作区的真实符号依赖关系(基于语言服务器语义解析,非文本搜索)。' +
       '不带参数返回工程地图(每个 .st 文件依赖哪些文件);带 path 返回该文件的依赖方与被依赖方、以及具体符号名。' +
-      '修改任何 .st 文件前建议先查询,以了解会波及哪些文件。' +
+      '用于现有工作区依赖/影响分析;生成新 ST 草稿时不要把它当作必做前置步骤。' +
       '若要定位某个具体符号的声明位置与全部使用行,请改用 st_symbol_references。',
     parameters: z.object({
       path: z

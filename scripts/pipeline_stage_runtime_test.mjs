@@ -56,6 +56,21 @@ import {
   if (decision?.toolName !== 'write_file') {
     throw new Error('ST pipeline transition did not choose write_file');
   }
+  const repairDecision = runtime.nextToolAfterResult(
+    'validate_st_code',
+    {
+      ok: false,
+      error: 'ST 校验未通过',
+      data: { errorCount: 3 },
+      diagnostics: [],
+      effect: 'none',
+      risk: 'plan',
+    },
+    new Set(['validate_st_code', 'write_file', 'st_dependency_map']),
+  );
+  if (repairDecision?.toolName !== 'validate_st_code') {
+    throw new Error('ST pipeline failed validation did not force validate_st_code repair');
+  }
   const firstVisible = runtime.shouldSuppressStarted({
     toolName: 'validate_st_code',
     args: JSON.stringify({ code: 'PROGRAM Demo\nEND_PROGRAM' }),

@@ -193,9 +193,10 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     return (
       "\n本轮 .st 工作区交付由运行时按固定流水线执行：" +
       "主交付链路仍然是 validate_st_code -> write_file。" +
-      "编写或修复草稿时，如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol；" +
-      "如需要理解当前工作区 ST 文件依赖、影响范围或符号声明引用，可按需调用 st_dependency_map、st_change_impact、st_symbol_references。" +
+      "编写草稿前最多做少量必要查询；如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol。" +
+      "只有当用户明确要求分析现有工作区关系、或 validate_st_code 诊断指向未知工作区符号时，才调用 st_dependency_map、st_change_impact、st_symbol_references。" +
       "这些查询工具只作为只读辅助证据，不能替代校验或写入阶段。" +
+      "一旦调用过 validate_st_code 且未通过，必须立刻修改内存中的完整草稿并再次调用 validate_st_code；不要继续查询无关辅助工具。" +
       "严格禁止臆造外部/标准库功能块、函数或类型；凡是用户没有提供定义、工作区符号查询没有确认、且不属于你刚刚从 st_library_symbol 命中的标准库符号，都不得生成。" +
       "使用标准库符号时，必须按 st_library_symbol 返回的 inputs/outputs/usage 精确填写输入输出参数名、方向和类型；matchCount=0 或查询不可用时，不得用同名符号硬写代码，应改用已确认的工作区符号或向用户说明缺少库定义。" +
       "如果 validate_st_code 对未知可调用对象、参数名或类型给出诊断，必须优先用 st_library_symbol 或 st_symbol_references 核对后再修改草稿。" +
