@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-- `src/runtime/agent.ts` 约 3584 行，约 139KB，是 `src/runtime` 下最大的文件。
+- `src/runtime/agent.ts` 约 2300 行，仍是 `src/runtime` 下最大的文件。
 - `runAgent()` 单函数约 1698 行，内部耦合了工具构建、审批恢复、Workflow、Completion Gate、
   Stream pump、usage 汇总和 session 投影。
 - 直接切分 `runAgent()` 风险较高；优先抽取外围独立职责，保持原有导出兼容。
@@ -84,30 +84,32 @@
 
 ### 3. 抽出 Team 角色执行
 
+状态：已完成。
+
 建议新增：
 
 - `src/runtime/teamAgent.ts`
 
 迁移内容：
 
-- `runTeamRoleRawOutput`
-- `runTeamRole`
-- `routeTeamTask`
-- `planTeamTask`
-- `reviewTeamTask`
-- `verifyTeamTask`
-- Team 角色 schema 修复、JSON 解析和角色输出 coercion 相关函数
+- 已迁移 `runTeamRoleRawOutput`、`runTeamRole`、
+  `routeTeamTask`、`planTeamTask`、`reviewTeamTask`、`verifyTeamTask`。
+- Team 角色 schema 修复、流式 JSON 解析、字段级错误重试和角色输出兜底逻辑集中在新模块。
+- 主 Agent 仍复用同一套最终输出 JSON 解析和正文兜底逻辑，避免迁移后出现两套行为。
 
 保留方式：
 
-- `agent.ts` 继续 re-export Team 函数。
-- `runCoordinator.ts` 可保持原 import，下一轮再改。
+- `agent.ts` 继续 re-export Team 函数，`runCoordinator.ts` 不需要修改 import。
+- Team 角色仍通过 `modelGateway.ts` 创建适配器，Jev 信号复用、模型选择和日志语义保持不变。
 
 验证：
 
 - `npm run compile`
 - `npm run test:generate; node scripts/run_coordinator_test.mjs`
 - `npm run test:batch`
+- 已通过：`npx tsc --noEmit`、`npm run compile`、
+  `npm run test:generate; node scripts/run_coordinator_test.mjs`、
+  `npm run test:batch`。
 
 ### 4. 抽出 Session 历史与工具历史投影
 
