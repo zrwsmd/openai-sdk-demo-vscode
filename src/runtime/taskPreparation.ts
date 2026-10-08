@@ -75,9 +75,9 @@ function finalOutputShape(value: unknown): string {
 function classifierUsesNativeStructuredOutput(
   cfg: AgentConfig,
 ): boolean {
-  // Custom OpenAI-compatible and Anthropic-compatible gateways may accept the
-  // structured-output field while ignoring its schema. Keep native structured
-  // output only for official endpoints; custom gateways use local validation.
+  // Custom gateways use local parsing for helper classifiers because their
+  // output field conventions may differ from our internal schemas. This does
+  // not imply that the gateway cannot support native structured output.
   return !cfg.baseUrl.trim();
 }
 
@@ -464,9 +464,6 @@ export async function classifyWorkflowDecision(
       maxTurns: 1,
       signal,
     });
-    agentLog(
-      `[classifier] success role=workflow final=${finalOutputShape(result.finalOutput)}`,
-    );
     const finalOutput = useNativeStructuredOutput
       ? result.finalOutput
       : parseManualClassifierOutput(

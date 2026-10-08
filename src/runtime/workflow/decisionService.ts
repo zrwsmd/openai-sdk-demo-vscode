@@ -61,6 +61,12 @@ export class WorkflowDecisionService {
 
     const safeFallbackDecision = this.workflowFromSafeJevFallback(jevHint, userText);
     if (safeFallbackDecision) return safeFallbackDecision;
+    const safeFallbackReasons = safeFallbackMissReasons(jevHint);
+    if (safeFallbackReasons.length) {
+      this.log(
+        `[workflow] Jev safe fallback skipped: ${safeFallbackReasons.join(", ")}`,
+      );
+    }
 
     const modelDecision = await this.workflowFromModelClassifier(
       cfg,
@@ -366,6 +372,55 @@ function safeFallbackModeFromJevHint(
     return "read_only";
   }
   return undefined;
+}
+
+function safeFallbackMissReasons(hint: TaskDecisionHint): string[] {
+  const reasons: string[] = [];
+  if (hint.workflowConfidence < MIN_SAFE_JEV_WORKFLOW_CONFIDENCE) {
+    reasons.push(
+      `workflow_confidence=${hint.workflowConfidence.toFixed(2)}<${MIN_SAFE_JEV_WORKFLOW_CONFIDENCE.toFixed(2)}`,
+    );
+  }
+  if (hint.delivery !== "not_required") {
+    reasons.push(
+      `delivery=${hint.delivery}(conf=${hint.deliveryConfidence.toFixed(2)})`,
+    );
+  }
+  if (hint.orchestration !== "single") {
+    reasons.push(
+      `orchestration=${hint.orchestration}(conf=${hint.orchestrationConfidence.toFixed(2)})`,
+    );
+  }
+  if (!hasConfidentToolNeed(hint.toolNeeds.writeFile, "no")) {
+    reasons.push(
+      `writeFile=${hint.toolNeeds.writeFile.value}(conf=${hint.toolNeeds.writeFile.confidence.toFixed(2)})`,
+    );
+  }
+  if (!hasConfidentToolNeed(hint.toolNeeds.runCommand, "no")) {
+    reasons.push(
+      `runCommand=${hint.toolNeeds.runCommand.value}(conf=${hint.toolNeeds.runCommand.confidence.toFixed(2)})`,
+    );
+  }
+  if (
+    hint.workflow === "general_chat" &&
+    !hasConfidentToolNeed(hint.toolNeeds.readFile, "no")
+  ) {
+    reasons.push(
+      `readFile=${hint.toolNeeds.readFile.value}(conf=${hint.toolNeeds.readFile.confidence.toFixed(2)})`,
+    );
+  }
+  if (
+    hint.workflow === "file_read" &&
+    !hasConfidentToolNeed(hint.toolNeeds.readFile, "yes")
+  ) {
+    reasons.push(
+      `readFile=${hint.toolNeeds.readFile.value}(conf=${hint.toolNeeds.readFile.confidence.toFixed(2)})`,
+    );
+  }
+  if (hint.workflow !== "general_chat" && hint.workflow !== "file_read") {
+    reasons.push(`workflow=${hint.workflow}`);
+  }
+  return reasons;
 }
 
 function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): string {
