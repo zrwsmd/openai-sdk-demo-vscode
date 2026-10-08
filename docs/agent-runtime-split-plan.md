@@ -177,6 +177,8 @@
 
 ### 6. 收敛 `runAgent()` 主循环内部结构
 
+状态：进行中；已完成 6A，主状态机部分暂不强行拆分。
+
 前五阶段完成后，再评估 `runAgent()`。届时它应该只剩核心执行循环和少量 glue code。
 
 可拆方向：
@@ -188,6 +190,37 @@
 - Stream pump：SDK stream 消费、输出投影、usage 汇总。
 
 这阶段风险最高，只有在前面阶段测试稳定后再做。
+
+#### 6A. 抽出运行时控制工具工厂
+
+状态：已完成。
+
+新增：
+
+- `src/runtime/agentRuntimeTools.ts`
+
+迁移内容：
+
+- `report_plan_progress` 工具定义和计划进度更新回调。
+- `deliver_artifact` 工具定义和内联交付物回执。
+
+设计边界：
+
+- 通过可变计划引用保留 `runAgent()` 对当前计划状态的读写语义。
+- 不改变工具名称、schema、回执结构、风险等级或 `runAgent()` 的审批和完成验收流程。
+- 流式 pump、Approval resume loop、Tool ledger 和 Completion Gate repair loop 仍留在
+  `agent.ts`，因为它们共享同一套 `RunState`、输出状态和工具账本，当前不具备足够安全的独立边界。
+
+验证：
+
+- `npx tsc --noEmit`
+- `npm run compile`
+- `npm run test:workflow`
+- `npm run test:batch`
+- `npm run test:generate; node scripts/agent_kernel_test.mjs`
+
+已通过上述验证。后续只有在能为共享状态建立明确输入/输出契约，并补齐暂停、恢复、重复工具调用和
+Completion Gate 回归后，才继续拆 6B。
 
 验证：
 
