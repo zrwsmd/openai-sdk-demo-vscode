@@ -42,22 +42,23 @@ function classifierErrorLabel(error: unknown): string {
 }
 
 function logClassifierStart(
-  role: "workflow" | "delivery",
+  role: "planner" | "workflow" | "delivery",
   cfg: AgentConfig,
   adapter: ReturnType<typeof buildModelAdapter>,
   historyLength: number,
   schema: string,
+  outputMode: "native" | "manual_json",
 ): void {
   agentLog(
     `[classifier] start role=${role} schema=${schema}` +
       ` provider=${adapter.provider} apiFormat=${adapter.apiFormat}` +
       ` model=${cfg.model} endpoint=${classifierEndpointLabel(cfg.baseUrl)}` +
-      ` history=${historyLength} structured=true`,
+      ` history=${historyLength} structured=${outputMode}`,
   );
 }
 
 function logClassifierFailure(
-  role: "workflow" | "delivery",
+  role: "planner" | "workflow" | "delivery",
   error: unknown,
 ): void {
   agentLog(`[classifier] failed role=${role} ${classifierErrorLabel(error)}`);
@@ -69,6 +70,80 @@ function finalOutputShape(value: unknown): string {
     return `object(${Object.keys(value).join(",").slice(0, 240)})`;
   }
   return typeof value;
+}
+
+function classifierUsesNativeStructuredOutput(
+  cfg: AgentConfig,
+): boolean {
+  // Custom OpenAI-compatible and Anthropic-compatible gateways may accept the
+  // structured-output field while ignoring its schema. Keep native structured
+  // output only for official endpoints; custom gateways use local validation.
+  return !cfg.baseUrl.trim();
+}
+
+function stripJsonFence(value: string): string {
+  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(value.trim());
+  return match?.[1]?.trim() ?? value.trim();
+}
+
+function extractJsonObject(value: string): string | undefined {
+  const start = value.indexOf("{");
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function parseManualClassifierOutput<T>(
+  role: "planner" | "workflow" | "delivery",
+  value: unknown,
+  schema: z.ZodType<T>,
+): T {
+  const raw = typeof value === "string"
+    ? value.trim()
+    : value === undefined || value === null
+      ? ""
+      : JSON.stringify(value) ?? "";
+  const unfenced = stripJsonFence(raw);
+  const candidates = [...new Set([
+    unfenced,
+    extractJsonObject(unfenced),
+  ].filter((candidate): candidate is string => Boolean(candidate)))];
+  const issues: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      const result = schema.safeParse(parsed);
+      if (result.success) return result.data;
+      issues.push(result.error.issues.map((issue) => issue.message).join("|"));
+    } catch {
+      issues.push("不是有效 JSON");
+    }
+  }
+  const preview = raw.replace(/\s+/g, " ").slice(0, 800);
+  throw new Error(
+    `[classifier:${role}] 手动 JSON 输出未通过 schema: ` +
+      `${issues.join("；") || "没有找到 JSON 对象"} raw=${JSON.stringify(preview)}`,
+  );
 }
 
 /**
@@ -84,6 +159,7 @@ export async function planTask(
 ): Promise<TaskPlan | undefined> {
   if (isSimpleSingleTurnRequest(userText)) return undefined;
   const adapter = buildModelAdapter(cfg, "planner");
+  const useNativeStructuredOutput = classifierUsesNativeStructuredOutput(cfg);
   const planner = new Agent({
     name: "通用任务规划器",
     model: adapter.model,
@@ -95,9 +171,21 @@ export async function planTask(
       "只有上一步结果会决定下一步动作、需要跨步骤验证或有真实先后依赖时才返回 requiresPlan=true。" +
       "需要多步时只生成 2 到 8 个线性步骤，每一步都必须是可执行目标，并给出清晰完成标准。" +
       "不要臆造用户没有提出的动作；suggestedTools 只填写通用工具名或空数组。" +
-      "必须严格返回 schema，不要输出 markdown。",
-    outputType: taskPlanDecisionSchema,
+      (useNativeStructuredOutput
+        ? "必须严格返回 schema，不要输出 markdown。"
+        : "必须只返回一个 JSON 对象，不要输出 markdown，不要添加解释文字。"),
+    ...(useNativeStructuredOutput
+      ? { outputType: taskPlanDecisionSchema }
+      : {}),
   });
+  logClassifierStart(
+    "planner",
+    cfg,
+    adapter,
+    history.length,
+    "task_plan",
+    useNativeStructuredOutput ? "native" : "manual_json",
+  );
   const tracingDisabled = !(
     adapter.provider === "openai" &&
     adapter.apiFormat === "responses" &&
@@ -109,12 +197,23 @@ export async function planTask(
         { type: "message", role: "user", content: userText },
       ]
     : userText;
-  const result = await new Runner({ tracingDisabled }).run(planner, plannerInput, {
-    stream: false,
-    maxTurns: 1,
-    signal,
-  });
-  return createTaskPlan(result.finalOutput, userText);
+  try {
+    const result = await new Runner({ tracingDisabled }).run(planner, plannerInput, {
+      stream: false,
+      maxTurns: 1,
+      signal,
+    });
+    const finalOutput = useNativeStructuredOutput
+      ? result.finalOutput
+      : parseManualClassifierOutput("planner", result.finalOutput, taskPlanDecisionSchema);
+    agentLog(
+      `[classifier] success role=planner final=${finalOutputShape(finalOutput)}`,
+    );
+    return createTaskPlan(finalOutput, userText);
+  } catch (error) {
+    logClassifierFailure("planner", error);
+    throw error;
+  }
 }
 
 export async function classifyDeliveryContract(
@@ -152,6 +251,7 @@ export async function classifyDeliveryContract(
     );
   }
   const adapter = buildModelAdapter(cfg, "delivery_classifier");
+  const useNativeStructuredOutput = classifierUsesNativeStructuredOutput(cfg);
   const classifier = new Agent({
     name: "交付契约判定器",
     model: adapter.model,
@@ -166,8 +266,12 @@ export async function classifyDeliveryContract(
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
-      "必须严格返回 schema,不要输出 markdown。",
-    outputType: deliveryContractDecisionSchema,
+      (useNativeStructuredOutput
+        ? "必须严格返回 schema,不要输出 markdown。"
+        : "必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。"),
+    ...(useNativeStructuredOutput
+      ? { outputType: deliveryContractDecisionSchema }
+      : {}),
   });
   logClassifierStart(
     "delivery",
@@ -175,6 +279,7 @@ export async function classifyDeliveryContract(
     adapter,
     history.length,
     "delivery_contract",
+    useNativeStructuredOutput ? "native" : "manual_json",
   );
   const tracingDisabled = !(
     adapter.provider === "openai" &&
@@ -190,10 +295,17 @@ export async function classifyDeliveryContract(
       maxTurns: 1,
       signal,
     });
+    const finalOutput = useNativeStructuredOutput
+      ? result.finalOutput
+      : parseManualClassifierOutput(
+          "delivery",
+          result.finalOutput,
+          deliveryContractDecisionSchema,
+        );
     agentLog(
-      `[classifier] success role=delivery final=${finalOutputShape(result.finalOutput)}`,
+      `[classifier] success role=delivery final=${finalOutputShape(finalOutput)}`,
     );
-    return normalizeWorkflowContract(result.finalOutput);
+    return normalizeWorkflowContract(finalOutput);
   } catch (error) {
     logClassifierFailure("delivery", error);
     throw error;
@@ -226,6 +338,7 @@ export async function classifyWorkflowDecision(
 ): Promise<WorkflowModelDecision | undefined> {
   if (!workflows.length) return undefined;
   const adapter = buildModelAdapter(cfg, "workflow_classifier");
+  const useNativeStructuredOutput = classifierUsesNativeStructuredOutput(cfg);
   const workflowList = workflows
     .map((workflow) =>
       `- ${workflow.id}: ${workflow.title}; ${workflow.description}; runtimeManaged=${workflow.runtimeManaged}`,
@@ -243,8 +356,12 @@ export async function classifyWorkflowDecision(
       "needs_clarification 有交付倾向但交付类型不明确；blocked_high_risk 高风险副作用需先停止或审批。" +
       "已注册 workflow:\n" +
       workflowList +
-      "\n必须严格返回 schema，不要输出 markdown。",
-    outputType: workflowClassifierOutputSchema,
+      (useNativeStructuredOutput
+        ? "\n必须严格返回 schema，不要输出 markdown。"
+        : "\n必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。"),
+    ...(useNativeStructuredOutput
+      ? { outputType: workflowClassifierOutputSchema }
+      : {}),
   });
   logClassifierStart(
     "workflow",
@@ -252,6 +369,7 @@ export async function classifyWorkflowDecision(
     adapter,
     history.length,
     "workflow_decision",
+    useNativeStructuredOutput ? "native" : "manual_json",
   );
   const tracingDisabled = !(
     adapter.provider === "openai" &&
@@ -270,7 +388,17 @@ export async function classifyWorkflowDecision(
     agentLog(
       `[classifier] success role=workflow final=${finalOutputShape(result.finalOutput)}`,
     );
-    const parsed = workflowClassifierOutputSchema.parse(result.finalOutput);
+    const finalOutput = useNativeStructuredOutput
+      ? result.finalOutput
+      : parseManualClassifierOutput(
+          "workflow",
+          result.finalOutput,
+          workflowClassifierOutputSchema,
+        );
+    agentLog(
+      `[classifier] success role=workflow final=${finalOutputShape(finalOutput)}`,
+    );
+    const parsed = workflowClassifierOutputSchema.parse(finalOutput);
     if (parsed.confidence < 0.72) return undefined;
     if (parsed.kind === "workflow") {
       const workflowId = parsed.workflowId?.trim();
