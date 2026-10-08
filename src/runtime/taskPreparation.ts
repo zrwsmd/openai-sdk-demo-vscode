@@ -117,6 +117,7 @@ function parseManualClassifierOutput<T>(
   role: "planner" | "workflow" | "delivery",
   value: unknown,
   schema: z.ZodType<T>,
+  normalize?: (value: unknown) => unknown,
 ): T {
   const raw = typeof value === "string"
     ? value.trim()
@@ -131,7 +132,9 @@ function parseManualClassifierOutput<T>(
   const issues: string[] = [];
   for (const candidate of candidates) {
     try {
-      const parsed: unknown = JSON.parse(candidate);
+      const parsed: unknown = normalize
+        ? normalize(JSON.parse(candidate))
+        : JSON.parse(candidate);
       const result = schema.safeParse(parsed);
       if (result.success) return result.data;
       issues.push(result.error.issues.map((issue) => issue.message).join("|"));
@@ -144,6 +147,76 @@ function parseManualClassifierOutput<T>(
     `[classifier:${role}] 手动 JSON 输出未通过 schema: ` +
       `${issues.join("；") || "没有找到 JSON 对象"} raw=${JSON.stringify(preview)}`,
   );
+}
+
+const workflowFallbackModes = new Set([
+  "general_chat",
+  "read_only",
+  "file_edit",
+  "command_query",
+  "needs_clarification",
+  "blocked_high_risk",
+]);
+
+function normalizeWorkflowClassifierJson(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const mode = typeof source.mode === "string" ? source.mode : undefined;
+  const fallbackMode =
+    typeof source.fallbackMode === "string"
+      ? source.fallbackMode
+      : mode && workflowFallbackModes.has(mode)
+        ? mode
+        : undefined;
+  const workflowId =
+    typeof source.workflowId === "string"
+      ? source.workflowId
+      : typeof source.workflow === "string"
+        ? source.workflow
+        : undefined;
+  const kind =
+    source.kind === "workflow" || source.kind === "fallback"
+      ? source.kind
+      : fallbackMode
+        ? "fallback"
+        : workflowId
+          ? "workflow"
+          : undefined;
+  if (!kind) return value;
+  return {
+    kind,
+    ...(workflowId ? { workflowId } : {}),
+    ...(fallbackMode ? { fallbackMode } : {}),
+    confidence: typeof source.confidence === "number" ? source.confidence : 0,
+    reason: typeof source.reason === "string" && source.reason.trim()
+      ? source.reason
+      : "模型返回了可识别的路由结果，但未提供判定理由",
+  };
+}
+
+function normalizeDeliveryClassifierJson(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  if (source.requiresDeliverable === false) {
+    return {
+      requiresDeliverable: false,
+      reason: typeof source.reason === "string" && source.reason.trim()
+        ? source.reason
+        : "模型判断本轮不需要交付物",
+      deliverables: [],
+    };
+  }
+  if (
+    source.requiresDeliverable === true &&
+    Array.isArray(source.deliverables)
+  ) {
+    return {
+      requiresDeliverable: true,
+      reason: typeof source.reason === "string" ? source.reason : "",
+      deliverables: source.deliverables,
+    };
+  }
+  return value;
 }
 
 /**
@@ -173,7 +246,8 @@ export async function planTask(
       "不要臆造用户没有提出的动作；suggestedTools 只填写通用工具名或空数组。" +
       (useNativeStructuredOutput
         ? "必须严格返回 schema，不要输出 markdown。"
-        : "必须只返回一个 JSON 对象，不要输出 markdown，不要添加解释文字。"),
+        : "必须只返回一个 JSON 对象，不要输出 markdown，不要添加解释文字。" +
+          "只允许字段 requiresPlan、goal、reason、steps。"),
     ...(useNativeStructuredOutput
       ? { outputType: taskPlanDecisionSchema }
       : {}),
@@ -268,7 +342,9 @@ export async function classifyDeliveryContract(
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
       (useNativeStructuredOutput
         ? "必须严格返回 schema,不要输出 markdown。"
-        : "必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。"),
+        : "必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。" +
+          "只允许字段 requiresDeliverable、reason、deliverables。" +
+          '不需要交付物时必须返回 {"requiresDeliverable":false,"reason":"...","deliverables":[]}。'),
     ...(useNativeStructuredOutput
       ? { outputType: deliveryContractDecisionSchema }
       : {}),
@@ -301,6 +377,7 @@ export async function classifyDeliveryContract(
           "delivery",
           result.finalOutput,
           deliveryContractDecisionSchema,
+          normalizeDeliveryClassifierJson,
         );
     agentLog(
       `[classifier] success role=delivery final=${finalOutputShape(finalOutput)}`,
@@ -358,7 +435,9 @@ export async function classifyWorkflowDecision(
       workflowList +
       (useNativeStructuredOutput
         ? "\n必须严格返回 schema，不要输出 markdown。"
-        : "\n必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。"),
+        : "\n必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。" +
+          "只允许字段 kind、workflowId、fallbackMode、confidence、reason。" +
+          '只读请求必须返回 {"kind":"fallback","fallbackMode":"read_only","confidence":0.9,"reason":"..."}，不要使用 mode 或 workflow 字段。'),
     ...(useNativeStructuredOutput
       ? { outputType: workflowClassifierOutputSchema }
       : {}),
@@ -394,6 +473,7 @@ export async function classifyWorkflowDecision(
           "workflow",
           result.finalOutput,
           workflowClassifierOutputSchema,
+          normalizeWorkflowClassifierJson,
         );
     agentLog(
       `[classifier] success role=workflow final=${finalOutputShape(finalOutput)}`,
