@@ -183,6 +183,132 @@ async function fixture(executeAgent, planTask, team = {}) {
   await fs.rm(test.dir, { recursive: true, force: true });
 }
 
+// A low-risk, no-deliverable read-only turn skips generic planning when the
+// semantic signals are already sufficient. This does not bypass workflow or
+// tool policy: routing remains independently controlled.
+{
+  let plannerCalls = 0;
+  let routeCalls = 0;
+  const test = await fixture(
+    async (_cfg, _session, _text, options) => {
+      if (options.taskPlan !== undefined) {
+        throw new Error('simple read-only turn unexpectedly received a plan');
+      }
+      return {
+        status: 'completed',
+        output: 'read-only result',
+        usage,
+        result: completedAgentResult('read-only result'),
+      };
+    },
+    async () => {
+      plannerCalls += 1;
+      return undefined;
+    },
+    {
+      decisionService: {
+        taskHint: async () => ({
+          delivery: 'not_required',
+          deliveryConfidence: 0.94,
+          orchestration: 'unknown',
+          orchestrationConfidence: 0,
+          workflow: 'unknown',
+          workflowConfidence: 0,
+          toolNeeds: {
+            readFile: { value: 'yes', confidence: 0.92 },
+            writeFile: { value: 'no', confidence: 0.92 },
+            runCommand: { value: 'no', confidence: 0.92 },
+          },
+          riskLevel: 'low',
+          riskConfidence: 0.92,
+          needsApproval: { value: 'no', confidence: 0.92 },
+          evaluation: { status: 'ok', elapsedMs: 1 },
+        }),
+      },
+      routeTeamTask: async () => {
+        routeCalls += 1;
+        return undefined;
+      },
+    },
+  );
+  await test.coordinator.start('读取项目文件内容', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (plannerCalls !== 0 || routeCalls !== 1 || completed?.status !== 'completed') {
+    throw new Error('safe read-only turn did not skip generic planning');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
+// An explicit plan request keeps the Planner even when Jev says the execution
+// lane itself can remain single-agent.
+{
+  let plannerCalls = 0;
+  const test = await fixture(
+    async (_cfg, _session, _text, options) => ({
+      status: 'completed',
+      output: options.taskPlan ? 'planned result' : 'unplanned result',
+      usage,
+      result: completedAgentResult(options.taskPlan ? 'planned result' : 'unplanned result'),
+    }),
+    async () => {
+      plannerCalls += 1;
+      return {
+        schemaVersion: 1,
+        id: 'explicit-plan',
+        goal: '给出执行计划',
+        reason: 'user explicitly requested a plan',
+        status: 'pending',
+        steps: [{
+          id: 'step-1',
+          title: '说明步骤',
+          objective: '说明执行步骤',
+          completionCriteria: '步骤已列出',
+          suggestedTools: [],
+          status: 'pending',
+        }, {
+          id: 'step-2',
+          title: '确认边界',
+          objective: '确认执行边界',
+          completionCriteria: '边界已列出',
+          suggestedTools: [],
+          status: 'pending',
+        }],
+      };
+    },
+    {
+      decisionService: {
+        taskHint: async () => ({
+          delivery: 'not_required',
+          deliveryConfidence: 0.94,
+          orchestration: 'single',
+          orchestrationConfidence: 0.94,
+          workflow: 'general_chat',
+          workflowConfidence: 0.9,
+          toolNeeds: {
+            readFile: { value: 'no', confidence: 0.92 },
+            writeFile: { value: 'no', confidence: 0.92 },
+            runCommand: { value: 'no', confidence: 0.92 },
+          },
+          riskLevel: 'low',
+          riskConfidence: 0.92,
+          needsApproval: { value: 'no', confidence: 0.92 },
+          evaluation: { status: 'ok', elapsedMs: 1 },
+        }),
+      },
+    },
+  );
+  await test.coordinator.start('请给我一个执行计划，分步骤说明怎么检查项目', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    plannerCalls !== 1 ||
+    completed?.status !== 'completed' ||
+    !completed.output.includes('planned result')
+  ) {
+    throw new Error('explicit plan request was incorrectly skipped');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Official OpenAI Responses uses the SDK compaction session when the model id
 // is eligible. The coordinator must not also run the local summary compactor
 // for that route.

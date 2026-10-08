@@ -174,6 +174,16 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 
 - 不能让 ST 交付因为跳过 plan 而跳过 Workflow/Delivery contract。
 
+实现状态：
+
+- 已完成：通用 Planner 只在独立规划阶段需要时进入；低风险、无交付、无写入/
+  命令副作用且已有明确 Workflow/Jev 信号的请求跳过 Planner。
+- 已完成：用户明确要求执行计划、任务计划、步骤或规划时，即使执行编排仍为
+  `single`，也保留 Planner。
+- 已完成：Team 编排、ST/其他运行时托管 Workflow、Delivery contract、审批、
+  工具授权和命令策略不受本阶段短路影响。
+- 已验证：新增只读请求跳过 Planner、明确计划请求保留 Planner 的 Coordinator 回归。
+
 验证：
 
 - `npm run test:generate; node scripts/run_coordinator_test.mjs`

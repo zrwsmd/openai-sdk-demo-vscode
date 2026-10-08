@@ -171,6 +171,31 @@ function shouldSuppressAutoPreparation(
       decision.source === 'model');
 }
 
+function userExplicitlyRequestsPlan(text: string): boolean {
+  const normalized = text.replace(/\s+/gu, ' ').trim();
+  if (!normalized) return false;
+  return /(?:执行计划|任务计划|实施计划|规划|步骤|执行顺序)/u.test(normalized) ||
+    /\b(?:plan|steps?)\b/iu.test(normalized) ||
+    /(?:先.+(?:再|然后|接着).+)/u.test(normalized);
+}
+
+function shouldSkipPlanPreparation(
+  decision: WorkflowDecision | undefined,
+  orchestration: DurableRunConfig['orchestration'],
+  userText: string,
+  signals: WorkflowDecisionSignals | undefined = decision?.signals,
+): boolean {
+  if (orchestration === 'team' || userExplicitlyRequestsPlan(userText)) return orchestration === 'team';
+  if (shouldSuppressAutoPreparation(decision, orchestration, signals)) return true;
+  if (decision?.kind !== 'fallback') return false;
+  const toolNeeds = signals?.toolNeeds;
+  return signals?.delivery === 'not_required' &&
+    signals.riskLevel === 'low' &&
+    signals.needsApproval?.value === 'no' &&
+    toolNeeds?.writeFile?.value === 'no' &&
+    toolNeeds?.runCommand?.value === 'no';
+}
+
 function commandRunnerFromConfig(config: DurableRunCommandConfig | undefined): CommandRunner | undefined {
   if (!config || config.mode === 'local') return undefined;
   return new SandboxCommandRunner({
@@ -741,6 +766,11 @@ export class RunCoordinator {
         workflowDecision,
         config.orchestration,
       );
+      const skipPlanPreparation = shouldSkipPlanPreparation(
+        workflowDecision,
+        config.orchestration,
+        userText,
+      );
       if (!runtimeManagedWorkflow && !suppressAutoPreparation && (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask))) {
         run.resumeStage = 'routing';
         await this.store.update(run);
@@ -786,7 +816,7 @@ export class RunCoordinator {
           if (this.transitionController === routingController) this.transitionController = undefined;
         }
       }
-      if (!runtimeManagedWorkflow && !suppressAutoPreparation && !run.teamTask && this.planTask && config.orchestration !== 'team') {
+      if (!runtimeManagedWorkflow && !skipPlanPreparation && !run.teamTask && this.planTask && config.orchestration !== 'team') {
         run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
         await this.store.update(run);
@@ -1261,6 +1291,12 @@ export class RunCoordinator {
       run.config.orchestration,
       workflowDecision?.signals ?? run.decisionSignals,
     );
+    const skipPlanPreparation = shouldSkipPlanPreparation(
+      workflowDecision,
+      run.config.orchestration,
+      run.userText,
+      workflowDecision?.signals ?? run.decisionSignals,
+    );
     if (!runtimeManagedWorkflow && !suppressAutoPreparation && stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
       const routingController = new AbortController();
       this.transitionController = routingController;
@@ -1284,7 +1320,7 @@ export class RunCoordinator {
       run.resumeStage = undefined;
       await this.store.update(run);
     }
-    if (!runtimeManagedWorkflow && !suppressAutoPreparation && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
+    if (!runtimeManagedWorkflow && !skipPlanPreparation && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
       run.resumeStage = 'planning';
       announceStage('planning');
       await this.store.update(run);
