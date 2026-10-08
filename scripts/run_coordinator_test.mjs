@@ -40,6 +40,39 @@ async function fixture(executeAgent, planTask, team = {}) {
   return { dir, session, store, events, logs, coordinator };
 }
 
+// Preflight progress is host-only UI state. It must arrive in lifecycle order
+// without changing the replayable protocol event history.
+{
+  const test = await fixture(
+    async () => ({
+      status: 'completed',
+      output: 'ok',
+      usage,
+      result: completedAgentResult('ok'),
+    }),
+    undefined,
+  );
+  await test.coordinator.start('你好', config, 'key');
+  const preflight = test.events
+    .filter((event) => event.type === 'preflight' && event.status === 'started')
+    .map((event) => event.stage);
+  if (
+    preflight.indexOf('context') < 0 ||
+    preflight.indexOf('workflow') < 0 ||
+    preflight.indexOf('context') > preflight.indexOf('workflow')
+  ) {
+    throw new Error(`preflight lifecycle order is invalid: ${preflight.join(' -> ')}`);
+  }
+  const protocolPreflight = test.events
+    .filter((event) => event.type === 'agentEvent')
+    .map((event) => event.event)
+    .filter((event) => event.type === 'run.progress' && event.payload.stage === 'preflight');
+  if (protocolPreflight.length) {
+    throw new Error('preflight UI state leaked into replayable protocol history');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Official OpenAI Responses uses the SDK compaction session when the model id
 // is eligible. The coordinator must not also run the local summary compactor
 // for that route.

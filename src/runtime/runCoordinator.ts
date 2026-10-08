@@ -109,6 +109,9 @@ export type RuntimeEvent =
   | { type: 'agentEvent'; event: AgentProtocolEvent }
   | ({ type: string } & Record<string, unknown>);
 
+type PreflightStage = 'context' | DurableRunResumeStage;
+type PreflightStatus = 'started' | 'completed' | 'failed' | 'paused';
+
 const MAX_REPLAYABLE_PROTOCOL_EVENTS = 200;
 const MAX_TEAM_REVIEW_REVISIONS = 2;
 const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
@@ -554,6 +557,7 @@ export class RunCoordinator {
       this.writeLog(
         `[run:${run.id}] 用户(${userText.length}字符): ${userText.replace(/\r?\n/g, '⏎')}`,
       );
+      this.emitPreflight(run, 'context', 'started');
       const compactionController = new AbortController();
       if (usesOfficialOpenAIResponses(config)) {
         this.transitionController = compactionController;
@@ -626,10 +630,12 @@ export class RunCoordinator {
           this.writeLog(`[context] 历史压缩失败，继续使用原始历史: ${compaction.error}`);
         }
       }
+      this.emitPreflight(run, 'context', 'completed');
       if (this.isClearing(generation)) return;
       let workflowDecision: WorkflowDecision | undefined;
       run.resumeStage = 'workflow';
       await this.store.update(run);
+      this.emitPreflight(run, 'workflow', 'started');
       const workflowController = new AbortController();
       this.transitionController = workflowController;
       try {
@@ -656,6 +662,7 @@ export class RunCoordinator {
         if (!this.isClearing(generation) && !this.stopRequested) {
           run.resumeStage = undefined;
           await this.store.update(run);
+          this.emitPreflight(run, 'workflow', 'completed');
         }
       } catch (error) {
         if (this.isClearing(generation)) return;
@@ -666,6 +673,7 @@ export class RunCoordinator {
         this.writeLog(`[workflow] workflow 判定失败，继续尝试通用交付契约判定: ${this.formatError(error)}`);
         run.resumeStage = undefined;
         await this.store.update(run);
+        this.emitPreflight(run, 'workflow', 'completed', 'Workflow 判定失败，继续通用路径');
       } finally {
         if (this.transitionController === workflowController) this.transitionController = undefined;
       }
@@ -678,6 +686,7 @@ export class RunCoordinator {
       if (!run.deliveryContract && this.classifyDeliveryContract && !shouldSkipDeliveryClassifier(workflowDecision)) {
         run.resumeStage = 'delivery';
         await this.store.update(run);
+        this.emitPreflight(run, 'delivery', 'started');
         const deliveryController = new AbortController();
         this.transitionController = deliveryController;
         try {
@@ -691,6 +700,7 @@ export class RunCoordinator {
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
             await this.store.update(run);
+            this.emitPreflight(run, 'delivery', 'completed');
           }
         } catch (error) {
           if (this.isClearing(generation)) return;
@@ -702,6 +712,7 @@ export class RunCoordinator {
           run.deliveryContract = undefined;
           run.resumeStage = undefined;
           await this.store.update(run);
+          this.emitPreflight(run, 'delivery', 'completed', '交付要求判定失败，继续执行');
         } finally {
           if (this.transitionController === deliveryController) this.transitionController = undefined;
         }
@@ -727,6 +738,7 @@ export class RunCoordinator {
       if (!runtimeManagedWorkflow && !suppressAutoPreparation && (config.orchestration === 'team' || (config.orchestration === 'auto' && this.routeTeamTask))) {
         run.resumeStage = 'routing';
         await this.store.update(run);
+        this.emitPreflight(run, 'routing', 'started');
         const routeTeam = this.routeTeamTask;
         const routingController = new AbortController();
         this.transitionController = routingController;
@@ -742,6 +754,7 @@ export class RunCoordinator {
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
             await this.store.update(run);
+            this.emitPreflight(run, 'routing', 'completed');
           }
           if (run.teamTask && !this.isClearing(generation) && !this.stopRequested) {
             await this.audit('team_routed', run, {
@@ -761,6 +774,7 @@ export class RunCoordinator {
           run.teamTask = undefined;
           run.resumeStage = undefined;
           await this.store.update(run);
+          this.emitPreflight(run, 'routing', 'completed', '协同路由失败，退回单 Agent');
         } finally {
           if (this.transitionController === routingController) this.transitionController = undefined;
         }
@@ -769,6 +783,7 @@ export class RunCoordinator {
         run.resumeStage = 'planning';
         this.emit({ type: 'planning' });
         await this.store.update(run);
+        this.emitPreflight(run, 'planning', 'started');
         const planningController = new AbortController();
         this.transitionController = planningController;
         try {
@@ -781,6 +796,7 @@ export class RunCoordinator {
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
             await this.store.update(run);
+            this.emitPreflight(run, 'planning', 'completed');
           }
           if (run.plan && !this.isClearing(generation) && !this.stopRequested) {
             this.ensureProtocolFactory(run);
@@ -805,6 +821,7 @@ export class RunCoordinator {
           run.plan = undefined;
           run.resumeStage = undefined;
           await this.store.update(run);
+          this.emitPreflight(run, 'planning', 'completed', '规划失败，退回单 Agent');
         } finally {
           if (this.transitionController === planningController) this.transitionController = undefined;
         }
@@ -1098,6 +1115,7 @@ export class RunCoordinator {
     generation: number,
   ): Promise<void> {
     if (this.isRunInvalidated(generation)) return;
+    this.emitPreflight(run, stage, 'paused');
     const active = await this.store.getActive();
     if (!active || active.id !== run.id) {
       if (this.stopRequested) this.stopRequested = false;
@@ -1125,6 +1143,13 @@ export class RunCoordinator {
   ): Promise<boolean> {
     let stage = run.resumeStage;
     if (!stage || this.isRunInvalidated(generation)) return false;
+    let announcedStage: DurableRunResumeStage | undefined;
+    const announceStage = (nextStage: DurableRunResumeStage | undefined): void => {
+      if (!nextStage || nextStage === announcedStage) return;
+      announcedStage = nextStage;
+      this.emitPreflight(run, nextStage, 'started');
+    };
+    announceStage(stage);
     const sessionItems = await this.session.getItems();
     let workflowDecision: WorkflowDecision | undefined;
     if (stage === 'workflow') {
@@ -1170,6 +1195,7 @@ export class RunCoordinator {
         : shouldSkipDeliveryClassifier(workflowDecision)
           ? run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning'
           : 'delivery';
+      announceStage(stage);
     }
     if (stage === 'delivery' && !this.classifyDeliveryContract) {
       run.resumeStage = undefined;
@@ -1182,6 +1208,7 @@ export class RunCoordinator {
       )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+      announceStage(stage);
     }
     if (stage === 'delivery' && this.classifyDeliveryContract) {
       const deliveryController = new AbortController();
@@ -1211,6 +1238,7 @@ export class RunCoordinator {
       )
         ? undefined
         : run.config.orchestration === 'team' || this.routeTeamTask ? 'routing' : 'planning';
+      announceStage(stage);
     }
     const runtimeManagedWorkflow = shouldUseRuntimeManagedWorkflow(
       run.workflowId,
@@ -1241,6 +1269,7 @@ export class RunCoordinator {
     }
     if (!runtimeManagedWorkflow && !suppressAutoPreparation && !run.teamTask && this.planTask && run.config.orchestration !== 'team') {
       run.resumeStage = 'planning';
+      announceStage('planning');
       await this.store.update(run);
       const planningController = new AbortController();
       this.transitionController = planningController;
@@ -2431,6 +2460,21 @@ export class RunCoordinator {
       type: 'run.progress',
       payload: { stage, message, teamTask: run.teamTask },
     }));
+  }
+
+  private emitPreflight(
+    run: Pick<DurableRunRecord, 'id'>,
+    stage: PreflightStage,
+    status: PreflightStatus,
+    message?: string,
+  ): void {
+    this.emit({
+      type: 'preflight',
+      runId: run.id,
+      stage,
+      status,
+      ...(message ? { message } : {}),
+    });
   }
 
   private emitProtocol(event: AgentProtocolEvent): void {

@@ -30,6 +30,7 @@ let currentRunId = null;
 let canRetry = false;
 let canContinue = false;
 let pauseNoticeEl = null;
+let preflightNoteEl = null;
 let settingsRequestId = 0;
 let settingsSavePending = false;
 let pendingLocalUserText = null;
@@ -58,6 +59,15 @@ const finalAnswerAnchors = new Map();
 const richRenderStates = new WeakMap();
 const THINKING_INLINE_MAX_CHARS = 80;
 let scrollFramePending = false;
+
+const preflightStageLabels = {
+  context: '正在整理上下文',
+  workflow: '正在判断任务类型',
+  delivery: '正在确认交付要求',
+  routing: '正在判断协同执行',
+  planning: '正在生成执行计划',
+  execution: '开始执行',
+};
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -426,6 +436,7 @@ function beginUserTurn(text, runId, reusePendingLocal = false) {
   const displayText = String(text ?? '');
   const hint = messagesEl.querySelector('.hint');
   if (hint) hint.remove();
+  clearPreflightNote();
   const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
   if (!reuseExisting) addMessage('user', displayText);
   currentRunId = runId || null;
@@ -467,6 +478,35 @@ function addNote(className, text) {
   messagesEl.appendChild(el);
   scrollBottom();
   return el;
+}
+
+function clearPreflightNote() {
+  if (preflightNoteEl?.isConnected) preflightNoteEl.remove();
+  preflightNoteEl = null;
+}
+
+function showPreflightStage(message) {
+  const runId = message?.runId || currentRunId;
+  const stage = typeof message?.stage === 'string' ? message.stage : '';
+  const status = typeof message?.status === 'string' ? message.status : '';
+  if (
+    !stage ||
+    !preflightStageLabels[stage] ||
+    status !== 'started' ||
+    (currentRunId && runId && currentRunId !== runId)
+  ) {
+    if (status !== 'started' || stage === 'execution') clearPreflightNote();
+    return;
+  }
+  if (!preflightNoteEl || !preflightNoteEl.isConnected) {
+    preflightNoteEl = document.createElement('div');
+    preflightNoteEl.className = 'preflight-note';
+    preflightNoteEl.dataset.runId = runId || '';
+    insertBeforeFinalAnswer(preflightNoteEl, runId);
+  }
+  preflightNoteEl.textContent = preflightStageLabels[stage];
+  preflightNoteEl.classList.add('active');
+  scrollBottom();
 }
 
 function clearPauseNotice() {
@@ -1970,6 +2010,7 @@ function handleProtocolEvent(event) {
   const payload = event.payload || {};
   switch (event.type) {
     case 'agent.started':
+      clearPreflightNote();
       addNote('agent-note', `Agent: ${payload.agentName || 'unknown'}`);
       break;
     case 'agent.updated':
@@ -1984,6 +2025,7 @@ function handleProtocolEvent(event) {
     case 'text.delta': {
       const text = typeof payload.text === 'string' ? payload.text : '';
       if (agentBubble && text) {
+        clearPreflightNote();
         if (pendingToolCount > 0) {
           pendingAgentText += text;
         } else {
@@ -1999,6 +2041,7 @@ function handleProtocolEvent(event) {
     case 'tool.started': {
       const name = payload.toolName || 'tool';
       if (name === 'report_plan_progress') break;
+      clearPreflightNote();
       if (agentBubble) {
         agentText = '';
         renderRich(agentBubble, '');
@@ -2228,6 +2271,10 @@ window.addEventListener('message', (event) => {
     return;
   }
   switch (msg.type) {
+    case 'preflight':
+      showPreflightStage(msg);
+      setRuntimeMode('running');
+      break;
     case 'user': {
       beginUserTurn(msg.text, msg.runId, true);
       if (msg.runId) acknowledgeRunStart();
@@ -2236,6 +2283,7 @@ window.addEventListener('message', (event) => {
     case 'done': {
       clearPendingRunAck();
       pendingLocalUserText = null;
+      clearPreflightNote();
       flushPendingAgentText();
       const waitingForToolResult = pendingToolCount > 0;
       const empty = !sanitizeAssistantText(agentText).trim() && !waitingForToolResult;
@@ -2262,6 +2310,7 @@ window.addEventListener('message', (event) => {
     case 'error':
       clearPendingRunAck();
       pendingLocalUserText = null;
+      clearPreflightNote();
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();
@@ -2299,6 +2348,7 @@ window.addEventListener('message', (event) => {
     case 'cleared':
       clearPendingRunAck();
       clearPauseNotice();
+      clearPreflightNote();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -2326,6 +2376,7 @@ window.addEventListener('message', (event) => {
       // 面板重开:host 回放持久化历史
       clearPendingRunAck();
       clearPauseNotice();
+      clearPreflightNote();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -2384,6 +2435,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'runAttached': {
       clearPendingRunAck();
+      clearPreflightNote();
       pendingLocalUserText = null;
       const userBubbles = messagesEl.querySelectorAll('.msg.user .bubble');
       const lastUser = userBubbles.length ? userBubbles[userBubbles.length - 1].textContent : '';
@@ -2403,6 +2455,7 @@ window.addEventListener('message', (event) => {
     }
     case 'resumeStarted':
       clearPauseNotice();
+      clearPreflightNote();
       canContinue = false;
       currentRunId = msg.runId || currentRunId;
       if (typeof msg.displayText === 'string' && msg.displayText.trim()) {
@@ -2430,6 +2483,7 @@ window.addEventListener('message', (event) => {
     case 'cancelled':
       clearPendingRunAck();
       pendingLocalUserText = null;
+      clearPreflightNote();
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();
@@ -2445,6 +2499,7 @@ window.addEventListener('message', (event) => {
     case 'paused':
       clearPendingRunAck();
       pendingLocalUserText = null;
+      clearPreflightNote();
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();

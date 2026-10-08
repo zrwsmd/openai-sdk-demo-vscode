@@ -55,6 +55,14 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - `npm run compile`
 - `npm run test:generate; node scripts/run_coordinator_test.mjs`
 
+实现状态：
+
+- 已完成：RunCoordinator 为上下文、Workflow、Delivery、Team 路由和 Plan 发出宿主侧
+  `preflight` 阶段事件。
+- 已完成：WebView 在当前回答前显示单行阶段状态，首个 Thinking、工具调用或终态事件到达后自动收起。
+- 已完成：前置状态不进入可回放协议历史，避免历史会话被等待提示污染。
+- 已验证：`npm run compile`、`node --check media/main.js`、`node scripts/run_coordinator_test.mjs`。
+
 ### 2. 复用 Jev 和 Workflow 决策结果
 
 目标：减少重复判定，不减少判定本身。
@@ -195,4 +203,3 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - ST 交付、命令执行、文件写入和恢复链路的可靠性不下降。
 - 日志能解释每一轮为什么走快路径或完整路径。
 - 没有用“删除基础设施”换速度。
-

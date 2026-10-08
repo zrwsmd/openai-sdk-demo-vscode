@@ -456,6 +456,29 @@ body { display: flex; flex-direction: column; }
 }
 .tool-note::before { content: '⚙ '; }
 
+.preflight-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.preflight-note::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  opacity: 0.85;
+}
+.preflight-note.active::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 .thinking-card {
   margin: 4px 6px;
   color: var(--muted);
