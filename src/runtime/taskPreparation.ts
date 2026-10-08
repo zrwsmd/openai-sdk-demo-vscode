@@ -24,6 +24,53 @@ import type {
   WorkflowModelDecision,
 } from "./workflow/types";
 
+function classifierEndpointLabel(baseUrl: string): string {
+  const normalized = baseUrl.trim();
+  if (!normalized) return "default";
+  try {
+    return new URL(normalized).host || "custom";
+  } catch {
+    return "custom";
+  }
+}
+
+function classifierErrorLabel(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+  return String(error);
+}
+
+function logClassifierStart(
+  role: "workflow" | "delivery",
+  cfg: AgentConfig,
+  adapter: ReturnType<typeof buildModelAdapter>,
+  historyLength: number,
+  schema: string,
+): void {
+  agentLog(
+    `[classifier] start role=${role} schema=${schema}` +
+      ` provider=${adapter.provider} apiFormat=${adapter.apiFormat}` +
+      ` model=${cfg.model} endpoint=${classifierEndpointLabel(cfg.baseUrl)}` +
+      ` history=${historyLength} structured=true`,
+  );
+}
+
+function logClassifierFailure(
+  role: "workflow" | "delivery",
+  error: unknown,
+): void {
+  agentLog(`[classifier] failed role=${role} ${classifierErrorLabel(error)}`);
+}
+
+function finalOutputShape(value: unknown): string {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (value && typeof value === "object") {
+    return `object(${Object.keys(value).join(",").slice(0, 240)})`;
+  }
+  return typeof value;
+}
+
 /**
  * Ask the model whether the request needs a bounded linear workflow.
  * This planner has no tools and cannot mutate the workspace; callers may
@@ -122,6 +169,13 @@ export async function classifyDeliveryContract(
       "必须严格返回 schema,不要输出 markdown。",
     outputType: deliveryContractDecisionSchema,
   });
+  logClassifierStart(
+    "delivery",
+    cfg,
+    adapter,
+    history.length,
+    "delivery_contract",
+  );
   const tracingDisabled = !(
     adapter.provider === "openai" &&
     adapter.apiFormat === "responses" &&
@@ -130,12 +184,20 @@ export async function classifyDeliveryContract(
   const input: string | AgentInputItem[] = history.length
     ? [...history, { type: "message", role: "user", content: userText }]
     : userText;
-  const result = await new Runner({ tracingDisabled }).run(classifier, input, {
-    stream: false,
-    maxTurns: 1,
-    signal,
-  });
-  return normalizeWorkflowContract(result.finalOutput);
+  try {
+    const result = await new Runner({ tracingDisabled }).run(classifier, input, {
+      stream: false,
+      maxTurns: 1,
+      signal,
+    });
+    agentLog(
+      `[classifier] success role=delivery final=${finalOutputShape(result.finalOutput)}`,
+    );
+    return normalizeWorkflowContract(result.finalOutput);
+  } catch (error) {
+    logClassifierFailure("delivery", error);
+    throw error;
+  }
 }
 
 const workflowFallbackModeSchema = z.enum([
@@ -184,6 +246,13 @@ export async function classifyWorkflowDecision(
       "\n必须严格返回 schema，不要输出 markdown。",
     outputType: workflowClassifierOutputSchema,
   });
+  logClassifierStart(
+    "workflow",
+    cfg,
+    adapter,
+    history.length,
+    "workflow_decision",
+  );
   const tracingDisabled = !(
     adapter.provider === "openai" &&
     adapter.apiFormat === "responses" &&
@@ -192,33 +261,41 @@ export async function classifyWorkflowDecision(
   const input: string | AgentInputItem[] = history.length
     ? [...history, { type: "message", role: "user", content: userText }]
     : userText;
-  const result = await new Runner({ tracingDisabled }).run(classifier, input, {
-    stream: false,
-    maxTurns: 1,
-    signal,
-  });
-  const parsed = workflowClassifierOutputSchema.parse(result.finalOutput);
-  if (parsed.confidence < 0.72) return undefined;
-  if (parsed.kind === "workflow") {
-    const workflowId = parsed.workflowId?.trim();
-    if (!workflowId || !workflows.some((workflow) => workflow.id === workflowId)) {
-      return undefined;
+  try {
+    const result = await new Runner({ tracingDisabled }).run(classifier, input, {
+      stream: false,
+      maxTurns: 1,
+      signal,
+    });
+    agentLog(
+      `[classifier] success role=workflow final=${finalOutputShape(result.finalOutput)}`,
+    );
+    const parsed = workflowClassifierOutputSchema.parse(result.finalOutput);
+    if (parsed.confidence < 0.72) return undefined;
+    if (parsed.kind === "workflow") {
+      const workflowId = parsed.workflowId?.trim();
+      if (!workflowId || !workflows.some((workflow) => workflow.id === workflowId)) {
+        return undefined;
+      }
+      return {
+        kind: "workflow",
+        workflowId,
+        confidence: parsed.confidence,
+        reason: parsed.reason,
+      };
     }
+    const mode = parsed.fallbackMode as WorkflowFallbackMode | undefined;
+    if (!mode) return undefined;
     return {
-      kind: "workflow",
-      workflowId,
+      kind: "fallback",
+      mode,
       confidence: parsed.confidence,
       reason: parsed.reason,
     };
+  } catch (error) {
+    logClassifierFailure("workflow", error);
+    throw error;
   }
-  const mode = parsed.fallbackMode as WorkflowFallbackMode | undefined;
-  if (!mode) return undefined;
-  return {
-    kind: "fallback",
-    mode,
-    confidence: parsed.confidence,
-    reason: parsed.reason,
-  };
 }
 
 export function isSimpleSingleTurnRequest(userText: string): boolean {

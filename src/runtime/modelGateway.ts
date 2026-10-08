@@ -558,6 +558,12 @@ function stringLength(value: unknown): number {
   return typeof value === "string" ? value.length : 0;
 }
 
+function previewResponseValue(value: unknown, limit = 800): string {
+  if (value === undefined || value === null) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.replace(/\s+/g, " ").slice(0, limit);
+}
+
 function collectNonStreamReasoningChars(message: JsonRecord): number {
   const providerFields = isJsonRecord(message.provider_specific_fields)
     ? message.provider_specific_fields
@@ -600,6 +606,8 @@ export function summarizeNonStreamChatCompletionResponse(
   const finish = typeof choice?.finish_reason === "string" ? choice.finish_reason : "-";
   const contentChars = message ? stringLength(message.content) : 0;
   const reasoningChars = message ? collectNonStreamReasoningChars(message) : 0;
+  const outputPreview = message ? previewResponseValue(message.content) : "";
+  const refusalPreview = message ? previewResponseValue(message.refusal, 240) : "";
   const rawToolCalls = message && Array.isArray(message.tool_calls)
     ? message.tool_calls
     : [];
@@ -620,6 +628,12 @@ export function summarizeNonStreamChatCompletionResponse(
     `[resp] HTTP ${status} 非流式 正文=${contentChars}字符 ` +
     `推理=${reasoningChars}字符 工具调用=${rawToolCalls.length} finish=${finish}` +
     `${errorLine ? " ERROR=" + errorLine : ""}`;
+  if (outputPreview || refusalPreview) {
+    agentLog(
+      `[resp-debug] 非流式输出 preview=${JSON.stringify(outputPreview)}` +
+        `${refusalPreview ? ` refusal=${JSON.stringify(refusalPreview)}` : ""}`,
+    );
+  }
   const emptyTail =
     !errorLine && contentChars === 0 && reasoningChars === 0 && rawToolCalls.length === 0
       ? text.slice(-500).replace(/\n/g, "⏎")
