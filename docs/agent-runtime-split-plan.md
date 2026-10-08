@@ -143,6 +143,8 @@
 
 ### 5. 抽出错误、恢复与写入验证工具
 
+状态：已完成。
+
 建议新增：
 
 - `src/runtime/agentErrors.ts`
@@ -150,17 +152,17 @@
 
 迁移内容：
 
-- `EmptyGatewayResponseError`
-- `AgentActionVerificationError`
-- `attachResumableAgentState`
-- `getResumableAgentState`
-- `isRetryableAgentError`
-- `isAgentCancellationError`
-- `verifyWorkspaceWrite`
+- `src/runtime/agentErrors.ts` 已迁移 `AgentActionVerificationError`、
+  `attachResumableAgentState`、`getResumableAgentState`、`isRetryableAgentError`
+  和 `isAgentCancellationError`。
+- `src/runtime/workspaceWriteVerification.ts` 已迁移 `verifyWorkspaceWrite`。
+- `EmptyGatewayResponseError` 保持在前一阶段的 `modelGateway.ts`，错误重试判定通过
+  模块边界引用它。
 
 保留方式：
 
-- `agent.ts` re-export 外部测试和 `runCoordinator.ts` 依赖的符号。
+- `agent.ts` re-export 外部测试和 `runCoordinator.ts` 依赖的符号；
+  `runCoordinator.ts` 不需要修改 import。
 
 验证：
 
@@ -168,6 +170,10 @@
 - `npm run test:generate; node scripts/sdk_foundation_test.mjs`
 - `npm run test:generate; node scripts/agent_kernel_test.mjs`
 - `npm run test:batch`
+- 已通过：`npx tsc --noEmit`、`npm run compile`、
+  `npm run test:generate; node scripts/sdk_foundation_test.mjs`、
+  `npm run test:generate; node scripts/agent_kernel_test.mjs`、
+  `npm run test:batch`。
 
 ### 6. 收敛 `runAgent()` 主循环内部结构
 
