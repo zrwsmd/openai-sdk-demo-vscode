@@ -22,34 +22,38 @@
 
 ### 1. 抽出网关与 Chat Completions 适配层
 
+状态：已完成。
+
 建议新增：
 
-- `src/runtime/gatewayGuardedModel.ts`
-- 或 `src/runtime/modelGateway.ts`
+- `src/runtime/modelGateway.ts`
 
 迁移内容：
 
-- `GatewayGuardedModel`
-- `makeLoggingFetch`
-- `sanitizeChatCompletionRequestBody`
-- `summarizeOutgoing`
-- `summarizeNonStreamChatCompletionResponse`
-- `buildChatCompletionsModel`
-- 结构化输出和 `parallel_tool_calls` 能力降级相关的小工具函数
+- 已迁移 `GatewayGuardedModel`、`makeLoggingFetch`、
+  `sanitizeChatCompletionRequestBody`、`summarizeOutgoing`、
+  `summarizeNonStreamChatCompletionResponse`、`buildChatCompletionsModel`。
+- 结构化输出和 `parallel_tool_calls` 能力降级相关的小工具函数也集中在新模块。
+- 网关日志 setter 和 `EmptyGatewayResponseError` 由新模块持有。
 
 保留方式：
 
-- `agent.ts` 从新模块 re-export 现有测试依赖的函数。
-- `buildModelAdapter()` 可以先留在 `agent.ts`，也可以同阶段搬出；若搬出，要同步更新
-  `contextManager.ts` 的 import。
+- `agent.ts` 从新模块 re-export 原有公共符号，外部调用方不需要修改 import。
+- `buildModelAdapter()` 在第 2 阶段随任务准备依赖迁移到 `modelGateway.ts`；`agent.ts`
+  继续 re-export，`contextManager.ts` 直接从新模块 import。
+- 网关能力协商状态仍按模型实例隔离，OpenAI client 继续按网关地址和 key 复用。
 
 验证：
 
 - `npm run compile`
 - `npm run test:generate; node scripts/agent_kernel_test.mjs`
 - `npm run test:batch`
+- 已通过：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
+  `npm run test:jev`、`npm run test:agent`、`npm run test:batch`。
 
 ### 2. 抽出任务准备与通用判定
+
+状态：已完成。
 
 建议新增：
 
@@ -64,7 +68,9 @@
 
 保留方式：
 
-- `agent.ts` 继续 re-export 这些函数。
+- `agent.ts` 继续 re-export 这些函数，外部调用方不需要修改 import。
+- `buildModelAdapter()` 一并迁移到 `modelGateway.ts`，避免任务准备模块反向依赖
+  `agent.ts`；`contextManager.ts` 已改为直接从网关模块 import。
 - `runCoordinator.ts` 可暂时不改 import，等后续统一清理。
 
 验证：
@@ -73,6 +79,8 @@
 - `npm run test:workflow`
 - `npm run test:jev`
 - `npm run test:batch`
+- 已通过：`npx tsc --noEmit`、`npm run compile`、`npm run test:workflow`、
+  `npm run test:jev`、`npm run test:batch`。
 
 ### 3. 抽出 Team 角色执行
 
@@ -185,4 +193,3 @@
 - `runCoordinator.ts`、`contextManager.ts`、测试脚本可以逐步改为从新模块直接 import。
 - 新增模块职责单一，测试仍通过。
 - `agent.ts` 行数显著下降，后续再拆 `runAgent()` 时不会同时牵动外围能力。
-

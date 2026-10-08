@@ -1,6 +1,6 @@
 import { Agent, Runner, type AgentInputItem } from '@openai/agents';
 import { z } from 'zod';
-import { buildModelAdapter } from './agent';
+import { buildModelAdapter } from './modelGateway';
 import type { AgentConfig } from './agentConfig';
 import { estimateItemsTokens } from './contextTokenEstimator';
 
