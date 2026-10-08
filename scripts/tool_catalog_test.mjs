@@ -425,6 +425,192 @@ assert.deepEqual(safeFallbackDecision.allowedTools, [
   'library_symbol',
 ]);
 
+const safeJevConfig = {
+  baseUrl: '',
+  apiKey: 'test',
+  model: 'test',
+  exportDir: '',
+  workspaceRoot: '',
+  jev: { enabled: true },
+};
+
+let modelClassifierCallsForSafeJev = 0;
+const generalChatDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'not_required',
+      deliveryConfidence: 0.94,
+      orchestration: 'single',
+      orchestrationConfidence: 0.96,
+      workflow: 'general_chat',
+      workflowConfidence: 0.91,
+      toolNeeds: {
+        readFile: { value: 'no', confidence: 0.9 },
+        writeFile: { value: 'no', confidence: 0.9 },
+        runCommand: { value: 'no', confidence: 0.9 },
+      },
+      riskLevel: 'unknown',
+      riskConfidence: 0.2,
+      needsApproval: { value: 'unknown', confidence: 0.1 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '解释一下 PID 的基本原理',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      modelClassifierCallsForSafeJev += 1;
+      throw new Error('safe Jev general_chat should skip the model classifier');
+    },
+  },
+);
+assert.equal(generalChatDecision.kind, 'fallback');
+assert.equal(generalChatDecision.mode, 'general_chat');
+assert.equal(generalChatDecision.source, 'jev');
+
+const fileReadDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'not_required',
+      deliveryConfidence: 0.94,
+      orchestration: 'single',
+      orchestrationConfidence: 0.96,
+      workflow: 'file_read',
+      workflowConfidence: 0.91,
+      toolNeeds: {
+        readFile: { value: 'yes', confidence: 0.9 },
+        writeFile: { value: 'no', confidence: 0.9 },
+        runCommand: { value: 'no', confidence: 0.9 },
+      },
+      riskLevel: 'unknown',
+      riskConfidence: 0.2,
+      needsApproval: { value: 'unknown', confidence: 0.1 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '读取当前工作区里的配置文件',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      modelClassifierCallsForSafeJev += 1;
+      throw new Error('safe Jev file_read should skip the model classifier');
+    },
+  },
+);
+assert.equal(fileReadDecision.kind, 'fallback');
+assert.equal(fileReadDecision.mode, 'read_only');
+assert.equal(fileReadDecision.source, 'jev');
+assert.equal(modelClassifierCallsForSafeJev, 0);
+
+let localWorkflowClassifierCalls = 0;
+const localWorkflow = {
+  id: 'local_precedence',
+  title: 'Local precedence test',
+  description: 'Verifies local workflow detection runs before safe Jev fallback.',
+  runtimeManaged: false,
+  localMatch: () => ({
+    matched: true,
+    confidence: 0.93,
+    reason: 'local workflow matched before safe fallback',
+  }),
+};
+const localPrecedenceDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'not_required',
+      deliveryConfidence: 0.94,
+      orchestration: 'single',
+      orchestrationConfidence: 0.96,
+      workflow: 'general_chat',
+      workflowConfidence: 0.91,
+      toolNeeds: {
+        readFile: { value: 'no', confidence: 0.9 },
+        writeFile: { value: 'no', confidence: 0.9 },
+        runCommand: { value: 'no', confidence: 0.9 },
+      },
+      riskLevel: 'low',
+      riskConfidence: 0.9,
+      needsApproval: { value: 'no', confidence: 0.9 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry([localWorkflow]),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '触发本地 workflow',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      localWorkflowClassifierCalls += 1;
+      throw new Error('local workflow should skip the model classifier');
+    },
+  },
+);
+assert.equal(localPrecedenceDecision.kind, 'workflow');
+assert.equal(localPrecedenceDecision.workflow.id, 'local_precedence');
+assert.equal(localPrecedenceDecision.source, 'local');
+assert.equal(localWorkflowClassifierCalls, 0);
+
+let modelClassifierCallsForRejectedSafeJev = 0;
+const rejectedSafeJevDecision = await new WorkflowDecisionService(
+  () => {},
+  {
+    taskHint: async () => ({
+      delivery: 'required',
+      deliveryConfidence: 0.9,
+      orchestration: 'single',
+      orchestrationConfidence: 0.96,
+      workflow: 'general_chat',
+      workflowConfidence: 0.91,
+      toolNeeds: {
+        readFile: { value: 'no', confidence: 0.9 },
+        writeFile: { value: 'no', confidence: 0.9 },
+        runCommand: { value: 'no', confidence: 0.9 },
+      },
+      riskLevel: 'unknown',
+      riskConfidence: 0.2,
+      needsApproval: { value: 'unknown', confidence: 0.1 },
+      evaluation: { status: 'ok', elapsedMs: 1 },
+    }),
+  },
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  safeJevConfig,
+  '回答后再整理成一份交付报告',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      modelClassifierCallsForRejectedSafeJev += 1;
+      return {
+        kind: 'fallback',
+        mode: 'general_chat',
+        confidence: 0.88,
+        reason: 'delivery conflict must continue through model classification',
+      };
+    },
+  },
+);
+assert.equal(rejectedSafeJevDecision.kind, 'fallback');
+assert.equal(rejectedSafeJevDecision.source, 'model');
+assert.equal(modelClassifierCallsForRejectedSafeJev, 1);
+
 let modelClassifierCalledForJevCommand = false;
 const jevCommandDecision = await new WorkflowDecisionService(
   () => {},

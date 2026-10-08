@@ -50,11 +50,17 @@ export class WorkflowDecisionService {
           description: workflow.description,
         })),
     });
-    const jevDecision = this.workflowFromJevHint(jevHint, userText);
-    if (jevDecision) return jevDecision;
+    const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(jevHint);
+    if (registeredWorkflowDecision) return registeredWorkflowDecision;
+
+    const commandQueryDecision = this.workflowFromCommandQueryJevHint(jevHint, userText);
+    if (commandQueryDecision) return commandQueryDecision;
 
     const localDecision = this.workflowFromLocalDetectors(userText, history, workflows, jevHint);
     if (localDecision) return localDecision;
+
+    const safeFallbackDecision = this.workflowFromSafeJevFallback(jevHint, userText);
+    if (safeFallbackDecision) return safeFallbackDecision;
 
     const modelDecision = await this.workflowFromModelClassifier(
       cfg,
@@ -70,9 +76,8 @@ export class WorkflowDecisionService {
     return this.fallbackFromHint(jevHint, userText);
   }
 
-  private workflowFromJevHint(
+  private workflowFromRegisteredJevHint(
     hint: TaskDecisionHint,
-    userText: string,
   ): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
     if (workflow) {
@@ -93,7 +98,13 @@ export class WorkflowDecisionService {
         ...(contract ? { contract } : {}),
       };
     }
+    return undefined;
+  }
 
+  private workflowFromCommandQueryJevHint(
+    hint: TaskDecisionHint,
+    userText: string,
+  ): WorkflowDecision | undefined {
     // A high-confidence Jev action signal must not be discarded just because
     // the broad workflow label is a fallback such as general_chat. Keep the
     // command surface narrow: only capabilities explicitly classified for
@@ -119,6 +130,37 @@ export class WorkflowDecisionService {
     }
 
     return undefined;
+  }
+
+  private workflowFromSafeJevFallback(
+    hint: TaskDecisionHint,
+    userText: string,
+  ): WorkflowDecision | undefined {
+    const mode = safeFallbackModeFromJevHint(hint);
+    if (!mode) return undefined;
+
+    const allowedTools = this.allowedToolsForFallback(mode, userText);
+    const confidence = hint.workflowConfidence;
+    const risk = `${hint.riskLevel}(conf=${hint.riskConfidence.toFixed(2)})`;
+    const approval = `${hint.needsApproval.value}(conf=${hint.needsApproval.confidence.toFixed(2)})`;
+    const reason =
+      mode === "general_chat"
+        ? "Jev 高置信度判断为普通问答，工具需求均明确为 no"
+        : "Jev 高置信度判断为文件只读查询，未检测到写入或命令执行需求";
+    this.log(
+      `[workflow] Jev safe fallback ${mode}(${confidence.toFixed(2)}): ${reason}` +
+        ` | risk=${risk} approval=${approval}` +
+        (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
+    );
+    return {
+      kind: "fallback",
+      mode,
+      source: "jev",
+      confidence,
+      reason,
+      signals: signalsFromHint(hint),
+      allowedTools,
+    };
   }
 
   private workflowFromLocalDetectors(
@@ -287,6 +329,43 @@ function isSafeCommandQueryHint(hint: TaskDecisionHint): boolean {
     hint.riskLevel !== "high" &&
     hint.riskLevel !== "critical"
   );
+}
+
+const MIN_SAFE_JEV_WORKFLOW_CONFIDENCE = 0.85;
+const MIN_SAFE_JEV_TOOL_CONFIDENCE = 0.6;
+
+function hasConfidentToolNeed(
+  signal: { value: "yes" | "no" | "unknown"; confidence: number },
+  value: "yes" | "no",
+): boolean {
+  return signal.value === value && signal.confidence >= MIN_SAFE_JEV_TOOL_CONFIDENCE;
+}
+
+function safeFallbackModeFromJevHint(
+  hint: TaskDecisionHint,
+): WorkflowFallbackMode | undefined {
+  if (
+    hint.workflowConfidence < MIN_SAFE_JEV_WORKFLOW_CONFIDENCE ||
+    hint.delivery !== "not_required" ||
+    hint.orchestration !== "single" ||
+    !hasConfidentToolNeed(hint.toolNeeds.writeFile, "no") ||
+    !hasConfidentToolNeed(hint.toolNeeds.runCommand, "no")
+  ) {
+    return undefined;
+  }
+  if (
+    hint.workflow === "general_chat" &&
+    hasConfidentToolNeed(hint.toolNeeds.readFile, "no")
+  ) {
+    return "general_chat";
+  }
+  if (
+    hint.workflow === "file_read" &&
+    hasConfidentToolNeed(hint.toolNeeds.readFile, "yes")
+  ) {
+    return "read_only";
+  }
+  return undefined;
 }
 
 function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): string {

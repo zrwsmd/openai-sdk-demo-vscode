@@ -395,7 +395,7 @@ try {
   );
   if (
     workflowDecision.kind !== 'fallback' ||
-    workflowDecision.source !== 'fallback' ||
+    workflowDecision.source !== 'jev' ||
     workflowDecision.mode !== 'read_only' ||
     workflowDecision.allowedTools?.length !== 1 ||
     workflowDecision.allowedTools[0] !== 'st_dependency_map'
@@ -404,10 +404,10 @@ try {
   }
   if (
     !inspectionLogs.some((line) =>
-      /\[workflow\] fallback read_only.*tools=st_dependency_map/u.test(line),
+      /\[workflow\] Jev safe fallback read_only.*tools=st_dependency_map/u.test(line),
     )
   ) {
-    throw new Error('ST dependency analysis fallback log did not name the selected tool');
+    throw new Error('ST dependency analysis Jev fallback log did not name the selected tool');
   }
 } finally {
   globalThis.fetch = originalFetch;
