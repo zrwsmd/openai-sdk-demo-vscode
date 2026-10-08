@@ -1469,6 +1469,44 @@ function appendInlineMarkdown(parent, text) {
   inlineTextNode(parent, source.slice(cursor));
 }
 
+function copyTextToClipboard(text) {
+  const value = String(text ?? '');
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(value);
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
+    return Promise.resolve();
+  } catch (error) {
+    return Promise.reject(error);
+  } finally {
+    textarea.remove();
+  }
+}
+
+function createCodeAction(label, title, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'agent-code-action';
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick(button);
+  });
+  return button;
+}
+
 function splitTableRow(line) {
   let source = String(line ?? '').trim();
   if (source.startsWith('|')) source = source.slice(1);
@@ -1616,12 +1654,39 @@ function renderMarkdownBlock(block) {
   if (block.type === 'code') {
     const wrapper = document.createElement('div');
     wrapper.className = 'agent-code-block';
-    if (block.language) {
-      const label = document.createElement('div');
-      label.className = 'agent-code-label';
-      label.textContent = block.language;
-      wrapper.appendChild(label);
-    }
+    const toolbar = document.createElement('div');
+    toolbar.className = 'agent-code-toolbar';
+    const label = document.createElement('div');
+    label.className = 'agent-code-label';
+    label.textContent = block.language || 'code';
+    toolbar.appendChild(label);
+    const actions = document.createElement('div');
+    actions.className = 'agent-code-actions';
+    const wrapButton = createCodeAction('↵', '切换代码换行', (button) => {
+      wrapper.classList.toggle('soft-wrap');
+      button.classList.toggle('active', wrapper.classList.contains('soft-wrap'));
+    });
+    const copyButton = createCodeAction('⧉', '复制代码', async (button) => {
+      try {
+        await copyTextToClipboard(block.text);
+        button.textContent = '✓';
+        button.classList.add('copied');
+        setTimeout(() => {
+          button.textContent = '⧉';
+          button.classList.remove('copied');
+        }, 1200);
+      } catch (_error) {
+        button.textContent = '!';
+        button.classList.add('failed');
+        setTimeout(() => {
+          button.textContent = '⧉';
+          button.classList.remove('failed');
+        }, 1200);
+      }
+    });
+    actions.append(wrapButton, copyButton);
+    toolbar.appendChild(actions);
+    wrapper.appendChild(toolbar);
     const pre = document.createElement('pre');
     pre.className = 'agent-code';
     pre.textContent = block.text;
