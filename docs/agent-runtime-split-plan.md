@@ -113,30 +113,33 @@
 
 ### 4. 抽出 Session 历史与工具历史投影
 
+状态：已完成。
+
 建议新增：
 
 - `src/runtime/agentHistory.ts`
 
 迁移内容：
 
-- `sessionOutputText`
-- `loadHistoricalToolResults`
-- `toolNameOf`
-- `isToolHistoryItem`
-- `projectNewTurnSessionHistory`
-- `composeToolSet`
-- `renderAvailableToolsPrompt`
+- 已迁移 `sessionOutputText`、`loadHistoricalToolResults`、`toolNameOf`、
+  `isToolHistoryItem`、`projectNewTurnSessionHistory`、`composeToolSet`、
+  `renderAvailableToolsPrompt`。
+- 历史工具回执解析、旧工具链隔离和可用工具能力提示现在集中在新模块。
 
 注意：
 
-- `composeToolSet` 和 `renderAvailableToolsPrompt` 依赖工具目录提示词，迁移时要保留
+- `composeToolSet` 和 `renderAvailableToolsPrompt` 仍依赖工具目录提示词，并保留
   runtime 控制工具不受业务 allowlist 限制的语义。
+- `agent.ts` 继续 re-export 测试和外部调用依赖的历史投影函数；`runAgent()` 的调用行为不变。
 
 验证：
 
 - `npm run compile`
 - `npm run test:generate; node scripts/agent_kernel_test.mjs`
 - `npm run test:workflow`
+- 已通过：`npx tsc --noEmit`、`npm run compile`、
+  `npm run test:generate; node scripts/agent_kernel_test.mjs`、
+  `npm run test:workflow`。
 
 ### 5. 抽出错误、恢复与写入验证工具
 
