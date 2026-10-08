@@ -17,7 +17,10 @@ import { parseTeamTask, type TeamTask } from '../orchestration/teamTask';
 import type { IndustrialAgentMode } from '../orchestration/agentRoles';
 import { parseDeliveryContract, type DeliveryContract } from './deliveryContract';
 import type { JevDecisionSettings } from './decision/agentDecision';
-import type { WorkflowId } from './workflow/types';
+import type {
+  WorkflowDecisionSignals,
+  WorkflowId,
+} from './workflow/types';
 import type { ModelContextProfile } from './contextManager';
 
 export type DurableRunStatus =
@@ -83,6 +86,8 @@ export interface DurableRunRecord {
   deliveryContract?: DeliveryContract;
   /** Registered workflow selected before SDK execution. */
   workflowId?: WorkflowId;
+  /** Jev-derived routing/tool signals reused across safe preflight resumes. */
+  decisionSignals?: WorkflowDecisionSignals;
   /** Optional runtime tool allowlist selected by workflow fallback routing. */
   toolAllowlist?: string[];
   approvals: ApprovalRequest[];
@@ -177,6 +182,7 @@ export interface RunStore {
     teamTask?: TeamTask,
     deliveryContract?: DeliveryContract,
     workflowId?: WorkflowId,
+    decisionSignals?: WorkflowDecisionSignals,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -218,6 +224,13 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 
 function isFiniteNonNegative(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isConfidence(value: unknown): value is number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1;
 }
 
 function isContextCompactionBudget(value: unknown): boolean {
@@ -280,6 +293,36 @@ function isJevSettings(value: unknown): boolean {
   for (const key of ['timeoutMs', 'maxRetries', 'minConfidence'] as const) {
     if (value[key] !== undefined && (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) {
       return false;
+    }
+  }
+  return true;
+}
+
+function isWorkflowBooleanSignal(value: unknown): boolean {
+  return isRecord(value) &&
+    (value.value === 'yes' || value.value === 'no' || value.value === 'unknown') &&
+    isConfidence(value.confidence);
+}
+
+function isWorkflowDecisionSignals(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    !['required', 'not_required', 'unknown'].includes(String(value.delivery)) ||
+    !isConfidence(value.deliveryConfidence) ||
+    !['single', 'team', 'unknown'].includes(String(value.orchestration)) ||
+    !isConfidence(value.orchestrationConfidence) ||
+    !['low', 'medium', 'high', 'critical', 'unknown'].includes(String(value.riskLevel)) ||
+    !isConfidence(value.riskConfidence)
+  ) {
+    return false;
+  }
+  if (value.needsApproval !== undefined && !isWorkflowBooleanSignal(value.needsApproval)) {
+    return false;
+  }
+  if (value.toolNeeds !== undefined) {
+    if (!isRecord(value.toolNeeds)) return false;
+    for (const key of ['readFile', 'writeFile', 'runCommand'] as const) {
+      if (!isWorkflowBooleanSignal(value.toolNeeds[key])) return false;
     }
   }
   return true;
@@ -390,6 +433,7 @@ export class JsonRunStore implements RunStore {
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
       (run.workflowId !== undefined && typeof run.workflowId !== 'string') ||
+      (run.decisionSignals !== undefined && !isWorkflowDecisionSignals(run.decisionSignals)) ||
       (run.toolAllowlist !== undefined &&
         (!Array.isArray(run.toolAllowlist) || run.toolAllowlist.some((name) => typeof name !== 'string'))) ||
       !Array.isArray(run.approvals) ||
@@ -516,6 +560,7 @@ export class JsonRunStore implements RunStore {
     teamTask?: TeamTask,
     deliveryContract?: DeliveryContract,
     workflowId?: WorkflowId,
+    decisionSignals?: WorkflowDecisionSignals,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -532,6 +577,7 @@ export class JsonRunStore implements RunStore {
       teamTask,
       deliveryContract,
       workflowId,
+      decisionSignals,
       output: '',
       events: [],
       usage: { ...EMPTY_USAGE },

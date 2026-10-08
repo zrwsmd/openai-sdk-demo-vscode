@@ -73,6 +73,116 @@ async function fixture(executeAgent, planTask, team = {}) {
   await fs.rm(test.dir, { recursive: true, force: true });
 }
 
+// Workflow-derived Jev signals are shared by Delivery and Team routing, so
+// the same turn does not ask the semantic decision layer twice.
+{
+  let jevCalls = 0;
+  let deliverySignals;
+  let routingSignals;
+  const test = await fixture(
+    async () => ({
+      status: 'completed',
+      output: 'ok',
+      usage,
+      result: completedAgentResult('ok'),
+    }),
+    undefined,
+    {
+      decisionService: {
+        taskHint: async () => {
+          jevCalls += 1;
+          return {
+            delivery: 'unknown',
+            deliveryConfidence: 0,
+            orchestration: 'unknown',
+            orchestrationConfidence: 0,
+            workflow: 'general_chat',
+            workflowConfidence: 0.82,
+            toolNeeds: {
+              readFile: { value: 'yes', confidence: 0.9 },
+              writeFile: { value: 'no', confidence: 0.9 },
+              runCommand: { value: 'no', confidence: 0.9 },
+            },
+            riskLevel: 'low',
+            riskConfidence: 0.9,
+            needsApproval: { value: 'no', confidence: 0.9 },
+            evaluation: { status: 'ok', elapsedMs: 1 },
+          };
+        },
+      },
+      classifyDeliveryContract: async (_cfg, _text, _signal, _history, signals) => {
+        deliverySignals = signals;
+        return undefined;
+      },
+      routeTeamTask: async (_cfg, _text, _signal, _history, signals) => {
+        routingSignals = signals;
+        return undefined;
+      },
+    },
+  );
+  await test.coordinator.start('读取工作区文件', { ...config, orchestration: 'auto' }, 'key');
+  const completed = await test.store.getLast();
+  if (
+    jevCalls !== 1 ||
+    deliverySignals !== routingSignals ||
+    completed?.decisionSignals?.toolNeeds?.readFile?.value !== 'yes'
+  ) {
+    throw new Error('Workflow Jev signals were not shared by Delivery, routing, and run store');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
+// A model fallback cannot override a Jev delivery-required signal and skip
+// the contract confirmation.
+{
+  let deliveryCalls = 0;
+  const test = await fixture(
+    async () => ({
+      status: 'completed',
+      output: 'confirmed',
+      usage,
+      result: completedAgentResult('confirmed'),
+    }),
+    undefined,
+    {
+      decisionService: {
+        taskHint: async () => ({
+          delivery: 'required',
+          deliveryConfidence: 0.94,
+          orchestration: 'single',
+          orchestrationConfidence: 0.94,
+          workflow: 'unknown',
+          workflowConfidence: 0,
+          toolNeeds: {
+            readFile: { value: 'no', confidence: 0.9 },
+            writeFile: { value: 'yes', confidence: 0.9 },
+            runCommand: { value: 'no', confidence: 0.9 },
+          },
+          riskLevel: 'medium',
+          riskConfidence: 0.8,
+          needsApproval: { value: 'yes', confidence: 0.9 },
+          evaluation: { status: 'ok', elapsedMs: 1 },
+        }),
+      },
+      classifyWorkflowDecision: async () => ({
+        kind: 'fallback',
+        mode: 'general_chat',
+        confidence: 0.95,
+        reason: 'model fallback test',
+      }),
+      classifyDeliveryContract: async () => {
+        deliveryCalls += 1;
+        return undefined;
+      },
+    },
+  );
+  await test.coordinator.start('生成并保存结果', { ...config, orchestration: 'auto' }, 'key');
+  if (deliveryCalls !== 1) {
+    throw new Error('model fallback incorrectly skipped delivery confirmation');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Official OpenAI Responses uses the SDK compaction session when the model id
 // is eligible. The coordinator must not also run the local summary compactor
 // for that route.
@@ -758,6 +868,72 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   const completed = await test.store.getLast();
   if (routeCalls !== 2 || executorCalls !== 1 || completed?.status !== 'completed') {
     throw new Error('continue did not resume automatic routing from its checkpoint');
+  }
+}
+
+// Safe-restart routing reuses the persisted Jev signals. A resumed preflight
+// must not trigger a second semantic decision request.
+{
+  let jevCalls = 0;
+  let routeCalls = 0;
+  let firstSignals;
+  let secondSignals;
+  const test = await fixture(
+    async () => ({
+      status: 'completed',
+      output: 'resumed',
+      usage,
+      result: completedAgentResult('resumed'),
+    }),
+    undefined,
+    {
+      decisionService: {
+        taskHint: async () => {
+          jevCalls += 1;
+          return {
+            delivery: 'not_required',
+            deliveryConfidence: 0.94,
+            orchestration: 'unknown',
+            orchestrationConfidence: 0,
+            workflow: 'general_chat',
+            workflowConfidence: 0.9,
+            toolNeeds: {
+              readFile: { value: 'yes', confidence: 0.9 },
+              writeFile: { value: 'no', confidence: 0.9 },
+              runCommand: { value: 'no', confidence: 0.9 },
+            },
+            riskLevel: 'low',
+            riskConfidence: 0.9,
+            needsApproval: { value: 'no', confidence: 0.9 },
+            evaluation: { status: 'ok', elapsedMs: 1 },
+          };
+        },
+      },
+      routeTeamTask: async (_cfg, _text, _signal, _history, signals) => {
+        routeCalls += 1;
+        if (routeCalls === 1) {
+          firstSignals = signals;
+          throw Object.assign(new Error('502 route gateway'), { status: 502 });
+        }
+        secondSignals = signals;
+        return undefined;
+      },
+    },
+  );
+  await test.coordinator.start('恢复路由测试', { ...config, orchestration: 'auto' }, 'key');
+  const paused = await test.store.getLast();
+  if (paused?.status !== 'paused' || !paused.decisionSignals) {
+    throw new Error('routing pause did not persist Jev decision signals');
+  }
+  await test.coordinator.continue('key');
+  const completed = await test.store.getLast();
+  if (
+    jevCalls !== 1 ||
+    routeCalls !== 2 ||
+    JSON.stringify(firstSignals) !== JSON.stringify(secondSignals) ||
+    completed?.status !== 'completed'
+  ) {
+    throw new Error('routing resume did not reuse persisted Jev decision signals');
   }
 }
 

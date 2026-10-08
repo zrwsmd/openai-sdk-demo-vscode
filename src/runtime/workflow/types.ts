@@ -183,6 +183,19 @@ export interface WorkflowLocalMatch {
   reason: string;
 }
 
+export type WorkflowSignalValue = "yes" | "no" | "unknown";
+
+export interface WorkflowBooleanSignal {
+  value: WorkflowSignalValue;
+  confidence: number;
+}
+
+export interface WorkflowToolNeedSignals {
+  readFile: WorkflowBooleanSignal;
+  writeFile: WorkflowBooleanSignal;
+  runCommand: WorkflowBooleanSignal;
+}
+
 export interface WorkflowDecisionSignals {
   delivery: "required" | "not_required" | "unknown";
   deliveryConfidence: number;
@@ -190,6 +203,12 @@ export interface WorkflowDecisionSignals {
   orchestrationConfidence: number;
   riskLevel: "low" | "medium" | "high" | "critical" | "unknown";
   riskConfidence: number;
+  /**
+   * Jev's bounded capability hints. They are advisory inputs for routing and
+   * tool-surface selection, never an authorization decision.
+   */
+  toolNeeds?: WorkflowToolNeedSignals;
+  needsApproval?: WorkflowBooleanSignal;
 }
 
 export interface WorkflowDescriptor {

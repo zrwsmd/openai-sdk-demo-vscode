@@ -4,6 +4,7 @@ import {
   isStWorkspaceDeliveryContract,
   JevDecisionProvider,
   getDefaultToolRegistry,
+  routeTeamTask,
   WorkflowDecisionService,
 } from './agent.testbundle.mjs';
 
@@ -288,8 +289,56 @@ try {
   if (!isStWorkspaceDeliveryContract(workflowDecision.contract)) {
     throw new Error('Jev workflow decision did not attach an ST delivery contract');
   }
+  if (
+    !workflowDecision.signals.toolNeeds ||
+    !workflowDecision.signals.needsApproval ||
+    workflowDecision.signals.delivery !== 'unknown'
+  ) {
+    throw new Error('Workflow decision did not carry reusable Jev tool and approval signals');
+  }
 } finally {
   globalThis.fetch = originalFetch;
+}
+
+// A Coordinator-provided Workflow signal is sufficient for Team routing. The
+// route helper must not ask Jev again when it already has the signal.
+{
+  const signals = {
+    delivery: 'not_required',
+    deliveryConfidence: 0.94,
+    orchestration: 'single',
+    orchestrationConfidence: 0.96,
+    riskLevel: 'low',
+    riskConfidence: 0.9,
+    toolNeeds: {
+      readFile: { value: 'no', confidence: 0.9 },
+      writeFile: { value: 'no', confidence: 0.9 },
+      runCommand: { value: 'no', confidence: 0.9 },
+    },
+    needsApproval: { value: 'no', confidence: 0.9 },
+  };
+  const routed = await routeTeamTask(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { enabled: true },
+      decisionService: {
+        taskHint: async () => {
+          throw new Error('routeTeamTask requested duplicate Jev evaluation');
+        },
+      },
+    },
+    '普通问答',
+    undefined,
+    [],
+    signals,
+  );
+  if (routed !== undefined) {
+    throw new Error('reused single orchestration signal did not skip Team routing');
+  }
 }
 
 globalThis.fetch = async () => response({

@@ -79,6 +79,19 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - 不能因为想快就跳过高风险/交付任务的二次确认。
 - 不能把 Jev 的低置信度 uncertain 当成确定结论。
 
+实现状态：
+
+- 已完成：Workflow 决策把 Jev 的交付、编排、读写/命令工具需求和审批倾向作为
+  可复用信号向后传递。
+- 已完成：Delivery contract 优先消费同一轮 Workflow 信号；只有明确
+  `delivery=not_required` 时才跳过交付契约模型判定，`required/unknown` 继续确认。
+- 已完成：Team 路由消费同一份编排信号，不再为已完成 Workflow 判定重复请求 Jev；
+  信号不确定时仍进入原有路由模型。
+- 已完成：信号写入 `DurableRunRecord`，安全重启或暂停后继续时保持一致。
+- 已完成：高置信度 `orchestration=single` 只抑制不必要的 Team/Plan 前置等待，
+  不改变 Workflow、Delivery、审批和工具授权边界。
+- 已验证：新增 Coordinator、Jev 路由和信号恢复回归测试。
+
 验证：
 
 - `npm run test:jev`

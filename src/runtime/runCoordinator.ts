@@ -148,21 +148,26 @@ function shouldUseRuntimeManagedWorkflow(
 
 function shouldSkipDeliveryClassifier(decision: WorkflowDecision | undefined): boolean {
   if (decision?.kind === 'workflow' && decision.workflow.runtimeManaged) return true;
-  return decision?.kind === 'fallback' &&
-    (decision.mode === 'blocked_high_risk' ||
-      decision.mode === 'command_query' ||
-      (decision.source === 'model' &&
-        (decision.mode === 'general_chat' || decision.mode === 'read_only')));
+  if (decision?.kind !== 'fallback') return false;
+  if (decision.mode === 'blocked_high_risk') return true;
+  return (
+    (decision.mode === 'command_query' ||
+      decision.mode === 'general_chat' ||
+      decision.mode === 'read_only') &&
+    decision.signals?.delivery === 'not_required'
+  );
 }
 
 function shouldSuppressAutoPreparation(
   decision: WorkflowDecision | undefined,
   orchestration: DurableRunConfig['orchestration'],
+  signals: WorkflowDecisionSignals | undefined = decision?.signals,
 ): boolean {
   return orchestration !== 'team' &&
     decision?.kind === 'fallback' &&
     (decision.mode === 'blocked_high_risk' ||
       decision.mode === 'command_query' ||
+      signals?.orchestration === 'single' ||
       decision.source === 'model');
 }
 
@@ -659,6 +664,7 @@ export class RunCoordinator {
           run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
         }
+        run.decisionSignals = workflowDecision.signals;
         if (!this.isClearing(generation) && !this.stopRequested) {
           run.resumeStage = undefined;
           await this.store.update(run);
@@ -695,7 +701,7 @@ export class RunCoordinator {
             userText,
             deliveryController.signal,
             sessionItems,
-            workflowDecision?.signals,
+            workflowDecision?.signals ?? run.decisionSignals,
           );
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
@@ -750,6 +756,7 @@ export class RunCoordinator {
               userText,
               routingController.signal,
               sessionItems,
+              workflowDecision?.signals ?? run.decisionSignals,
             );
           if (!this.isClearing(generation) && !this.stopRequested) {
             run.resumeStage = undefined;
@@ -1049,6 +1056,7 @@ export class RunCoordinator {
         continueTeamTask(previous.teamTask),
         previous.deliveryContract,
         previous.workflowId,
+        previous.decisionSignals,
       );
     const preserveSelectedContext =
       options.preserveSelectedContextForSupplement === true &&
@@ -1153,6 +1161,7 @@ export class RunCoordinator {
     const sessionItems = await this.session.getItems();
     let workflowDecision: WorkflowDecision | undefined;
     if (stage === 'workflow') {
+      run.decisionSignals = undefined;
       const workflowController = new AbortController();
       this.transitionController = workflowController;
       try {
@@ -1176,6 +1185,7 @@ export class RunCoordinator {
           run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
         }
+        run.decisionSignals = workflowDecision.signals;
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'workflow', error, generation);
         return false;
@@ -1219,7 +1229,7 @@ export class RunCoordinator {
           run.userText,
           deliveryController.signal,
           sessionItems,
-          workflowDecision?.signals,
+          workflowDecision?.signals ?? run.decisionSignals,
         );
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'delivery', error, generation);
@@ -1249,6 +1259,7 @@ export class RunCoordinator {
     const suppressAutoPreparation = shouldSuppressAutoPreparation(
       workflowDecision,
       run.config.orchestration,
+      workflowDecision?.signals ?? run.decisionSignals,
     );
     if (!runtimeManagedWorkflow && !suppressAutoPreparation && stage === 'routing' && (run.config.orchestration === 'team' || this.routeTeamTask)) {
       const routingController = new AbortController();
@@ -1256,7 +1267,13 @@ export class RunCoordinator {
       try {
         run.teamTask = run.config.orchestration === 'team'
           ? createForcedTeamTask(run.userText)
-          : await this.routeTeamTask!(this.agentConfig(run.config, apiKey), run.userText, routingController.signal, sessionItems);
+        : await this.routeTeamTask!(
+          this.agentConfig(run.config, apiKey),
+          run.userText,
+          routingController.signal,
+          sessionItems,
+          run.decisionSignals,
+        );
       } catch (error) {
         await this.pauseBeforeSdkTurn(run, 'routing', error, generation);
         return false;
@@ -1397,6 +1414,7 @@ export class RunCoordinator {
         restartTeamTask(previous.teamTask),
         previous.deliveryContract,
         previous.workflowId,
+        previous.decisionSignals,
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });

@@ -1421,7 +1421,17 @@ export async function classifyDeliveryContract(
   decisionSignals?: WorkflowDecisionSignals,
 ): Promise<DeliveryContract | undefined> {
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
+  const reusedWorkflowSignals = decisionSignals !== undefined;
   const hint = decisionSignals ?? await decisionService.taskHint(cfg.jev, userText, signal);
+  if (reusedWorkflowSignals) {
+    const confidence = typeof hint.deliveryConfidence === 'number'
+      ? hint.deliveryConfidence.toFixed(2)
+      : 'unknown';
+    agentLog(
+      `[delivery] 复用 Workflow Jev 信号 delivery=${hint.delivery}` +
+        `(conf=${confidence})，不重复请求 Jev`,
+    );
+  }
   if (hint.delivery === 'not_required') {
     agentLog(
       `[delivery] Jev 高置信度判断无需交付物(${hint.deliveryConfidence.toFixed(2)})，跳过交付契约模型判定`,
@@ -1791,23 +1801,36 @@ export async function routeTeamTask(
   userText: string,
   signal?: AbortSignal,
   history: AgentInputItem[] = [],
+  decisionSignals?: WorkflowDecisionSignals,
 ): Promise<TeamTask | undefined> {
   const decisionService = cfg.decisionService ?? new AgentDecisionService(agentLog);
-  const hint = await decisionService.taskHint(cfg.jev, userText, signal);
-  if (hint.orchestration === 'single') {
+  const orchestration = decisionSignals?.orchestration;
+  const orchestrationConfidence = decisionSignals?.orchestrationConfidence ?? 0;
+  if (orchestration) {
     agentLog(
-      `[team] Jev 高置信度路由 single(${hint.orchestrationConfidence.toFixed(2)})，跳过 Team 路由模型`,
+      `[team] 复用 Workflow Jev 信号 orchestration=${orchestration}` +
+        `(conf=${orchestrationConfidence.toFixed(2)})，不重复请求 Jev`,
+    );
+  }
+  const hint = decisionSignals
+    ? undefined
+    : await decisionService.taskHint(cfg.jev, userText, signal);
+  const selectedOrchestration = decisionSignals?.orchestration ?? hint?.orchestration;
+  const selectedConfidence = decisionSignals?.orchestrationConfidence ?? hint?.orchestrationConfidence ?? 0;
+  if (selectedOrchestration === 'single') {
+    agentLog(
+      `[team] 高置信度路由 single(${selectedConfidence.toFixed(2)})，跳过 Team 路由模型`,
     );
     return undefined;
   }
-  if (hint.orchestration === 'team') {
+  if (selectedOrchestration === 'team') {
     agentLog(
-      `[team] Jev 高置信度路由 team(${hint.orchestrationConfidence.toFixed(2)})，交给 Team Planner 细化`,
+      `[team] 高置信度路由 team(${selectedConfidence.toFixed(2)})，交给 Team Planner 细化`,
     );
     return createTeamTask({
       route: 'team',
       goal: userText,
-      reason: `Jev 判断该请求需要独立规划、审查、执行和验证(${hint.orchestrationConfidence.toFixed(2)})`,
+      reason: `Jev 判断该请求需要独立规划、审查、执行和验证(${selectedConfidence.toFixed(2)})`,
       planSummary: '由 Team Planner 根据用户目标生成可执行计划',
       reviewFocus: ['任务范围、风险、审批约束和完成证据'],
       verificationCriteria: ['最终结果满足用户目标并有可追溯的工具或交付证据'],

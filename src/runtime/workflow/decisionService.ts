@@ -245,6 +245,24 @@ function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {
     orchestrationConfidence: hint.orchestrationConfidence,
     riskLevel: hint.riskLevel,
     riskConfidence: hint.riskConfidence,
+    toolNeeds: {
+      readFile: {
+        value: hint.toolNeeds.readFile.value,
+        confidence: hint.toolNeeds.readFile.confidence,
+      },
+      writeFile: {
+        value: hint.toolNeeds.writeFile.value,
+        confidence: hint.toolNeeds.writeFile.confidence,
+      },
+      runCommand: {
+        value: hint.toolNeeds.runCommand.value,
+        confidence: hint.toolNeeds.runCommand.confidence,
+      },
+    },
+    needsApproval: {
+      value: hint.needsApproval.value,
+      confidence: hint.needsApproval.confidence,
+    },
   };
 }
 
