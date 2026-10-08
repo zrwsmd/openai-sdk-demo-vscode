@@ -231,7 +231,9 @@ export class WorkflowDecisionService {
     userText?: string,
   ): readonly string[] | undefined {
     if (this.toolCatalog) {
-      return this.toolCatalog.toolsForFallback(mode, userText);
+      return this.toolCatalog.toolsForFallback(mode, userText, {
+        scope: "workflow-fallback",
+      });
     }
     return allowedToolsForFallback(mode);
   }

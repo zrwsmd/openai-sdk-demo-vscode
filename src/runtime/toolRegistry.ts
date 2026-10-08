@@ -10,6 +10,7 @@ import {
   type ToolCapabilityIntentMatch,
   type ToolCapabilityTextMatch,
   type ToolCapabilityTextQuery,
+  type ToolCatalogSelectionOptions,
 } from "./toolCatalog";
 import {
   commandToolResult,
@@ -37,6 +38,7 @@ export type {
   ToolCapabilityIntentMatch,
   ToolCapabilityTextMatch,
   ToolCapabilityTextQuery,
+  ToolCatalogSelectionOptions,
   ToolCapabilityQuery,
   ToolCapabilityRegistrationDefaults,
   ToolFallbackMode,

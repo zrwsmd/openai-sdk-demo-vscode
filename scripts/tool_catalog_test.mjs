@@ -94,6 +94,47 @@ assert.deepEqual(
   coreCatalog.toolsForFallback('file_edit', '编辑文件并运行测试'),
   ['edit_file'],
 );
+const cacheCatalog = new ToolCatalog(coreCatalog.list());
+const selectionVersionBeforeRegistration = cacheCatalog.selectionVersion;
+const cachedFallbackSelection = cacheCatalog.toolsForFallback(
+  'read_only',
+  '读取文件并搜索文本',
+  { scope: 'workflow-fallback' },
+);
+assert.deepEqual(
+  cacheCatalog.toolsForFallback(
+    'read_only',
+    '  读取文件并搜索文本  ',
+    { scope: 'workflow-fallback' },
+  ),
+  cachedFallbackSelection,
+);
+const cachedCapabilityPrompt = cacheCatalog.renderToolCapabilityPrompt([
+  'read_file',
+  'write_file',
+  'report_plan_progress',
+]);
+assert.equal(
+  cacheCatalog.renderToolCapabilityPrompt([
+    'read_file',
+    'write_file',
+    'report_plan_progress',
+  ]),
+  cachedCapabilityPrompt,
+);
+cacheCatalog.register('test-cache', {
+  name: 'cache_probe',
+  description: '用于验证工具目录版本失效。',
+  risk: 'read',
+  fallbackModes: ['read_only'],
+});
+assert(cacheCatalog.selectionVersion > selectionVersionBeforeRegistration);
+assert.deepEqual(
+  cacheCatalog.toolsForFallback('read_only', undefined, {
+    scope: 'workflow-fallback',
+  }).slice(-1),
+  ['cache_probe'],
+);
 assert.deepEqual(
   coreCatalog.find({ risks: ['read'] }).map((item) => item.name),
   ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],

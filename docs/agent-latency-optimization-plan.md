@@ -143,13 +143,16 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 
 ### 5. 工具筛选结果缓存与复用
 
-目标：减少同一轮内反复构建和渲染工具能力提示的成本。
+状态：已完成第一版。
 
-建议：
+实现：
 
-- 对同一轮请求缓存 ToolCatalog 能力选择结果。
-- Workflow 判定、Fallback 工具选择、Agent 工具提示复用同一份工具可见性结果。
-- 缓存 key 必须包含 workflow、fallback mode、用户文本片段和可用工具版本。
+- `ToolCatalog` 缓存 fallback 能力选择和工具能力提示渲染结果。
+- 缓存 key 包含目录版本、调用 scope、fallback mode、规范化后的用户文本和工具名序列。
+- 注册新的能力后递增 `selectionVersion`，清空旧选择和提示缓存，避免沿用过期元数据。
+- `WorkflowDecision.allowedTools` 与 `run.toolAllowlist` 仍是本轮已选工具集合；缓存不成为授权来源。
+- Agent 最终仍通过 Workflow policy、allowlist、审批和运行时 guard 过滤工具。
+- 缓存有界为 128 项，避免长时间运行的插件进程被不同用户文本无限增长。
 
 验证：
 

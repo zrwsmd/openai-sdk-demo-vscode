@@ -69,6 +69,14 @@ export interface ToolCapabilityTextMatch {
   matchedFields: readonly ("name" | "description" | "intent" | "tag" | "domain")[];
 }
 
+export interface ToolCatalogSelectionOptions {
+  /**
+   * Logical caller scope for cache isolation. This is a performance key only;
+   * it never grants or removes runtime permission.
+   */
+  scope?: string;
+}
+
 export interface ToolCapabilityIntentMatch {
   fragment: string;
   matches: readonly ToolCapabilityTextMatch[];
@@ -353,6 +361,23 @@ function capabilityScope(
 }
 
 const MIN_SCOPE_CONTEXT_FRAGMENT_LENGTH = 5;
+const MAX_TOOL_CATALOG_CACHE_ENTRIES = 128;
+
+function normalizedCacheText(value: string | undefined): string {
+  return String(value ?? "").replace(/\s+/gu, " ").trim();
+}
+
+function rememberBounded<T>(
+  cache: Map<string, T>,
+  key: string,
+  value: T,
+): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size <= MAX_TOOL_CATALOG_CACHE_ENTRIES) return;
+  const oldest = cache.keys().next().value as string | undefined;
+  if (oldest !== undefined) cache.delete(oldest);
+}
 
 function applyIntentScopeContext(
   intents: readonly ToolCapabilityIntentMatch[],
@@ -394,11 +419,28 @@ function applyIntentScopeContext(
  */
 export class ToolCatalog {
   private readonly capabilities = new Map<string, RegisteredToolCapability>();
+  private catalogVersion = 0;
+  private readonly fallbackSelectionCache = new Map<string, readonly string[]>();
+  private readonly capabilityPromptCache = new Map<string, string>();
 
   constructor(initial: readonly RegisteredToolCapability[] = []) {
     for (const capability of initial) {
       this.register(capability.providerId, capability);
     }
+  }
+
+  /**
+   * Monotonic metadata version used to invalidate selection and prompt caches.
+   * It is not an authorization version and must not be used as one.
+   */
+  get selectionVersion(): number {
+    return this.catalogVersion;
+  }
+
+  private invalidateCaches(): void {
+    this.catalogVersion += 1;
+    this.fallbackSelectionCache.clear();
+    this.capabilityPromptCache.clear();
   }
 
   register(
@@ -421,6 +463,7 @@ export class ToolCatalog {
       throw new Error(`Tool capability already registered: ${entry.name}`);
     }
     this.capabilities.set(entry.name, entry);
+    this.invalidateCaches();
     return this;
   }
 
@@ -448,6 +491,7 @@ export class ToolCatalog {
       names.add(entry.name);
     }
     for (const entry of entries) this.capabilities.set(entry.name, entry);
+    if (entries.length > 0) this.invalidateCaches();
     return this;
   }
 
@@ -480,7 +524,14 @@ export class ToolCatalog {
    * visible by name without requiring a catalog entry.
    */
   renderToolCapabilityPrompt(toolNames: readonly string[]): string {
-    return toolNames
+    const cacheKey = JSON.stringify([
+      this.catalogVersion,
+      toolNames,
+    ]);
+    const cached = this.capabilityPromptCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const rendered = toolNames
       .map((toolName) => {
         const capability = this.get(toolName);
         if (!capability) return `- ${toolName}`;
@@ -504,6 +555,8 @@ export class ToolCatalog {
         return details.join("；");
       })
       .join("\n");
+    rememberBounded(this.capabilityPromptCache, cacheKey, rendered);
+    return rendered;
   }
 
   listByProvider(providerId: string): readonly RegisteredToolCapability[] {
@@ -625,16 +678,37 @@ export class ToolCatalog {
       .map((capability) => capability.name);
   }
 
-  toolsForFallback(mode: ToolFallbackMode, userText?: string): readonly string[] {
+  toolsForFallback(
+    mode: ToolFallbackMode,
+    userText?: string,
+    options: ToolCatalogSelectionOptions = {},
+  ): readonly string[] {
+    const cacheKey = JSON.stringify([
+      this.catalogVersion,
+      options.scope?.trim() || "fallback",
+      mode,
+      normalizedCacheText(userText),
+    ]);
+    const cached = this.fallbackSelectionCache.get(cacheKey);
+    if (cached !== undefined) return [...cached];
+    const normalizedUserText = normalizedCacheText(userText);
+
     const query = capabilityQueryForFallback(mode);
     const baseTools = query
       ? this.toolsForQuery(query)
       : this.list()
       .filter((capability) => capability.fallbackModes?.includes(mode))
       .map((capability) => capability.name);
-    if (!userText?.trim() || baseTools.length < 2) return baseTools;
+    if (!normalizedUserText || baseTools.length < 2) {
+      rememberBounded(
+        this.fallbackSelectionCache,
+        cacheKey,
+        Object.freeze([...baseTools]),
+      );
+      return baseTools;
+    }
 
-    const selected = this.toolsForTextIntents(userText, {
+    const selected = this.toolsForTextIntents(normalizedUserText, {
       names: baseTools,
       minScore: 0.74,
     });
@@ -642,6 +716,11 @@ export class ToolCatalog {
     // result from one or more intent fragments is allowed to narrow the
     // ordinary fallback surface.
     if (selected.length === 0 || selected.length > 4) {
+      rememberBounded(
+        this.fallbackSelectionCache,
+        cacheKey,
+        Object.freeze([...baseTools]),
+      );
       return baseTools;
     }
     // A file-edit fallback may be selected after an uncertain or conflicting
@@ -654,8 +733,18 @@ export class ToolCatalog {
       (name) => this.get(name)?.risk === "write",
     );
     if (baseHasWriteCapability && !selectedHasWriteCapability) {
+      rememberBounded(
+        this.fallbackSelectionCache,
+        cacheKey,
+        Object.freeze([...baseTools]),
+      );
       return baseTools;
     }
+    rememberBounded(
+      this.fallbackSelectionCache,
+      cacheKey,
+      Object.freeze([...selected]),
+    );
     return selected;
   }
 }
