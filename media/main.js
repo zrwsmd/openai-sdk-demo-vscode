@@ -55,7 +55,9 @@ const activeThinkingSegments = new Map();
 const thinkingItemSegments = new Map();
 const thinkingSegmentCounters = new Map();
 const finalAnswerAnchors = new Map();
+const richRenderStates = new WeakMap();
 const THINKING_INLINE_MAX_CHARS = 80;
+let scrollFramePending = false;
 
 function setRuntimeMode(mode) {
   runtimeMode = mode;
@@ -777,44 +779,6 @@ function truncateText(text, max = 140) {
   return compact.length > max ? `${compact.slice(0, max)}…` : compact;
 }
 
-function stripInlineMarkdown(text) {
-  return String(text ?? '')
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
-      const cleanLabel = String(label).trim();
-      const cleanUrl = String(url).trim();
-      if (!cleanUrl || cleanLabel === cleanUrl) return cleanLabel || cleanUrl;
-      return `${cleanLabel} (${cleanUrl})`;
-    })
-    .replace(/`([^`\n]+)`/g, '$1')
-    .replace(/\*\*([^*\n][\s\S]*?[^*\n])\*\*/g, '$1')
-    .replace(/__([^_\n][\s\S]*?[^_\n])__/g, '$1')
-    .replace(/~~([^~\n][\s\S]*?[^~\n])~~/g, '$1')
-    .replace(/(^|[^\w*])\*([^*\n]+)\*(?=$|[^\w*])/g, '$1$2')
-    .replace(/(^|[^\w_])_([^_\n]+)_(?=$|[^\w_])/g, '$1$2');
-}
-
-function stripMarkdownBlockMarkers(text) {
-  return String(text ?? '')
-    .split(/\r?\n/)
-    .map((line) => line
-      .replace(/^\s{0,3}#{1,6}\s+/, '')
-      .replace(/^\s{0,3}>\s?/, '')
-      .replace(/^\s{0,3}[-*+]\s+/, '• '))
-    .filter((line) => !/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line))
-    .join('\n');
-}
-
-function stripMarkdownForDisplay(text) {
-  const parts = String(text ?? '').split(/(```[\s\S]*?```)/g);
-  return parts
-    .map((part) => {
-      if (part.startsWith('```') && part.endsWith('```')) return part;
-      return stripMarkdownBlockMarkers(stripInlineMarkdown(part));
-    })
-    .join('');
-}
-
 function sanitizeAssistantText(text) {
   const raw = String(text ?? '');
   const trimmed = raw.trim();
@@ -826,7 +790,7 @@ function sanitizeAssistantText(text) {
   ];
   return internalPatterns.some((pattern) => pattern.test(trimmed))
     ? ''
-    : stripMarkdownForDisplay(raw);
+    : raw;
 }
 
 function byteLength(text) {
@@ -1419,97 +1383,321 @@ function showUsage(usage) {
   );
 }
 
-function appendParagraph(bubble, lines) {
-  const text = lines.join('\n').trim();
-  if (!text) return;
-  const p = document.createElement('p');
-  p.textContent = text;
-  if (
-    lines.length === 1 &&
-    text.length <= 48 &&
-    !/[。！？!?；;：:]$/.test(text) &&
-    !/^\d+[.)、]/.test(text)
-  ) {
-    p.className = 'agent-section-title';
-  }
-  bubble.appendChild(p);
+function inlineTextNode(parent, text) {
+  if (text) parent.appendChild(document.createTextNode(text));
 }
 
-function appendListBlock(bubble, items, ordered, start) {
-  if (!items.length) return;
-  const list = document.createElement(ordered ? 'ol' : 'ul');
-  if (ordered && Number.isFinite(start) && start > 1) list.start = start;
-  for (const item of items) {
-    const li = document.createElement('li');
-    li.textContent = item;
-    list.appendChild(li);
+function appendInlineMarkdown(parent, text) {
+  const source = String(text ?? '');
+  const tokenPattern = /(`[^`\n]+`|\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_(?!\w))/g;
+  let cursor = 0;
+  let match;
+  while ((match = tokenPattern.exec(source))) {
+    inlineTextNode(parent, source.slice(cursor, match.index));
+    const token = match[0];
+    if (token.startsWith('`')) {
+      const code = document.createElement('code');
+      code.className = 'agent-inline-code';
+      code.textContent = token.slice(1, -1);
+      parent.appendChild(code);
+    } else if (match[2] && match[3]) {
+      const href = match[3];
+      const link = document.createElement('a');
+      link.className = 'agent-link';
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = match[2];
+      parent.appendChild(link);
+    } else if (match[4] || match[5]) {
+      const strong = document.createElement('strong');
+      strong.textContent = match[4] || match[5];
+      parent.appendChild(strong);
+    } else if (match[6]) {
+      const del = document.createElement('del');
+      del.textContent = match[6];
+      parent.appendChild(del);
+    } else if (match[7] || match[8]) {
+      const emphasis = document.createElement('em');
+      emphasis.textContent = match[7] || match[8];
+      parent.appendChild(emphasis);
+    } else {
+      inlineTextNode(parent, token);
+    }
+    cursor = tokenPattern.lastIndex;
   }
-  bubble.appendChild(list);
+  inlineTextNode(parent, source.slice(cursor));
 }
 
-function appendPlainText(bubble, text) {
+function splitTableRow(line) {
+  let source = String(line ?? '').trim();
+  if (source.startsWith('|')) source = source.slice(1);
+  if (source.endsWith('|') && !source.endsWith('\\|')) source = source.slice(0, -1);
+  const cells = [];
+  let current = '';
+  let escaped = false;
+  for (const char of source) {
+    if (char === '|' && !escaped) {
+      cells.push(current.trim().replace(/\\\|/g, '|'));
+      current = '';
+      continue;
+    }
+    if (char === '\\' && !escaped) {
+      escaped = true;
+      current += char;
+      continue;
+    }
+    escaped = false;
+    current += char;
+  }
+  cells.push(current.trim().replace(/\\\|/g, '|'));
+  return cells;
+}
+
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownBlockStart(lines, index) {
+  const line = lines[index] || '';
+  return (
+    /^\s*```[A-Za-z0-9_+#.-]*\s*$/.test(line) ||
+    /^\s{0,3}#{1,6}\s+/.test(line) ||
+    /^\s{0,3}>\s?/.test(line) ||
+    /^\s{0,3}(?:[-*+•]\s+|\d+[.)、]\s+)/.test(line) ||
+    /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line) ||
+    (index + 1 < lines.length && isTableSeparator(lines[index + 1]))
+  );
+}
+
+function markdownBlockKey(type, value) {
+  return `${type}:${JSON.stringify(value)}`;
+}
+
+function parseMarkdownBlocks(text) {
   const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
-  let paragraph = [];
-  let listItems = [];
-  let listOrdered = false;
-  let listStart = 1;
-
-  const flushParagraph = () => {
-    appendParagraph(bubble, paragraph);
-    paragraph = [];
-  };
-  const flushList = () => {
-    appendListBlock(bubble, listItems, listOrdered, listStart);
-    listItems = [];
-    listOrdered = false;
-    listStart = 1;
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      flushList();
+  const blocks = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] || '';
+    if (!line.trim()) {
+      index += 1;
       continue;
     }
-    const orderedMatch = trimmed.match(/^(\d+)[.)、]\s+(.+)$/);
-    const unorderedMatch = trimmed.match(/^•\s+(.+)$/);
-    if (orderedMatch || unorderedMatch) {
-      flushParagraph();
-      const ordered = !!orderedMatch;
-      const value = orderedMatch ? orderedMatch[2] : unorderedMatch[1];
-      if (listItems.length && listOrdered !== ordered) flushList();
-      if (!listItems.length) {
-        listOrdered = ordered;
-        listStart = orderedMatch ? Number(orderedMatch[1]) : 1;
+    const fence = line.match(/^\s*```([A-Za-z0-9_+#.-]*)\s*$/);
+    if (fence) {
+      const codeLines = [];
+      const language = fence[1] || '';
+      index += 1;
+      let closed = false;
+      while (index < lines.length) {
+        if (/^\s*```\s*$/.test(lines[index])) {
+          closed = true;
+          index += 1;
+          break;
+        }
+        codeLines.push(lines[index]);
+        index += 1;
       }
-      listItems.push(value);
+      const value = { language, text: codeLines.join('\n'), closed };
+      blocks.push({ type: 'code', ...value, key: markdownBlockKey('code', value) });
       continue;
     }
-    flushList();
-    paragraph.push(trimmed);
+    if (index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headers = splitTableRow(line);
+      const alignments = splitTableRow(lines[index + 1]).map((cell) => (
+        cell.startsWith(':') && cell.endsWith(':')
+          ? 'center'
+          : cell.endsWith(':')
+            ? 'right'
+            : 'left'
+      ));
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      const value = { headers, alignments, rows };
+      blocks.push({ type: 'table', ...value, key: markdownBlockKey('table', value) });
+      continue;
+    }
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const value = { level: heading[1].length, text: heading[2] };
+      blocks.push({ type: 'heading', ...value, key: markdownBlockKey('heading', value) });
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      blocks.push({ type: 'rule', key: 'rule' });
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ''));
+        index += 1;
+      }
+      const value = { lines: quoteLines };
+      blocks.push({ type: 'quote', ...value, key: markdownBlockKey('quote', value) });
+      continue;
+    }
+    const listMatch = line.match(/^\s{0,3}((?:[-*+•])|(\d+)[.)、])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = !!listMatch[2];
+      const start = ordered ? Number(listMatch[2]) : 1;
+      const items = [];
+      while (index < lines.length) {
+        const itemMatch = lines[index].match(/^\s{0,3}((?:[-*+•])|(\d+)[.)、])\s+(.+)$/);
+        if (!itemMatch || (!!itemMatch[2] !== ordered)) break;
+        items.push(itemMatch[3]);
+        index += 1;
+      }
+      const value = { ordered, start, items };
+      blocks.push({ type: 'list', ...value, key: markdownBlockKey('list', value) });
+      continue;
+    }
+    const paragraph = [line.trim()];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines, index)) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    const value = { lines: paragraph };
+    blocks.push({ type: 'paragraph', ...value, key: markdownBlockKey('paragraph', value) });
   }
-  flushParagraph();
-  flushList();
+  return blocks;
 }
 
-// 极简富文本:仅识别围栏代码块;普通文本按段落/列表排版,不展示 Markdown 标记。
-function renderRich(bubble, text) {
-  bubble.textContent = '';
-  const parts = String(text).split(/```/);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      const pre = document.createElement('pre');
-      pre.textContent = part.replace(/^[a-zA-Z0-9+#-]*\n/, '');
-      bubble.appendChild(pre);
-    } else if (part) {
-      appendPlainText(bubble, part);
+function renderMarkdownBlock(block) {
+  if (block.type === 'code') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'agent-code-block';
+    if (block.language) {
+      const label = document.createElement('div');
+      label.className = 'agent-code-label';
+      label.textContent = block.language;
+      wrapper.appendChild(label);
     }
+    const pre = document.createElement('pre');
+    pre.className = 'agent-code';
+    pre.textContent = block.text;
+    wrapper.appendChild(pre);
+    return wrapper;
+  }
+  if (block.type === 'table') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'agent-table-wrap';
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    block.headers.forEach((header, index) => {
+      const cell = document.createElement('th');
+      cell.style.textAlign = block.alignments[index] || 'left';
+      appendInlineMarkdown(cell, header);
+      headerRow.appendChild(cell);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (const row of block.rows) {
+      const rowEl = document.createElement('tr');
+      block.headers.forEach((_header, index) => {
+        const cell = document.createElement('td');
+        cell.style.textAlign = block.alignments[index] || 'left';
+        appendInlineMarkdown(cell, row[index] || '');
+        rowEl.appendChild(cell);
+      });
+      tbody.appendChild(rowEl);
+    }
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    return wrapper;
+  }
+  if (block.type === 'heading') {
+    const heading = document.createElement(block.level <= 2 ? 'h2' : 'h3');
+    heading.className = `agent-heading level-${block.level}`;
+    appendInlineMarkdown(heading, block.text);
+    return heading;
+  }
+  if (block.type === 'list') {
+    const list = document.createElement(block.ordered ? 'ol' : 'ul');
+    list.className = 'agent-list';
+    if (block.ordered && block.start > 1) list.start = block.start;
+    for (const item of block.items) {
+      const listItem = document.createElement('li');
+      appendInlineMarkdown(listItem, item);
+      list.appendChild(listItem);
+    }
+    return list;
+  }
+  if (block.type === 'quote') {
+    const quote = document.createElement('blockquote');
+    block.lines.forEach((line, index) => {
+      if (index) quote.appendChild(document.createElement('br'));
+      appendInlineMarkdown(quote, line);
+    });
+    return quote;
+  }
+  if (block.type === 'rule') return document.createElement('hr');
+  const paragraph = document.createElement('p');
+  if (
+    block.lines.length === 1 &&
+    /^(\*\*|__)(.+?)\1$/.test(block.lines[0].trim())
+  ) {
+    paragraph.className = 'agent-section-title';
+  }
+  block.lines.forEach((line, index) => {
+    if (index) paragraph.appendChild(document.createElement('br'));
+    appendInlineMarkdown(paragraph, line);
   });
+  return paragraph;
+}
+
+function renderRich(bubble, text) {
+  const source = String(text ?? '');
+  if (!source) {
+    bubble.textContent = '';
+    richRenderStates.delete(bubble);
+    return;
+  }
+  const blocks = parseMarkdownBlocks(source);
+  const previous = richRenderStates.get(bubble);
+  const canReuse = !!previous && source.startsWith(previous.source);
+  let common = 0;
+  if (canReuse) {
+    while (
+      common < previous.blocks.length &&
+      common < blocks.length &&
+      previous.blocks[common].key === blocks[common].key
+    ) {
+      common += 1;
+    }
+    for (let index = previous.nodes.length - 1; index >= common; index -= 1) {
+      previous.nodes[index]?.remove();
+    }
+  } else {
+    bubble.textContent = '';
+  }
+  const nodes = canReuse ? previous.nodes.slice(0, common) : [];
+  for (let index = common; index < blocks.length; index += 1) {
+    const node = renderMarkdownBlock(blocks[index]);
+    bubble.appendChild(node);
+    nodes.push(node);
+  }
+  richRenderStates.set(bubble, { source, blocks, nodes });
 }
 
 function scrollBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (scrollFramePending) return;
+  scrollFramePending = true;
+  requestAnimationFrame(() => {
+    scrollFramePending = false;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
 }
 
 // ---------- 发送 ----------
