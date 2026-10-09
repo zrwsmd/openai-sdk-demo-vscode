@@ -399,4 +399,34 @@ npm run test:plc-config
 - event 任务只会出现在运行时部署摘要里，不会被生成到 IEC `TASK(INTERVAL := ...)`；
 - 资源 `target` 在适配层要求是 IEC 标识符，否则会阻止生成 matiec 配置。
 
+### 第六阶段：迁移与回归
+
+实现文件：
+
+- `src/plc/plcRuntimeConfigAudit.ts`
+- `scripts/plc_runtime_audit_test.mjs`
+- `scripts/test_entry.ts`
+- `package.json`
+
+已完成：
+
+- 增加只读审计入口，扫描工作区 `.st` 文件并读取 `plc-runtime.json`；
+- 明确报告 `plc-runtime.json` 缺失、损坏、程序未绑定、绑定重复、绑定源文件缺失、源文件声明不匹配等问题；
+- 对 event 任务输出运行时适配提示，避免误认为已经能生成 matiec cyclic `TASK`；
+- 增加首次配置草稿生成入口，但必须显式传入 `periodMs`，不替用户猜默认周期；
+- 覆盖缺配置、合法配置、配置损坏、源文件缺失、声明不匹配、事件任务和首次配置草稿测试。
+
+验证：
+
+```text
+npx tsc --noEmit
+npm run test:plc-config
+```
+
+已知边界：
+
+- 审计器目前只产出本地报告，还没有注册成 Agent 工具或 UI 命令；
+- 首次配置草稿不会自动写盘，后续仍应通过弹窗确认后再保存；
+- 审计扫描默认跳过 `.git`、`.vscode`、`.vscode-test`、`dist`、`node_modules`、`out` 和 `coverage`。
+
 后续每完成一个阶段，在本节补充实现文件、验证命令和已知限制。
