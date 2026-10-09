@@ -366,6 +366,37 @@ npm run test:batch
 - 第一版只自动处理每个 `.st` 文件里一个 `PROGRAM` 的场景；
 - `export_st_program` 只有在导出目标属于工作区相对路径时才会参与任务组态，普通会话导出目录不强行写工作区配置；
 - 如果已有 `plc-runtime.json` 语法损坏，会阻止本次 ST 写入并要求先修复配置；
-- matiec 临时 `CONFIGURATION` 生成仍属于后续适配阶段。
+- 真实 matiec CLI 调用和部署产物生成仍属于后续适配阶段。
+
+### 第五阶段：matiec / 运行时适配
+
+实现文件：
+
+- `src/plc/plcMatiecAdapter.ts`
+- `scripts/plc_matiec_adapter_test.mjs`
+- `scripts/test_entry.ts`
+- `package.json`
+
+已完成：
+
+- 从 `plc-runtime.json` 生成临时 IEC `CONFIGURATION` 文本；
+- 将 `periodMs` 转换为 matiec 可读的 `T#...ms`；
+- 将任务和程序实例生成为虚拟编译输入 `__generated__/plc_configuration.st`；
+- 保留用户原始 ST 源文件为普通 source 输入，不向源文件反写 `CONFIGURATION`；
+- 生成运行时部署摘要，保留 `cpuCore`、任务优先级、周期、触发条件和程序绑定；
+- 第一版显式拒绝把 event 任务渲染成 matiec cyclic `TASK`。
+
+验证：
+
+```text
+npx tsc --noEmit
+npm run test:plc-config
+```
+
+已知边界：
+
+- 这一阶段仍不直接调用 matiec CLI；
+- event 任务只会出现在运行时部署摘要里，不会被生成到 IEC `TASK(INTERVAL := ...)`；
+- 资源 `target` 在适配层要求是 IEC 标识符，否则会阻止生成 matiec 配置。
 
 后续每完成一个阶段，在本节补充实现文件、验证命令和已知限制。

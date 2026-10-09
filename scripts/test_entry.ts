@@ -20,6 +20,7 @@ export * from '../src/plc/plcRuntimeConfig';
 export * from '../src/plc/plcRuntimeConfigRepository';
 export * from '../src/plc/plcProgramBinding';
 export * from '../src/plc/plcRuntimeConfigSync';
+export * from '../src/plc/plcMatiecAdapter';
 export * from '../src/observability/audit';
 export * from '../src/orchestration/agentRoles';
 export * from '../src/orchestration/teamTask';
