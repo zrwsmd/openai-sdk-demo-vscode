@@ -63,6 +63,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     inlineStValidation,
     requiresStValidation,
     runBeforeEffects,
+    runAfterEffects,
     stAnalyzer,
     stToolOptions,
     stValidationCache,
@@ -504,12 +505,16 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       return withEffect("export_st_program", { code }, "write", async () => {
         await fs.mkdir(cfg.exportDir, { recursive: true });
         await fs.writeFile(file, code, "utf8");
+        const afterEffect = await runAfterEffects(beforeEffect);
+        if (!afterEffect.ok && afterEffect.failure) {
+          return beforeEffectFailureResult(afterEffect.failure);
+        }
         return contract({
           file,
           bytes: Buffer.byteLength(code, "utf8"),
           contentHash: hashStContent(code),
           summary: `已导出 ${file}。`,
-          ...beforeEffect.receiptData,
+          ...afterEffect.receiptData,
         }, "write", "filesystem");
       });
     },

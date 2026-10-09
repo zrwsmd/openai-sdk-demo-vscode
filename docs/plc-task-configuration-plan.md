@@ -323,8 +323,49 @@ node scripts/run_coordinator_test.mjs
 
 已知边界：
 
-- 这一阶段只提供通用澄清能力，还没有把 PLC 任务组态结果自动写入 `plc-runtime.json`；
+- 这一阶段的第一版只提供通用澄清能力，还没有把 PLC 任务组态结果自动写入 `plc-runtime.json`；
 - 弹窗适合补齐周期、任务名、PLC 资源等缺失字段，高风险副作用仍走审批；
 - 扩展进程重启时，正在等待澄清的运行会按现有运行恢复策略处理，后续可再做持久化澄清断点。
+
+### 第四阶段补充：ST 写入后的任务组态接线
+
+实现文件：
+
+- `src/plc/plcRuntimeConfigSync.ts`
+- `src/runtime/tools/toolBuildContext.ts`
+- `src/runtime/tools/writeFileTool.ts`
+- `src/runtime/tools/editFileTool.ts`
+- `src/runtime/plugins/st/stToolProvider.ts`
+- `src/runtime/plugins/st/tools/validateStTool.ts`
+- `scripts/plc_runtime_sync_test.mjs`
+
+已完成：
+
+- `write_file`、`edit_file`、`export_st_program` 支持后置 effect；
+- ST 文件写入前识别单个 `PROGRAM`；
+- 如果 `plc-runtime.json` 缺失，弹窗要求选择周期并创建第一份任务组态；
+- 如果已有任务但当前程序未绑定，弹窗允许绑定到已有任务或创建新周期任务；
+- ST 文件实际写入成功后，再提交 `plc-runtime.json`；
+- 已绑定的程序不会重复打断用户；
+- 用户取消弹窗会阻止本次 ST 写入，也不会生成半成品 JSON；
+- 仍然不会向 ST 文件追加 `CONFIGURATION`、`RESOURCE` 或 `TASK`。
+
+验证：
+
+```text
+npx tsc --noEmit
+npm run compile
+npm run test:plc-config
+npm run test:workflow
+npm run test:protocol
+npm run test:batch
+```
+
+已知边界：
+
+- 第一版只自动处理每个 `.st` 文件里一个 `PROGRAM` 的场景；
+- `export_st_program` 只有在导出目标属于工作区相对路径时才会参与任务组态，普通会话导出目录不强行写工作区配置；
+- 如果已有 `plc-runtime.json` 语法损坏，会阻止本次 ST 写入并要求先修复配置；
+- matiec 临时 `CONFIGURATION` 生成仍属于后续适配阶段。
 
 后续每完成一个阶段，在本节补充实现文件、验证命令和已知限制。

@@ -10,6 +10,7 @@ import { createStGraphTools } from "./tools/dependencyTools";
 import { createStLibraryTools } from "./tools/libraryTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createStToolBuildContext } from "./stToolContext";
+import { preparePlcRuntimeConfigSync } from "../../../plc/plcRuntimeConfigSync";
 
 const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
@@ -83,53 +84,51 @@ function fileBeforeEffect(
     if (!input || typeof input !== "object") return undefined;
     const args = input as Record<string, unknown>;
     const path = typeof args.path === "string" ? args.path : "";
+    const workspaceRoot = typeof args.workspaceRoot === "string" ? args.workspaceRoot : "";
     const content = typeof args.content === "string" ? args.content : undefined;
     const contentAlreadyValidated = content === undefined
       ? false
       : context.validationService?.canWriteContent(content) ??
         context.validatedStContent.has(hashStContent(content));
-    if (
-      !context.requiresStValidation ||
-      !path.toLowerCase().endsWith(".st") ||
-      content === undefined ||
-      contentAlreadyValidated
-    ) {
+    if (!path.toLowerCase().endsWith(".st") || content === undefined) {
       return undefined;
     }
 
-    const validation = await validateStContentBeforeWrite(content, path, signal);
-    if (!validation.ok) {
-      return {
-        ok: false,
-        error: "ST 写入内容与最近一次通过校验的草稿不一致，且写入前重新校验未通过。",
-        failureData: {
-          suppliedContentHash: validation.contentHash,
-          lastValidatedContentHash: context.validationService?.lastValidatedContentHash ??
-            [...context.validatedStContent].at(-1),
-          errorCount: validation.counts.error,
-          warningCount: validation.counts.warning,
-          diagnostics: validation.repairPacket
-            ? validation.repairPacket.diagnostics
-            : validation.diagnostics,
-          ...(validation.repairPacket
-            ? { repairPacket: validation.repairPacket }
-            : {}),
-        },
-        diagnostics: validation.protocolDiagnostics.length
-          ? validation.protocolDiagnostics
-          : [{
-              code: "st_pre_write_validation_failed",
-              message: "写入内容未通过 ST 预写校验。",
-              severity: "error" as const,
-              path,
-            }],
-        risk: "plan",
-      };
-    }
-
-    return {
-      ok: true,
-      receiptData: {
+    const receiptData: Record<string, unknown> = {};
+    if (
+      context.requiresStValidation &&
+      !contentAlreadyValidated
+    ) {
+      const validation = await validateStContentBeforeWrite(content, path, signal);
+      if (!validation.ok) {
+        return {
+          ok: false,
+          error: "ST 写入内容与最近一次通过校验的草稿不一致，且写入前重新校验未通过。",
+          failureData: {
+            suppliedContentHash: validation.contentHash,
+            lastValidatedContentHash: context.validationService?.lastValidatedContentHash ??
+              [...context.validatedStContent].at(-1),
+            errorCount: validation.counts.error,
+            warningCount: validation.counts.warning,
+            diagnostics: validation.repairPacket
+              ? validation.repairPacket.diagnostics
+              : validation.diagnostics,
+            ...(validation.repairPacket
+              ? { repairPacket: validation.repairPacket }
+              : {}),
+          },
+          diagnostics: validation.protocolDiagnostics.length
+            ? validation.protocolDiagnostics
+            : [{
+                code: "st_pre_write_validation_failed",
+                message: "写入内容未通过 ST 预写校验。",
+                severity: "error" as const,
+                path,
+              }],
+          risk: "plan",
+        };
+      }
+      Object.assign(receiptData, {
         preWriteValidation: {
           errorCount: validation.counts.error,
           warningCount: validation.counts.warning,
@@ -137,8 +136,81 @@ function fileBeforeEffect(
           validatedContentHash: validation.contentHash,
           summary: validation.summary,
         },
-      },
-    };
+      });
+    }
+
+    try {
+      const syncPlan = await preparePlcRuntimeConfigSync({
+        workspaceRoot,
+        source: path,
+        content,
+        clarification: context.cfg.clarification,
+        signal,
+      });
+      if (!syncPlan) {
+        return Object.keys(receiptData).length ? { ok: true, receiptData } : undefined;
+      }
+      return {
+        ok: true,
+        receiptData: {
+          ...receiptData,
+          plcRuntimeConfig: {
+            status: "pending",
+            action: syncPlan.action,
+            file: syncPlan.filePath,
+            resourceName: syncPlan.resourceName,
+            taskName: syncPlan.taskName,
+            programName: syncPlan.programName,
+            source: syncPlan.source,
+            ...(syncPlan.periodMs === undefined ? {} : { periodMs: syncPlan.periodMs }),
+          },
+        },
+        afterEffect: async () => {
+          try {
+            await syncPlan.commit();
+            return {
+              ok: true,
+              receiptData: {
+                plcRuntimeConfig: {
+                  status: "updated",
+                  action: syncPlan.action,
+                  file: syncPlan.filePath,
+                  resourceName: syncPlan.resourceName,
+                  taskName: syncPlan.taskName,
+                  programName: syncPlan.programName,
+                  source: syncPlan.source,
+                  ...(syncPlan.periodMs === undefined ? {} : { periodMs: syncPlan.periodMs }),
+                },
+              },
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              error: `ST 文件已写入，但 PLC 任务组态更新失败: ${error instanceof Error ? error.message : String(error)}`,
+              risk: "write",
+              diagnostics: [{
+                code: "plc_runtime_config_update_failed",
+                message: "ST 文件已写入，但 plc-runtime.json 更新失败。",
+                severity: "error" as const,
+                details: { file: syncPlan.filePath },
+              }],
+            };
+          }
+        },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        risk: "plan",
+        diagnostics: [{
+          code: "plc_runtime_config_required",
+          message: error instanceof Error ? error.message : String(error),
+          severity: "error" as const,
+          path,
+        }],
+      };
+    }
   };
 }
 

@@ -63,11 +63,16 @@ export interface BeforeEffectResult {
   diagnostics?: readonly Diagnostic[];
   metadata?: Record<string, unknown>;
   receiptData?: Record<string, unknown>;
+  afterEffect?: AfterEffectHook;
 }
 
 export type BeforeEffectHook = (
   context: BeforeEffectContext,
 ) => Promise<BeforeEffectResult | undefined>;
+
+export type AfterEffectResult = Omit<BeforeEffectResult, "afterEffect">;
+
+export type AfterEffectHook = () => Promise<AfterEffectResult | undefined>;
 
 /**
  * A provider can target a concrete tool or a generic effect surface.
@@ -88,6 +93,7 @@ export interface BeforeEffectRunResult {
   ok: boolean;
   receiptData: Record<string, unknown>;
   failure?: BeforeEffectResult;
+  afterEffects: readonly AfterEffectHook[];
 }
 
 export function matchesBeforeEffect(
@@ -141,6 +147,9 @@ export interface ToolBuildContext {
   ) => void;
   runBeforeEffects: (
     request: BeforeEffectContext,
+  ) => Promise<BeforeEffectRunResult>;
+  runAfterEffects: (
+    prepared: BeforeEffectRunResult,
   ) => Promise<BeforeEffectRunResult>;
   withEffect: <T>(
     toolName: string,
@@ -375,13 +384,34 @@ export function createToolBuildContext(
     request: BeforeEffectContext,
   ): Promise<BeforeEffectRunResult> => {
     const receiptData: Record<string, unknown> = {};
+    const afterEffects: AfterEffectHook[] = [];
     for (const beforeEffect of options.beforeEffectsFor(request)) {
       const result = await beforeEffect(request);
       if (!result) continue;
-      if (!result.ok) return { ok: false, receiptData, failure: result };
+      if (!result.ok) return { ok: false, receiptData, failure: result, afterEffects };
+      Object.assign(receiptData, result.receiptData ?? {});
+      if (result.afterEffect) afterEffects.push(result.afterEffect);
+    }
+    return { ok: true, receiptData, afterEffects };
+  };
+  const runAfterEffects = async (
+    prepared: BeforeEffectRunResult,
+  ): Promise<BeforeEffectRunResult> => {
+    const receiptData = { ...prepared.receiptData };
+    for (const afterEffect of prepared.afterEffects) {
+      const result = await afterEffect();
+      if (!result) continue;
+      if (!result.ok) {
+        return {
+          ok: false,
+          receiptData,
+          failure: result,
+          afterEffects: [],
+        };
+      }
       Object.assign(receiptData, result.receiptData ?? {});
     }
-    return { ok: true, receiptData };
+    return { ok: true, receiptData, afterEffects: [] };
   };
 
   return {
@@ -398,6 +428,7 @@ export function createToolBuildContext(
     beforeEffectsFor: options.beforeEffectsFor,
     registerBeforeEffect: options.registerBeforeEffect,
     runBeforeEffects,
+    runAfterEffects,
     withEffect,
     contract,
     failed,

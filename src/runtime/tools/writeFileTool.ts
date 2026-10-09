@@ -9,6 +9,7 @@ export function createWriteFileTool(ctx: ToolBuildContext) {
   const {
     contract,
     runBeforeEffects,
+    runAfterEffects,
     guard,
     guardrails,
     workspace,
@@ -53,20 +54,26 @@ export function createWriteFileTool(ctx: ToolBuildContext) {
               content,
             },
             "write",
-            async () =>
-              contract(
+            async () => {
+              const writeResult = await writeFileText(
+                target.root,
+                target.relativePath,
+                content,
+              );
+              const afterEffect = await runAfterEffects(beforeEffect);
+              if (!afterEffect.ok && afterEffect.failure) {
+                return beforeEffectFailureResult(afterEffect.failure);
+              }
+              return contract(
                 {
-                  ...(await writeFileText(
-                    target.root,
-                    target.relativePath,
-                    content,
-                  )),
+                  ...writeResult,
                   contentHash: hashContent(content),
-                  ...beforeEffect.receiptData,
+                  ...afterEffect.receiptData,
                 },
                 "write",
                 "filesystem",
-              ),
+              );
+            },
           );
         },
         "write",

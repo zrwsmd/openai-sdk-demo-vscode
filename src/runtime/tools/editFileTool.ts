@@ -19,6 +19,7 @@ export function createEditFileTool(ctx: ToolBuildContext) {
     guardrails,
     guard,
     runBeforeEffects,
+    runAfterEffects,
     workspace,
     withEffect,
   } = ctx;
@@ -70,15 +71,21 @@ export function createEditFileTool(ctx: ToolBuildContext) {
               edits,
             },
             "write",
-            async () =>
-              contract(
+            async () => {
+              const editResult = await applyPreparedFileEdit(prepared);
+              const afterEffect = await runAfterEffects(beforeEffect);
+              if (!afterEffect.ok && afterEffect.failure) {
+                return beforeEffectFailureResult(afterEffect.failure);
+              }
+              return contract(
                 {
-                  ...(await applyPreparedFileEdit(prepared)),
-                  ...beforeEffect.receiptData,
+                  ...editResult,
+                  ...afterEffect.receiptData,
                 },
                 "write",
                 "filesystem",
-              ),
+              );
+            },
           );
         },
         "write",
