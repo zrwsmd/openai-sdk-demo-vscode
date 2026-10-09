@@ -17,6 +17,7 @@ import {
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
   projectNewTurnSessionHistory,
+  createHistoricalToolArgumentGuard,
   createNewTurnModelInputSession,
   isToolHistoryItem,
   composeToolSet,
@@ -835,6 +836,40 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [3a2] 工具名有效但参数沿用了旧任务时,统一 guardrail 应在工具实现前拦截,
+//       把可恢复错误回传给模型,而不是让旧路径继续进入任意领域工具。
+{
+  const history = [
+    { type: 'message', role: 'user', content: '上一轮读取 yy.txt' },
+    {
+      type: 'function_call',
+      name: 'read_file',
+      callId: 'old-read',
+      arguments: JSON.stringify({ path: 'yy.txt' }),
+    },
+  ];
+  const guard = createHistoricalToolArgumentGuard(
+    history,
+    '分析当前工作区里这些 ST 文件之间的依赖关系',
+  );
+  const rejection = guard?.('st_dependency_map', { path: 'yy.txt' });
+  if (!rejection?.includes('yy.txt') || !rejection.includes('已阻止工具')) {
+    throw new Error('历史资源参数 guard 没有拦截跨工具旧参数');
+  }
+  const explicitGuard = createHistoricalToolArgumentGuard(history, '读取 yy.txt');
+  if (explicitGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
+    throw new Error('当前用户明确指定的资源被错误拦截');
+  }
+  const continuationGuard = createHistoricalToolArgumentGuard(
+    history,
+    '继续分析刚才的文件',
+  );
+  if (continuationGuard?.('st_dependency_map', { path: 'yy.txt' }) !== undefined) {
+    throw new Error('明确的历史上下文续接被错误拦截');
+  }
+  console.log('[3a2] 跨工具历史参数恢复 guard:通过');
+}
+
 // [3b] 同一任务的安全重启可以显式保留工具链,供失败后继续处理;
 //      这与新用户请求的默认历史隔离是两条不同路径。
 {
@@ -851,6 +886,55 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   console.log('[3b] 安全重启保留工具历史:', requestLines[0] ?? '(无)');
   if (!requestLines.some((line) => line.includes('assistant(tool_calls:old_tool)'))) {
     throw new Error('安全重启没有保留同一任务的工具历史');
+  }
+}
+
+// [3c] 集成回归:有效的 read_file 工具名带入上一轮 yy.txt,本轮目标却是 ST 依赖分析;
+//      mock 模型第一次仍故意带旧参数,第二次应收到 guardrail 错误并恢复。
+{
+  const staleSession = new JsonFileSession(path.join(dir, 'history-argument-session.json'));
+  await staleSession.addItems([
+    { type: 'message', role: 'user', content: '上一轮读取 yy.txt' },
+    {
+      type: 'function_call',
+      name: 'read_file',
+      callId: 'old-read',
+      arguments: JSON.stringify({ path: 'yy.txt' }),
+    },
+    {
+      type: 'function_call_result',
+      name: 'read_file',
+      callId: 'old-read',
+      output: JSON.stringify({ ok: true, data: { path: 'yy.txt' } }),
+    },
+  ]);
+  const before = diagLines.length;
+  const r = await runTestTurn(
+    '历史参数恢复回归',
+    noApproval,
+    {},
+    staleSession,
+  );
+  const turnDiagnostics = diagLines.slice(before);
+  const staleLog = turnDiagnostics.find((line) => line.includes('[context] 疑似沿用了历史对话中的资源参数'));
+  const results = r.events.filter((event) => event.type === 'tool.completed');
+  console.log(
+    '[3c] 历史参数恢复:模型调用 =',
+    r.usage.requests,
+    '| 工具回执 =',
+    results.map((event) => `${event.payload.toolName}:${event.payload.ok}`).join(','),
+    '| 输出 =',
+    r.output,
+  );
+  if (!staleLog || !r.output.includes('历史工具参数')) {
+    throw new Error('有效工具名的历史参数没有被 guardrail 回传并恢复');
+  }
+  const staleResult = results.find((event) => event.payload.toolName === 'read_file');
+  if (!staleResult?.payload.summary?.includes('已阻止工具 read_file 执行')) {
+    throw new Error('历史参数没有在工具实现前被 guardrail 拦截');
+  }
+  if (r.usage.requests < 2) {
+    throw new Error('历史参数恢复没有触发模型重试');
   }
 }
 

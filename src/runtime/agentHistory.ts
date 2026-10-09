@@ -218,6 +218,159 @@ export function createNewTurnModelInputSession(session: Session): Session {
   });
 }
 
+export type HistoricalToolArgumentGuard = (
+  toolName: string,
+  input: unknown,
+) => string | undefined;
+
+const HISTORICAL_REFERENCE_PATTERN =
+  /(?:继续|接着|续上|基于(?:上面|之前|前面|刚才|上述)|刚才|上一轮|上一次|之前|前面|上述|前述|该(?:文件|路径|结果|内容|对象|程序)|这个(?:文件|路径|结果|内容|对象|程序)|continue|previous|that file|this file)/iu;
+
+const RESOURCE_TOKEN_PATTERN =
+  /(?:[a-z]:[\\/][^\s"'`，。！？,;:]+|(?:\.{0,2}[\\/])?[a-z0-9_\u4e00-\u9fff.-]+(?:[\\/][a-z0-9_\u4e00-\u9fff.-]+)*\.[a-z0-9_\u4e00-\u9fff-]{1,16})/giu;
+
+function normalizeResourceReference(value: string): string {
+  return value
+    .trim()
+    .replace(/^["'`([{]+/u, "")
+    .replace(/[)}\],.;:!?，。！？]+$/u, "")
+    .replace(/\\/gu, "/")
+    .replace(/\/+/gu, "/")
+    .toLocaleLowerCase();
+}
+
+function looksLikeResourceReference(value: string): boolean {
+  const normalized = normalizeResourceReference(value);
+  if (!normalized || normalized.length > 260 || /^https?:\/\//u.test(normalized)) {
+    return false;
+  }
+  return (
+    normalized.includes("/") ||
+    /(?:^|[^.])\.[a-z0-9_\u4e00-\u9fff-]{1,16}$/iu.test(normalized)
+  );
+}
+
+function addResourceReference(
+  value: string,
+  output: Map<string, string>,
+): void {
+  const normalized = normalizeResourceReference(value);
+  if (!looksLikeResourceReference(normalized)) return;
+  if (!output.has(normalized)) output.set(normalized, value.trim());
+}
+
+function collectResourceReferencesFromText(
+  value: string,
+  output: Map<string, string>,
+): void {
+  for (const match of value.matchAll(RESOURCE_TOKEN_PATTERN)) {
+    const token = match[0];
+    if (token) addResourceReference(token, output);
+  }
+  addResourceReference(value, output);
+}
+
+function collectHistoricalResourceReferences(
+  value: unknown,
+  output: Map<string, string>,
+  depth = 0,
+): void {
+  if (depth > 8 || value === null || value === undefined) return;
+  if (typeof value === "string") {
+    collectResourceReferencesFromText(value, output);
+    const trimmed = value.trim();
+    if (
+      trimmed.length > 1 &&
+      (trimmed.startsWith("{") || trimmed.startsWith("["))
+    ) {
+      try {
+        collectHistoricalResourceReferences(JSON.parse(trimmed), output, depth + 1);
+      } catch {
+        // Plain text that only happens to start with a brace is still useful.
+      }
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectHistoricalResourceReferences(item, output, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== "object") return;
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    collectHistoricalResourceReferences(item, output, depth + 1);
+  }
+}
+
+function resourceMentionedInText(
+  normalizedReference: string,
+  normalizedText: string,
+): boolean {
+  if (normalizedText.includes(normalizedReference)) return true;
+  const basename = normalizedReference.split("/").at(-1);
+  return Boolean(basename && basename.length > 2 && normalizedText.includes(basename));
+}
+
+/**
+ * Reject only a conservative class of stale tool arguments:
+ * a file/path-like value appeared in older turns, is copied into the new
+ * tool call, and the current user message neither names it nor refers to the
+ * previous context. The model receives the rejection and can choose fresh
+ * arguments; no tool implementation or side effect runs first.
+ */
+export function createHistoricalToolArgumentGuard(
+  historyItems: readonly AgentInputItem[],
+  currentUserText: string,
+): HistoricalToolArgumentGuard | undefined {
+  const historicalReferences = new Map<string, string>();
+  for (const item of historyItems) {
+    collectHistoricalResourceReferences(item, historicalReferences);
+  }
+  if (historicalReferences.size === 0) return undefined;
+
+  const normalizedUserText = normalizeResourceReference(currentUserText);
+  const allowsHistoricalReference =
+    HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
+
+  return (toolName, input) => {
+    if (allowsHistoricalReference) return undefined;
+    const currentReferences = new Map<string, string>();
+    collectHistoricalResourceReferences(input, currentReferences);
+    const staleReferences = [...currentReferences.keys()]
+      .filter((reference) => historicalReferences.has(reference))
+      .filter(
+        (reference) =>
+          !resourceMentionedInText(reference, normalizedUserText),
+      );
+    if (staleReferences.length === 0) return undefined;
+
+    const displayReferences = staleReferences
+      .slice(0, 3)
+      .map((reference) => historicalReferences.get(reference) ?? reference);
+    return (
+      `疑似沿用了历史对话中的资源参数（${displayReferences.join("、")}），` +
+      `但当前用户请求没有明确引用它们；已阻止工具 ${toolName} 执行。` +
+      "请忽略旧工具参数，重新依据当前用户请求选择工具和参数；" +
+      "如果用户确实要继续处理旧资源，请等待用户明确说明。"
+    );
+  };
+}
+
+export async function loadHistoricalToolArgumentGuard(
+  session: Session,
+  currentUserText: string,
+): Promise<HistoricalToolArgumentGuard | undefined> {
+  try {
+    return createHistoricalToolArgumentGuard(
+      await session.getItems(),
+      currentUserText,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * New turns keep ordinary conversation history for reference, but they do not
  * inherit the previous turn's concrete execution target by default.

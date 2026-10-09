@@ -116,6 +116,7 @@ import {
 import {
   composeToolSet,
   createNewTurnModelInputSession,
+  loadHistoricalToolArgumentGuard,
   loadHistoricalToolResults,
   NEW_TURN_CONTEXT_PROMPT,
   projectNewTurnSessionHistory,
@@ -155,8 +156,10 @@ export {
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
   composeToolSet,
+  createHistoricalToolArgumentGuard,
   createNewTurnModelInputSession,
   isToolHistoryItem,
+  loadHistoricalToolArgumentGuard,
   markHistoricalMessageForModelInput,
   projectNewTurnSessionHistory,
 } from "./agentHistory";
@@ -353,6 +356,11 @@ export async function runAgent(
     options.workflowRegistry,
     workflowVisibilityContext,
   );
+  const isolateHistoricalToolChain =
+    !options.initialState && !options.preserveToolHistory;
+  const historicalToolArgumentGuard = isolateHistoricalToolChain
+    ? await loadHistoricalToolArgumentGuard(session, userText)
+    : undefined;
   const workflowBusinessToolPolicy = workflowRuntime || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(
         [workflowRuntime, workflowDescriptor],
@@ -372,9 +380,21 @@ export async function runAgent(
     }
     return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
-  const runtimeToolGuard: RuntimeToolCallGuard | undefined = workflowRuntime
-    ? (toolName) => completedWorkflowToolRejection(toolName)
-    : undefined;
+  let historicalArgumentRejectionLogged = false;
+  const runtimeToolGuard: RuntimeToolCallGuard | undefined =
+    workflowRuntime || historicalToolArgumentGuard
+      ? (toolName, input) => {
+          const historicalReason = historicalToolArgumentGuard?.(toolName, input);
+          if (historicalReason) {
+            if (!historicalArgumentRejectionLogged) {
+              historicalArgumentRejectionLogged = true;
+              agentLog(`[context] ${historicalReason}`);
+            }
+            return historicalReason;
+          }
+          return completedWorkflowToolRejection(toolName);
+        }
+      : undefined;
   const pipelineStageRuntime = new PipelineStageRuntime(workflowRuntime?.pipelinePlan);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
@@ -481,8 +501,6 @@ export async function runAgent(
     availableToolNameList,
     toolRegistry.getToolCatalog(),
   );
-  const isolateHistoricalToolChain =
-    !options.initialState && !options.preserveToolHistory;
   const executionInstructions = (
     activePlan
       ? BASE_AGENT_PROMPT +

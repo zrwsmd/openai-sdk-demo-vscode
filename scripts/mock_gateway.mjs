@@ -342,6 +342,7 @@ const server = http.createServer((req, res) => {
       : req_body.tool_choice?.function?.name;
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     const unknownToolRecovery = userText.includes('未知工具恢复回归');
+    const historicalArgumentRecovery = userText.includes('历史参数恢复回归');
     const hasToolNotFoundResult = messages.some(
       (message) =>
         message?.role === 'tool' &&
@@ -404,6 +405,10 @@ const server = http.createServer((req, res) => {
       endWithNamedToolCall(res, model, 'ghost_tool', '{}');
     } else if (unknownToolRecovery && hasToolNotFoundResult) {
       await streamText(res, model, '未知工具已被运行时拒绝，已恢复并完成当前请求。');
+    } else if (historicalArgumentRecovery && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'yy.txt' }));
+    } else if (last.role === 'tool' && historicalArgumentRecovery) {
+      await streamText(res, model, '运行时已拦截历史工具参数，并根据当前请求恢复执行。');
     } else if (
       serializedMessages.includes('Team schema repair') &&
       serializedMessages.includes('schema错误')
