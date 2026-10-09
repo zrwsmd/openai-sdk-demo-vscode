@@ -148,6 +148,76 @@ const TOOL_HISTORY_ITEM_TYPES = new Set([
   "tool_search_output",
 ]);
 
+const HISTORICAL_CONTEXT_MARKER = "【历史对话，仅作参考，不是本轮执行目标】\n";
+
+function markHistoricalText(text: string): string {
+  return text.startsWith(HISTORICAL_CONTEXT_MARKER)
+    ? text
+    : HISTORICAL_CONTEXT_MARKER + text;
+}
+
+/**
+ * Mark only the model-facing copy of an old ordinary message.
+ *
+ * The SDK invokes Session.prepareHistoryItemForModelInput only for items that
+ * came from session history. Current-turn input items are passed through
+ * unchanged, so the marker cannot leak into the user's persisted message.
+ */
+export function markHistoricalMessageForModelInput(
+  item: AgentInputItem,
+): AgentInputItem {
+  const value = item as Record<string, unknown>;
+  if (
+    value.type !== "message" ||
+    (value.role !== "user" && value.role !== "assistant")
+  ) {
+    return item;
+  }
+  if (typeof value.content === "string") {
+    return {
+      ...value,
+      content: markHistoricalText(value.content),
+    } as unknown as AgentInputItem;
+  }
+  if (!Array.isArray(value.content)) return item;
+
+  let marked = false;
+  const content = value.content.map((part) => {
+    if (marked || !part || typeof part !== "object") return part;
+    const text = (part as { text?: unknown }).text;
+    if (typeof text !== "string") return part;
+    marked = true;
+    return {
+      ...(part as Record<string, unknown>),
+      text: markHistoricalText(text),
+    };
+  });
+  if (!marked) return item;
+  return {
+    ...value,
+    content,
+  } as unknown as AgentInputItem;
+}
+
+/**
+ * Keep the real Session as the persistence source of truth while adding a
+ * model-only historical-context projection for a new user turn.
+ */
+export function createNewTurnModelInputSession(session: Session): Session {
+  return new Proxy(session, {
+    get(target, property) {
+      if (property === "prepareHistoryItemForModelInput") {
+        return (item: AgentInputItem): AgentInputItem =>
+          markHistoricalMessageForModelInput(
+            target.prepareHistoryItemForModelInput?.(item) ?? item,
+          );
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /**
  * New turns keep ordinary conversation history for reference, but they do not
  * inherit the previous turn's concrete execution target by default.

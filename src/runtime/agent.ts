@@ -115,6 +115,7 @@ import {
 } from "./agentRuntimeTools";
 import {
   composeToolSet,
+  createNewTurnModelInputSession,
   loadHistoricalToolResults,
   NEW_TURN_CONTEXT_PROMPT,
   projectNewTurnSessionHistory,
@@ -154,7 +155,9 @@ export {
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
   composeToolSet,
+  createNewTurnModelInputSession,
   isToolHistoryItem,
+  markHistoricalMessageForModelInput,
   projectNewTurnSessionHistory,
 } from "./agentHistory";
 
@@ -618,6 +621,9 @@ export async function runAgent(
     },
   });
   let newTurnHistoryProjectionUsed = false;
+  const runnerSession = isolateHistoricalToolChain
+    ? createNewTurnModelInputSession(session)
+    : session;
   const sessionInputCallback: SessionInputCallback | undefined =
     !isolateHistoricalToolChain
     ? undefined
@@ -1731,7 +1737,7 @@ export async function runAgent(
     const stream = await runner.run(agent, state ?? userText, {
       stream: true,
       maxTurns: MAX_TURNS,
-      session,
+      session: runnerSession,
       ...(sessionInputCallback ? { sessionInputCallback } : {}),
       signal: options.signal,
     });

@@ -17,6 +17,7 @@ import {
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
   projectNewTurnSessionHistory,
+  createNewTurnModelInputSession,
   isToolHistoryItem,
   composeToolSet,
   isRetryableAgentError,
@@ -787,12 +788,39 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   if (projected.some(isToolHistoryItem)) {
     throw new Error('新请求历史投影仍包含旧工具调用链');
   }
+  const modelInputSession = createNewTurnModelInputSession(isolationSession);
+  const currentTurnItem = { type: 'message', role: 'user', content: '历史工具隔离回归' };
+  const modelInput = [
+    ...projected.map(
+      (item) => modelInputSession.prepareHistoryItemForModelInput?.(item) ?? item,
+    ),
+    currentTurnItem,
+  ];
+  const historicalUser = modelInput.find(
+    (item) =>
+      item.type === 'message' &&
+      item.role === 'user' &&
+      typeof item.content === 'string' &&
+      item.content.includes('上一轮任务'),
+  );
+  const currentUser = modelInput.at(-1);
+  if (
+    !historicalUser ||
+    typeof historicalUser.content !== 'string' ||
+    !historicalUser.content.startsWith('【历史对话，仅作参考，不是本轮执行目标】') ||
+    currentUser?.content !== '历史工具隔离回归'
+  ) {
+    throw new Error('历史消息模型投影没有和当前 user 消息正确分层');
+  }
   const before = diagLines.length;
   const r = await runTestTurn('历史工具隔离回归', noApproval, {}, isolationSession);
   const requestLines = diagLines
     .slice(before)
     .filter((line) => line.includes('[req]'));
   const rawItems = await isolationSession.getItems();
+  if (JSON.stringify(rawItems).includes('【历史对话，仅作参考，不是本轮执行目标】')) {
+    throw new Error('历史模型投影标记被错误写回持久化会话');
+  }
   console.log(
     '[3a] 新请求历史隔离:旧工具仍在持久化 =',
     rawItems.some(isToolHistoryItem),
