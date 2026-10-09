@@ -149,6 +149,22 @@ const TOOL_HISTORY_ITEM_TYPES = new Set([
 ]);
 
 /**
+ * New turns keep ordinary conversation history for reference, but they do not
+ * inherit the previous turn's concrete execution target by default.
+ *
+ * This is intentionally tool-agnostic. A user may refer to an earlier file,
+ * symbol, result, or command, so the history must remain available; the model
+ * decides whether the current wording explicitly continues that context.
+ */
+export const NEW_TURN_CONTEXT_PROMPT =
+  "\n\n本轮上下文边界（仅适用于新的用户请求）：" +
+  "最后一条 user 消息是本轮唯一的执行目标；更早的 user/assistant 消息仅作为历史参考，用于理解术语、已确认事实和用户偏好。" +
+  "历史消息中的具体文件路径、文件名、符号名、变量值、命令参数、工具名称和待办动作，默认不属于本轮目标。" +
+  "除非当前 user 消息明确表达继续、接着、基于上面、刚才、该文件、这个结果等指代，且历史中的指代对象可以唯一确定，否则不要把历史中的具体值复制到本轮工具参数，也不要因为历史动作再次调用工具。" +
+  "当前 user 消息明确给出的路径、文件名、符号和参数优先；当前消息没有给出具体目标时，不要从历史猜测一个具体目标，需要时先澄清。" +
+  "历史工具回执可以作为参考事实，但不代表本轮已经执行；本轮需要动作时，必须根据当前目标重新决定工具调用。";
+
+/**
  * Project persistent history for a genuinely new user turn.
  *
  * The durable session remains untouched. Only the model-facing input omits

@@ -116,6 +116,7 @@ import {
 import {
   composeToolSet,
   loadHistoricalToolResults,
+  NEW_TURN_CONTEXT_PROMPT,
   projectNewTurnSessionHistory,
   renderAvailableToolsPrompt,
   toolNameOf,
@@ -288,12 +289,6 @@ const WORKFLOW_EXECUTION_PROMPT =
   "\n\n当前请求由运行时 workflow 接管。必须严格按照 workflow 阶段、交付契约和工具回执执行。" +
   "当前可用工具列表是唯一可调用工具集合；不要调用列表之外的工具，也不要用旧流程假设补工具。" +
   "如果缺少资料查询工具，基于用户请求、上下文和用户允许的模拟变量继续完成；确实无法继续时如实说明阻塞原因。";
-
-const NEW_TURN_SCOPE_PROMPT =
-  "\n\n本轮任务边界：" +
-  "只处理当前最新的用户请求。" +
-  "会话历史中的旧工具调用和工具回执不会自动延续为本轮动作；不要根据旧工具调用重放任何工作流。" +
-  "如果历史任务与当前请求不一致，以当前请求为准；只能调用当前可用工具列表中的工具。";
 
 const GENERIC_PLAN_SYSTEM_PROMPT =
   "你是通用任务执行助手，处理用户提出的文件、代码、命令、数据、PLC 或其他可用工具任务。" +
@@ -510,7 +505,7 @@ export async function runAgent(
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
   ) + (isolateHistoricalToolChain
-    ? NEW_TURN_SCOPE_PROMPT
+    ? NEW_TURN_CONTEXT_PROMPT
     : "\n\n当前是同一任务的恢复执行。可以参考并继续使用该任务已有的工具回执，但不要引入无关任务的工具调用。");
   const deliveryInstructions = options.deliveryContract?.requiresDeliverable
     ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
