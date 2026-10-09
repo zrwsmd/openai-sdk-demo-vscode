@@ -2728,6 +2728,8 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
+      currentRunId = null;
+      setRuntimeMode('idle');
       if (!messages.length && !events.length) showWelcomeHint();
       break;
     }

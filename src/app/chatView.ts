@@ -196,6 +196,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async canLeaveActiveSession(): Promise<boolean> {
     await this.ensureRuntime();
+    await this.coordinator!.initialize();
     if (await this.coordinator!.hasActiveWork()) {
       this.post({ type: 'error', message: '当前会话还有任务在运行或等待审批，先停止/处理完再切换会话。' });
       return false;
@@ -478,6 +479,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async send(text: string): Promise<void> {
     await this.ensureRuntime();
+    await this.coordinator!.initialize();
     // Keep the natural-language command narrow: "继续写一个..." remains a
     // new task, while an exact continuation phrase resumes the saved SDK state.
     if (isContinueRequest(text)) {

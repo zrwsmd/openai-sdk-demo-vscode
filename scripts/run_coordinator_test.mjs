@@ -40,6 +40,23 @@ async function fixture(executeAgent, planTask, team = {}) {
   return { dir, session, store, events, logs, coordinator };
 }
 
+// A stale webview can still show a stop button after a reload. If the host no
+// longer has an active run, stop must explicitly unlock the UI instead of
+// returning silently.
+{
+  const test = await fixture(
+    async () => {
+      throw new Error('stop without active run must not execute the agent');
+    },
+    undefined,
+  );
+  await test.coordinator.stop();
+  if (!test.events.some((event) => event.type === 'idle')) {
+    throw new Error('stop without an active run did not emit idle');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Preflight progress is host-only UI state. It must arrive in lifecycle order
 // without changing the replayable protocol event history.
 {

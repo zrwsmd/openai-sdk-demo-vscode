@@ -1116,7 +1116,10 @@ export class RunCoordinator {
       return;
     }
     const run = await this.store.getActive();
-    if (!run) return;
+    if (!run) {
+      if (notify) this.emit({ type: 'idle' });
+      return;
+    }
     await this.cancelPending(run, notify);
   }
 
