@@ -15,6 +15,7 @@ import {
   type AgentRunResult,
   type TurnUsage,
 } from './agent';
+import { randomUUID } from 'node:crypto';
 import { AgentOutputValidationError } from './output';
 import type { AgentInputItem, Session } from '@openai/agents';
 import { extractChatMessages } from './session';
@@ -73,6 +74,11 @@ import {
   type ToolRegistry,
 } from './toolRegistry';
 import type { CommandRunner } from '../tools/commandRunner';
+import type {
+  ClarificationRequest,
+  ClarificationResponse,
+  ClarificationService,
+} from './clarification';
 import { SandboxCommandRunner } from '../tools/sandboxCommandRunner';
 import {
   applyTeamPlannerReport,
@@ -120,8 +126,15 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'tool.completed',
   'approval.requested',
   'approval.resolved',
+  'clarification.requested',
+  'clarification.resolved',
   'run.progress',
 ]);
+
+interface PendingClarification {
+  runId: string;
+  complete: (response: ClarificationResponse) => void;
+}
 
 function isTeamPreparationSchemaError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
@@ -386,6 +399,7 @@ export class RunCoordinator {
   private protocolRunId?: string;
   private protocolRun?: DurableRunRecord;
   private transitionController?: AbortController;
+  private readonly pendingClarifications = new Map<string, PendingClarification>();
 
   constructor(dependencies: RunCoordinatorDependencies) {
     this.session = dependencies.session;
@@ -421,6 +435,13 @@ export class RunCoordinator {
       decisionService: this.decisionService,
       commandRunner: commandRunnerFromConfig(config.runCommand),
       services: this.createRuntimeServices?.(config),
+      clarification: this.createClarificationService(),
+    };
+  }
+
+  private createClarificationService(): ClarificationService {
+    return {
+      request: (request, signal) => this.requestClarification(request, signal),
     };
   }
 
@@ -450,7 +471,82 @@ export class RunCoordinator {
       this.transitioning ||
       this.clearing ||
       !!this.initializeOperation ||
+      this.pendingClarifications.size > 0 ||
       !!(await this.store.getActive());
+  }
+
+  async resolveClarification(
+    runId: string,
+    requestId: string,
+    response: Omit<ClarificationResponse, 'requestId'>,
+  ): Promise<void> {
+    if (!runId || !requestId) return;
+    const pending = this.pendingClarifications.get(requestId);
+    if (!pending || pending.runId !== runId) return;
+    const resolved: ClarificationResponse = {
+      requestId,
+      cancelled: response.cancelled === true,
+      ...(response.selectedOptionId ? { selectedOptionId: response.selectedOptionId } : {}),
+      ...(typeof response.customText === 'string' ? { customText: response.customText } : {}),
+      ...(response.value !== undefined ? { value: response.value } : {}),
+    };
+    this.writeLog(
+      `[run:${runId}] 用户${resolved.cancelled ? '取消' : '回复'}澄清 ${requestId}` +
+        (resolved.selectedOptionId ? ` option=${resolved.selectedOptionId}` : ''),
+    );
+    pending.complete(resolved);
+  }
+
+  private async requestClarification(
+    request: ClarificationRequest,
+    signal?: AbortSignal,
+  ): Promise<ClarificationResponse> {
+    const active = this.protocolRun ?? await this.store.getActive();
+    if (!active) {
+      throw new Error('当前没有可绑定的运行，无法发起澄清。');
+    }
+    this.ensureProtocolFactory(active);
+    const requestId = request.requestId?.trim() || randomUUID();
+    if (this.pendingClarifications.has(requestId)) {
+      throw new Error(`澄清请求 id 已存在: ${requestId}`);
+    }
+    const payload = {
+      requestId,
+      ...(request.kind ? { kind: request.kind } : {}),
+      title: request.title,
+      question: request.question,
+      ...(request.details ? { details: request.details } : {}),
+      options: [...(request.options ?? [])],
+      allowCustom: request.allowCustom !== false,
+      ...(request.customPlaceholder ? { customPlaceholder: request.customPlaceholder } : {}),
+      required: request.required !== false,
+      ...(request.metadata ? { metadata: request.metadata } : {}),
+    };
+    if (signal?.aborted) return { requestId, cancelled: true };
+    this.writeLog(`[run:${active.id}] 等待用户澄清 ${requestId}: ${request.title}`);
+    return new Promise<ClarificationResponse>((resolve) => {
+      const finish = (response: ClarificationResponse): void => {
+        this.pendingClarifications.delete(requestId);
+        signal?.removeEventListener('abort', onAbort);
+        this.emitProtocol(this.protocolFactory!.next({
+          type: 'clarification.resolved',
+          payload: response,
+        }));
+        resolve(response);
+      };
+      const onAbort = (): void => {
+        finish({ requestId, cancelled: true });
+      };
+      this.pendingClarifications.set(requestId, {
+        runId: active.id,
+        complete: finish,
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.emitProtocol(this.protocolFactory!.next({
+        type: 'clarification.requested',
+        payload,
+      }));
+    });
   }
 
   private async initializeInternal(): Promise<void> {

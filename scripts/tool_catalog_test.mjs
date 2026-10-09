@@ -28,6 +28,7 @@ assert.deepEqual(coreCatalog.riskMap(), {
   search_files: 'read',
   write_file: 'write',
   edit_file: 'write',
+  request_clarification: 'plan',
   run_command: 'execute',
 });
 assert.deepEqual(coreCatalog.evidenceMap(), {
@@ -40,6 +41,7 @@ assert.deepEqual(coreCatalog.toolsForFallback('read_only'), [
   'list_files',
   'read_file',
   'search_files',
+  'request_clarification',
 ]);
 assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
   'list_files',
@@ -47,6 +49,7 @@ assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
   'search_files',
   'write_file',
   'edit_file',
+  'request_clarification',
 ]);
 assert.deepEqual(coreCatalog.toolsForFallback('command_query'), ['run_command']);
 assert.deepEqual(
@@ -66,7 +69,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   coreCatalog.toolsForFallback('file_edit', '这是一个完全没有匹配意图的请求'),
-  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file'],
+  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'request_clarification'],
 );
 assert.deepEqual(
   splitToolCapabilityIntentText('读取文件并搜索文本'),
@@ -84,6 +87,7 @@ assert.deepEqual(
     'list_files',
     'read_file',
     'search_files',
+    'request_clarification',
   ],
 );
 assert.deepEqual(
@@ -141,7 +145,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   coreCatalog.toolsForQuery({ risks: ['read', 'plan'] }),
-  ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
+  ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files', 'request_clarification'],
 );
 const coreCapabilityPrompt = coreCatalog.renderToolCapabilityPrompt([
   'read_file',
@@ -162,7 +166,7 @@ assert.match(
 for (const mode of ['general_chat', 'needs_clarification', 'blocked_high_risk']) {
   assert.deepEqual(
     coreCatalog.toolsForFallback(mode),
-    ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files'],
+    ['get_io_table', 'read_plc_variables', 'list_files', 'read_file', 'search_files', 'request_clarification'],
     `safe fallback ${mode} should expose only read/plan capabilities`,
   );
 }
@@ -214,6 +218,7 @@ const appFileEditTools = [
   'search_files',
   'write_file',
   'edit_file',
+  'request_clarification',
   'export_st_program',
 ];
 assert.deepEqual(
@@ -242,6 +247,7 @@ assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'list_files',
   'read_file',
   'search_files',
+  'request_clarification',
   'validate_st_code',
   'st_dependency_map',
   'st_change_impact',
@@ -254,6 +260,7 @@ assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
   'list_files',
   'read_file',
   'search_files',
+  'request_clarification',
   'validate_st_code',
   'st_dependency_map',
   'st_change_impact',

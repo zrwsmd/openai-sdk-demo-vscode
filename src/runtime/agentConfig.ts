@@ -17,6 +17,7 @@ import type {
 } from "./decision/agentDecision";
 import type { ModelContextProfile } from "./contextManager";
 import type { CommandRunner } from "../tools/commandRunner";
+import type { ClarificationService } from "./clarification";
 
 export interface AgentConfig {
   /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
@@ -52,6 +53,8 @@ export interface AgentConfig {
   modelContext?: ModelContextProfile;
   /** Host-selected command execution backend. Defaults to LocalCommandRunner. */
   commandRunner?: CommandRunner;
+  /** Host UI channel for asking the user to clarify an ambiguous request. */
+  clarification?: ClarificationService;
   /** Optional semantic decision layer; absent means existing logic only. */
   decisionService?: AgentDecisionService;
   /** Internal Jev settings. The API key is host-injected, never UI-configured. */

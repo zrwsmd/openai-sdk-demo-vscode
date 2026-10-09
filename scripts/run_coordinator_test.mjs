@@ -2258,6 +2258,68 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   }
 }
 
+// A running agent can ask the host for clarification and resume after the
+// user supplies an option/custom answer. This is separate from approvals.
+{
+  let releaseClarification;
+  const clarificationRequested = new Promise((resolve) => {
+    releaseClarification = resolve;
+  });
+  const test = await fixture(async (cfg, session, userText) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    const responsePromise = cfg.clarification.request({
+      kind: 'plc_task_configuration',
+      title: '任务组态确认',
+      question: '请选择 MainTask 的周期。',
+      options: [
+        { id: '20ms', label: '20 ms', value: '20' },
+        { id: '100ms', label: '100 ms', value: '100' },
+      ],
+      allowCustom: true,
+    });
+    releaseClarification();
+    const response = await responsePromise;
+    await session.addItems([{
+      type: 'message',
+      role: 'assistant',
+      content: `已确认 ${response.selectedOptionId} ${response.customText ?? ''}`.trim(),
+    }]);
+    return {
+      status: 'completed',
+      output: `selected=${response.selectedOptionId}; custom=${response.customText ?? ''}`,
+      usage,
+      result: completedAgentResult('clarified'),
+    };
+  });
+  const running = test.coordinator.start('生成 ST 并配置任务周期', config, 'key');
+  await clarificationRequested;
+  const requested = test.events.find((event) =>
+    event.type === 'agentEvent' &&
+    event.event.type === 'clarification.requested');
+  if (!requested) throw new Error('clarification.requested protocol event missing');
+  if (test.events.some((event) => event.type === 'awaitingApproval')) {
+    throw new Error('clarification was incorrectly routed through approval UI');
+  }
+  await test.coordinator.resolveClarification(
+    requested.event.runId,
+    requested.event.payload.requestId,
+    {
+      cancelled: false,
+      selectedOptionId: '100ms',
+      customText: '优先级 1',
+    },
+  );
+  await running;
+  const completed = await test.store.getLast();
+  if (completed?.status !== 'completed' || completed.output !== 'selected=100ms; custom=优先级 1') {
+    throw new Error('clarification response did not resume the run');
+  }
+  if (!completed.events?.some((event) => event.type === 'clarification.resolved')) {
+    throw new Error('clarification.resolved protocol event was not persisted on run');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Clear owns the final boundary: a late run completion cannot restore the old
 // session or leave a retryable run behind after the user starts a new session.
 {

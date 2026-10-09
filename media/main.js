@@ -49,6 +49,7 @@ const toolRuns = new Map();
 const anonymousToolRuns = new Map();
 const workflowViews = new Map();
 const workflowApprovals = new Map();
+const clarificationRequests = new Map();
 const thinkingViews = new Map();
 const thinkingInlineViews = new Map();
 const thinkingSegments = new Map();
@@ -59,6 +60,7 @@ const finalAnswerAnchors = new Map();
 const richRenderStates = new WeakMap();
 const THINKING_INLINE_MAX_CHARS = 80;
 let scrollFramePending = false;
+let replayingHistory = false;
 
 const preflightStageLabels = {
   context: '正在整理上下文',
@@ -2069,6 +2071,230 @@ function finishApprovalCards(className, statusText) {
   }
 }
 
+// ---------- 澄清弹窗 ----------
+
+function normalizedClarificationOptions(request) {
+  return Array.isArray(request?.options)
+    ? request.options
+        .filter((option) => option && typeof option.id === 'string' && typeof option.label === 'string')
+        .slice(0, 8)
+    : [];
+}
+
+function addClarificationRequest(runId, request) {
+  const requestId = request?.requestId;
+  if (!requestId) return;
+  if (clarificationRequests.has(requestId)) return;
+  clarificationRequests.set(requestId, { runId, request, resolved: false });
+
+  const card = document.createElement('div');
+  card.className = 'clarification-card';
+  card.dataset.clarificationId = requestId;
+
+  const title = document.createElement('div');
+  title.className = 'clarification-title';
+  const titleText = document.createElement('span');
+  titleText.textContent = request.title || '需要补充信息';
+  const status = document.createElement('span');
+  status.className = 'clarification-status';
+  status.textContent = '等待回复';
+  title.append(titleText, status);
+  card.appendChild(title);
+
+  const question = document.createElement('div');
+  question.className = 'clarification-question';
+  question.textContent = request.question || '请补充必要信息。';
+  card.appendChild(question);
+
+  if (request.details) {
+    const details = document.createElement('div');
+    details.className = 'clarification-details';
+    details.textContent = request.details;
+    card.appendChild(details);
+  }
+
+  const options = normalizedClarificationOptions(request);
+  if (options.length) {
+    const list = document.createElement('div');
+    list.className = 'clarification-options-preview';
+    for (const option of options) {
+      const chip = document.createElement('span');
+      chip.textContent = option.label;
+      list.appendChild(chip);
+    }
+    card.appendChild(list);
+  }
+
+  messagesEl.appendChild(card);
+  if (!replayingHistory) showClarificationModal(runId, request);
+  setRuntimeMode('awaiting');
+  scrollBottom();
+}
+
+function closeClarificationModal(requestId) {
+  const selector = requestId
+    ? `.clarification-modal[data-clarification-id="${CSS.escape(requestId)}"]`
+    : '.clarification-modal';
+  for (const modal of document.querySelectorAll(selector)) modal.remove();
+}
+
+function showClarificationModal(runId, request) {
+  const requestId = request?.requestId;
+  if (!requestId || document.querySelector(`.clarification-modal[data-clarification-id="${CSS.escape(requestId)}"]`)) {
+    return;
+  }
+  const options = normalizedClarificationOptions(request);
+  const overlay = document.createElement('div');
+  overlay.className = 'clarification-modal';
+  overlay.dataset.clarificationId = requestId;
+
+  const panel = document.createElement('div');
+  panel.className = 'clarification-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+
+  const title = document.createElement('div');
+  title.className = 'clarification-modal-title';
+  title.textContent = request.title || '需要补充信息';
+  panel.appendChild(title);
+
+  const question = document.createElement('div');
+  question.className = 'clarification-modal-question';
+  question.textContent = request.question || '请补充必要信息。';
+  panel.appendChild(question);
+
+  if (request.details) {
+    const details = document.createElement('div');
+    details.className = 'clarification-modal-details';
+    details.textContent = request.details;
+    panel.appendChild(details);
+  }
+
+  const optionInputs = [];
+  if (options.length) {
+    const group = document.createElement('div');
+    group.className = 'clarification-option-list';
+    for (const option of options) {
+      const label = document.createElement('label');
+      label.className = 'clarification-option';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = `clarification-${requestId}`;
+      input.value = option.id;
+      input.dataset.value = option.value ?? '';
+      optionInputs.push(input);
+      const text = document.createElement('span');
+      text.className = 'clarification-option-text';
+      const main = document.createElement('strong');
+      main.textContent = option.label;
+      text.appendChild(main);
+      if (option.description) {
+        const desc = document.createElement('small');
+        desc.textContent = option.description;
+        text.appendChild(desc);
+      }
+      label.append(input, text);
+      group.appendChild(label);
+    }
+    panel.appendChild(group);
+  }
+
+  let customInput = null;
+  if (request.allowCustom !== false) {
+    customInput = document.createElement('textarea');
+    customInput.className = 'clarification-custom';
+    customInput.rows = 3;
+    customInput.placeholder = request.customPlaceholder || '填写自定义答案';
+    panel.appendChild(customInput);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'clarification-actions';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn';
+  cancel.textContent = '取消';
+  const confirm = document.createElement('button');
+  confirm.className = 'btn primary';
+  confirm.textContent = '确认';
+  actions.append(cancel, confirm);
+  panel.appendChild(actions);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const sendResponse = (cancelled) => {
+    const selected = optionInputs.find((input) => input.checked);
+    const customText = customInput?.value?.trim() || '';
+    const selectedOptionId = selected?.value || undefined;
+    const selectedValue = selected?.dataset.value || undefined;
+    markClarificationCard(requestId, {
+      cancelled,
+      selectedOptionId,
+      customText,
+    });
+    closeClarificationModal(requestId);
+    vscode.postMessage({
+      type: 'clarificationResponse',
+      runId,
+      requestId,
+      cancelled,
+      ...(selectedOptionId ? { selectedOptionId } : {}),
+      ...(customText ? { customText } : {}),
+      ...(selectedValue ? { value: selectedValue } : {}),
+    });
+    if (!cancelled) setRuntimeMode('running');
+  };
+
+  cancel.addEventListener('click', () => sendResponse(true));
+  confirm.addEventListener('click', () => sendResponse(false));
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay && request.required === false) sendResponse(true);
+  });
+  requestAnimationFrame(() => {
+    const first = optionInputs[0] || customInput || confirm;
+    first?.focus();
+  });
+}
+
+function markClarificationCard(requestId, response = {}) {
+  if (!requestId) return;
+  const state = clarificationRequests.get(requestId);
+  if (state) {
+    clarificationRequests.set(requestId, { ...state, resolved: true, response });
+  }
+  closeClarificationModal(requestId);
+  const card = messagesEl.querySelector(`[data-clarification-id="${CSS.escape(requestId)}"]`);
+  if (!card) return;
+  const cancelled = response.cancelled === true;
+  card.classList.add(cancelled ? 'cancelled' : 'resolved');
+  const status = card.querySelector('.clarification-status');
+  if (status) {
+    status.textContent = cancelled ? '已取消' : '已回复';
+    status.classList.add(cancelled ? 'cancelled' : 'resolved');
+  }
+  if (!cancelled) {
+    const summary = document.createElement('div');
+    summary.className = 'clarification-answer';
+    const parts = [];
+    if (response.selectedOptionId) parts.push(`选项：${response.selectedOptionId}`);
+    if (response.customText) parts.push(`补充：${response.customText}`);
+    summary.textContent = parts.length ? parts.join('；') : '已确认当前选项';
+    card.appendChild(summary);
+  }
+}
+
+function finishClarificationCards(statusText = '已取消') {
+  closeClarificationModal();
+  for (const card of messagesEl.querySelectorAll('.clarification-card:not(.resolved):not(.cancelled)')) {
+    card.classList.add('cancelled');
+    const status = card.querySelector('.clarification-status');
+    if (status) {
+      status.textContent = statusText;
+      status.classList.add('cancelled');
+    }
+  }
+  clarificationRequests.clear();
+}
+
 // Agent output and tool lifecycle are rendered from the protocol event stream.
 function handleProtocolEvent(event) {
   if (!event || typeof event !== 'object') return;
@@ -2189,6 +2415,13 @@ function handleProtocolEvent(event) {
         payload.approved === true,
         payload.approved === true ? '已允许' : '已拒绝',
       );
+      break;
+    case 'clarification.requested':
+      closeThinkingAtBoundary(event.runId || currentRunId);
+      addClarificationRequest(event.runId || currentRunId, payload);
+      break;
+    case 'clarification.resolved':
+      markClarificationCard(payload.requestId, payload);
       break;
     case 'usage.updated':
       break;
@@ -2376,6 +2609,7 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       pendingLocalUserText = null;
       clearPreflightNote();
+      finishClarificationCards('已结束');
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();
@@ -2414,6 +2648,8 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       clearPauseNotice();
       clearPreflightNote();
+      closeClarificationModal();
+      clarificationRequests.clear();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -2442,6 +2678,8 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       clearPauseNotice();
       clearPreflightNote();
+      closeClarificationModal();
+      clarificationRequests.clear();
       pendingLocalUserText = null;
       messagesEl.textContent = '';
       workflowViews.clear();
@@ -2462,6 +2700,7 @@ window.addEventListener('message', (event) => {
       const legacyInsertIndex = legacy.length
         ? messages.map((m) => m.role).lastIndexOf('agent')
         : -1;
+      replayingHistory = true;
       for (let i = 0; i < messages.length; i += 1) {
         const message = messages[i];
         if (i === legacyInsertIndex) replayHistoryEvents(legacy);
@@ -2482,6 +2721,7 @@ window.addEventListener('message', (event) => {
       }
       if (pendingGroup) replayHistoryEvents(pendingGroup.events);
       if (legacyInsertIndex < 0) replayHistoryEvents(legacy);
+      replayingHistory = false;
       agentBubble = null;
       agentText = '';
       pendingAgentText = '';
@@ -2549,6 +2789,7 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       pendingLocalUserText = null;
       clearPreflightNote();
+      finishClarificationCards('已取消');
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();
@@ -2565,6 +2806,7 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       pendingLocalUserText = null;
       clearPreflightNote();
+      finishClarificationCards('已暂停');
       if (agentBubble) {
         agentBubble.classList.remove('streaming');
         if (!agentText) detachAgentBubbleFromTimeline();

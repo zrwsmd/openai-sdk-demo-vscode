@@ -5,6 +5,8 @@ import { createRunCommandTool } from "./runCommandTool";
 import { createWorkspaceReadTools } from "./workspaceReadTools";
 import { createWriteFileTool } from "./writeFileTool";
 import { createEditFileTool } from "./editFileTool";
+import { createClarificationTool } from "./clarificationTool";
+import { CLARIFICATION_TOOL_NAME } from "../clarification";
 
 const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
@@ -80,6 +82,16 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     fallbackModes: ["file_edit"],
   },
   {
+    name: CLARIFICATION_TOOL_NAME,
+    description: "向用户弹出澄清问题，支持候选选项和自定义答案。",
+    domain: "agent",
+    intents: ["询问用户", "澄清需求", "确认配置", "任务组态确认"],
+    tags: ["agent", "clarification", "plan"],
+    risk: "plan",
+    effect: "none",
+    fallbackModes: ["general_chat", "read_only", "file_edit", "needs_clarification"],
+  },
+  {
     name: "run_command",
     description: "在授权工作区根目录执行命令。",
     domain: "workspace",
@@ -109,6 +121,7 @@ export function createCoreToolProvider(): ToolProvider {
         listFilesTool,
         readFileTool,
         searchFilesTool,
+        createClarificationTool(context),
         createWriteFileTool(context),
         createEditFileTool(context),
         createRunCommandTool(context),

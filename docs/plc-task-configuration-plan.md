@@ -288,4 +288,43 @@ npm run test:plc-config
 - 增加用户确认后的 JSON 增量更新；
 - 保证取消弹窗不会写入配置。
 
+### 第四阶段：通用澄清弹窗基础设施
+
+实现文件：
+
+- `src/runtime/clarification.ts`
+- `src/runtime/tools/clarificationTool.ts`
+- `src/protocol/events.ts`
+- `src/runtime/runCoordinator.ts`
+- `src/app/chatView.ts`
+- `media/main.js`
+- `media/main.css`
+- `scripts/run_coordinator_test.mjs`
+- `scripts/tool_catalog_test.mjs`
+
+已完成：
+
+- 新增 `clarification.requested` / `clarification.resolved` 协议事件；
+- 新增 `request_clarification` 核心工具，风险为 `plan`、无副作用；
+- 运行时可在执行中等待用户回复，回复后继续本轮执行；
+- 前端以“消息记录卡 + 居中弹窗”展示澄清问题；
+- 弹窗支持候选选项、自定义答案、确认和取消；
+- 澄清通道独立于审批通道，不复用 `approval` 状态；
+- 用户取消只返回 `cancelled: true`，不会直接写入文件或配置。
+
+验证：
+
+```text
+npx tsc --noEmit
+npm run test:protocol
+npm run test:workflow
+node scripts/run_coordinator_test.mjs
+```
+
+已知边界：
+
+- 这一阶段只提供通用澄清能力，还没有把 PLC 任务组态结果自动写入 `plc-runtime.json`；
+- 弹窗适合补齐周期、任务名、PLC 资源等缺失字段，高风险副作用仍走审批；
+- 扩展进程重启时，正在等待澄清的运行会按现有运行恢复策略处理，后续可再做持久化澄清断点。
+
 后续每完成一个阶段，在本节补充实现文件、验证命令和已知限制。

@@ -12,6 +12,7 @@ export * from '../src/app/chatSessions';
 export * from '../src/tools/workspaceTools';
 export * from '../src/runtime/runStore';
 export * from '../src/runtime/runCoordinator';
+export * from '../src/runtime/clarification';
 export * from '../src/runtime/errors';
 export * from '../src/tools/toolContract';
 export * from '../src/plc/plcAdapter';

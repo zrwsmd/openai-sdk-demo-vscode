@@ -47,6 +47,7 @@ import {
  *                   {type:'stop'} / {type:'retry'}
  *                   {type:'continue'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
+ *                   {type:'clarificationResponse', runId, requestId, cancelled, selectedOptionId?, customText?}
  *                   {type:'getSettings', apiFormat?, requestId?}
  *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
@@ -107,6 +108,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.deleteSession(msg.sessionId);
       } else if (msg.type === 'approvalResponse') {
         void this.resolveApproval(msg);
+      } else if (msg.type === 'clarificationResponse') {
+        void this.resolveClarification(msg);
       } else if (msg.type === 'stop') {
         void this.stop();
       } else if (msg.type === 'retry') {
@@ -517,6 +520,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.ensureRuntime();
     const live = await this.getConfig();
     await this.coordinator!.approve(msg.runId ?? '', msg.approvalId ?? '', msg.approve === true, live.apiKey);
+    await this.sessionCatalog.touch(this.activeSessionId);
+    await this.postSessions();
+  }
+
+  private async resolveClarification(msg: {
+    runId?: string;
+    requestId?: string;
+    cancelled?: boolean;
+    selectedOptionId?: string;
+    customText?: string;
+    value?: unknown;
+  }): Promise<void> {
+    await this.ensureRuntime();
+    await this.coordinator!.resolveClarification(
+      msg.runId ?? '',
+      msg.requestId ?? '',
+      {
+        cancelled: msg.cancelled === true,
+        ...(typeof msg.selectedOptionId === 'string' ? { selectedOptionId: msg.selectedOptionId } : {}),
+        ...(typeof msg.customText === 'string' ? { customText: msg.customText } : {}),
+        ...(msg.value !== undefined ? { value: msg.value } : {}),
+      },
+    );
     await this.sessionCatalog.touch(this.activeSessionId);
     await this.postSessions();
   }

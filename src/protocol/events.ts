@@ -12,6 +12,7 @@ export const agentEventSourceSchema = z.enum([
   'tool',
   'handoff',
   'approval',
+  'clarification',
   // Reserved for the later MCP adapter. It is part of the protocol now so
   // consumers do not need a second event envelope when MCP is introduced.
   'mcp',
@@ -245,6 +246,42 @@ const approvalResolved = eventBase.extend({
   }).passthrough(),
 });
 
+const clarificationOption = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  description: z.string().optional(),
+  value: z.unknown().optional(),
+}).passthrough();
+
+const clarificationRequested = eventBase.extend({
+  type: z.literal('clarification.requested'),
+  source: z.literal('clarification'),
+  payload: z.object({
+    requestId: z.string().min(1),
+    kind: z.string().optional(),
+    title: z.string().min(1),
+    question: z.string().min(1),
+    details: z.string().optional(),
+    options: z.array(clarificationOption).default([]),
+    allowCustom: z.boolean().optional(),
+    customPlaceholder: z.string().optional(),
+    required: z.boolean().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }).passthrough(),
+});
+
+const clarificationResolved = eventBase.extend({
+  type: z.literal('clarification.resolved'),
+  source: z.literal('clarification'),
+  payload: z.object({
+    requestId: z.string().min(1),
+    cancelled: z.boolean(),
+    selectedOptionId: z.string().optional(),
+    customText: z.string().optional(),
+    value: z.unknown().optional(),
+  }).passthrough(),
+});
+
 const usageUpdated = eventBase.extend({
   type: z.literal('usage.updated'),
   source: z.literal('runtime'),
@@ -349,6 +386,8 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   handoffCompleted,
   approvalRequested,
   approvalResolved,
+  clarificationRequested,
+  clarificationResolved,
   usageUpdated,
   reasoningUpdated,
   toolUpdated,
@@ -390,6 +429,8 @@ const defaultSource: Record<AgentProtocolEventType, AgentEventSource> = {
   'handoff.completed': 'handoff',
   'approval.requested': 'approval',
   'approval.resolved': 'approval',
+  'clarification.requested': 'clarification',
+  'clarification.resolved': 'clarification',
   'usage.updated': 'runtime',
   'reasoning.updated': 'model',
   'tool.updated': 'tool',

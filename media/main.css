@@ -933,6 +933,170 @@ body { display: flex; flex-direction: column; }
 .approval-actions .btn { min-width: 76px; min-height: 30px; }
 .approval-actions .btn:disabled { opacity: 0.6; cursor: default; }
 
+/* ---------- 澄清弹窗 ---------- */
+.clarification-card {
+  margin: 8px 0;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--box));
+}
+.clarification-card.resolved {
+  border-color: var(--vscode-inputValidationInfoBorder, var(--accent));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.clarification-card.cancelled {
+  border-color: var(--vscode-errorForeground, #f66);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f66) 6%, transparent);
+}
+.clarification-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 7px;
+}
+.clarification-status {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.clarification-status.cancelled { color: var(--vscode-errorForeground, #f66); }
+.clarification-question {
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.clarification-details,
+.clarification-answer {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.clarification-options-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.clarification-options-preview span {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 11px;
+}
+.clarification-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.52);
+}
+.clarification-panel {
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(78vh, 620px);
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 90%, var(--box));
+  box-shadow: 0 22px 48px rgb(0 0 0 / 0.38);
+  padding: 16px;
+}
+.clarification-modal-title {
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.clarification-modal-question {
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.clarification-modal-details {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.clarification-option-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+.clarification-option {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--box) 82%, transparent);
+  padding: 10px;
+  cursor: pointer;
+}
+.clarification-option:hover,
+.clarification-option:focus-within {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--box));
+}
+.clarification-option input { margin-top: 2px; }
+.clarification-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.clarification-option-text strong {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.clarification-option-text small {
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.clarification-custom {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--box);
+  color: var(--fg);
+  padding: 9px 10px;
+  font: inherit;
+  line-height: 1.45;
+}
+.clarification-custom:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.clarification-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.clarification-actions .btn {
+  min-width: 78px;
+  min-height: 30px;
+}
+
 .send-btn {
   width: 26px;
   height: 26px;
