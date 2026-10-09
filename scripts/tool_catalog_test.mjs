@@ -188,6 +188,7 @@ assert.deepEqual(
     'st_change_impact',
     'st_symbol_references',
     'st_library_symbol',
+    'audit_plc_runtime_config',
   ],
 );
 assert.deepEqual(
@@ -253,6 +254,7 @@ assert.deepEqual(appCatalog.toolsForFallback('read_only'), [
   'st_change_impact',
   'st_symbol_references',
   'st_library_symbol',
+  'audit_plc_runtime_config',
 ]);
 assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
   'get_io_table',
@@ -266,7 +268,12 @@ assert.deepEqual(appCatalog.toolsForFallback('general_chat'), [
   'st_change_impact',
   'st_symbol_references',
   'st_library_symbol',
+  'audit_plc_runtime_config',
 ]);
+assert.deepEqual(
+  appCatalog.toolsForFallback('read_only', '检查 PLC 任务组态和 plc-runtime.json 是否正确'),
+  ['audit_plc_runtime_config'],
+);
 assert(!appCatalog.toolsForFallback('general_chat').includes('write_file'));
 assert(!appCatalog.toolsForFallback('general_chat').includes('export_st_program'));
 assert(!appCatalog.toolsForFallback('blocked_high_risk').includes('run_command'));

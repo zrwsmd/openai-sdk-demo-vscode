@@ -8,6 +8,7 @@ import type { ToolProvider } from "../../toolRegistry";
 import type { ToolCapability } from "../../toolCatalog";
 import { createStGraphTools } from "./tools/dependencyTools";
 import { createStLibraryTools } from "./tools/libraryTools";
+import { createPlcRuntimeTools } from "./tools/plcRuntimeTools";
 import { createValidateStTools } from "./tools/validateStTool";
 import { createStToolBuildContext } from "./stToolContext";
 import { preparePlcRuntimeConfigSync } from "../../../plc/plcRuntimeConfigSync";
@@ -71,6 +72,22 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     intents: ["查询标准库符号", "查看功能块引脚", "查看函数接口"],
     tags: ["structured_text", "library", "analysis"],
     risk: "plan",
+    effect: "none",
+    fallbackModes: ["read_only"],
+  },
+  {
+    name: "audit_plc_runtime_config",
+    description: "检查 plc-runtime.json 与工作区 ST PROGRAM 的任务绑定一致性。",
+    domain: "structured_text",
+    intents: [
+      "检查 PLC 任务组态",
+      "检查 plc-runtime.json",
+      "检查任务周期绑定",
+      "编译前组态检查",
+      "查看 PROGRAM 任务绑定",
+    ],
+    tags: ["structured_text", "plc_runtime", "configuration", "analysis"],
+    risk: "read",
     effect: "none",
     fallbackModes: ["read_only"],
   },
@@ -223,6 +240,7 @@ export function createStToolProvider(): ToolProvider {
       const validationTools = createValidateStTools(stContext);
       const graphTools = createStGraphTools(stContext);
       const libraryTools = createStLibraryTools(stContext);
+      const plcRuntimeTools = createPlcRuntimeTools(stContext);
       context.registerBeforeEffect(
         {
           effect: "filesystem",
@@ -240,6 +258,7 @@ export function createStToolProvider(): ToolProvider {
         graphTools.stChangeImpact,
         graphTools.stSymbolReferences,
         libraryTools.stLibrarySymbol,
+        plcRuntimeTools.auditPlcRuntimeConfig,
       ];
     },
   };

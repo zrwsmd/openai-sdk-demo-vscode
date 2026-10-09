@@ -404,7 +404,10 @@ npm run test:plc-config
 实现文件：
 
 - `src/plc/plcRuntimeConfigAudit.ts`
+- `src/runtime/plugins/st/tools/plcRuntimeTools.ts`
+- `src/runtime/plugins/st/stToolProvider.ts`
 - `scripts/plc_runtime_audit_test.mjs`
+- `scripts/plc_runtime_tool_test.mjs`
 - `scripts/test_entry.ts`
 - `package.json`
 
@@ -414,7 +417,8 @@ npm run test:plc-config
 - 明确报告 `plc-runtime.json` 缺失、损坏、程序未绑定、绑定重复、绑定源文件缺失、源文件声明不匹配等问题；
 - 对 event 任务输出运行时适配提示，避免误认为已经能生成 matiec cyclic `TASK`；
 - 增加首次配置草稿生成入口，但必须显式传入 `periodMs`，不替用户猜默认周期；
-- 覆盖缺配置、合法配置、配置损坏、源文件缺失、声明不匹配、事件任务和首次配置草稿测试。
+- 注册只读工具 `audit_plc_runtime_config`，Agent 可在检查任务组态、`plc-runtime.json` 或编译前配置时调用；
+- 覆盖缺配置、合法配置、配置损坏、源文件缺失、声明不匹配、事件任务、首次配置草稿和工具执行测试。
 
 验证：
 
@@ -425,7 +429,8 @@ npm run test:plc-config
 
 已知边界：
 
-- 审计器目前只产出本地报告，还没有注册成 Agent 工具或 UI 命令；
+- 审计器目前只产出本地报告，还没有 UI 命令或自动修复流程；
+- `audit_plc_runtime_config` 只读报告问题，不自动修复或写入配置；
 - 首次配置草稿不会自动写盘，后续仍应通过弹窗确认后再保存；
 - 审计扫描默认跳过 `.git`、`.vscode`、`.vscode-test`、`dist`、`node_modules`、`out` 和 `coverage`。
 
