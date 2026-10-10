@@ -313,6 +313,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ),
       },
     };
+    const promptCache = {
+      enabled: cfg.get<boolean>('promptCache.enabled') ?? false,
+      ttl: cfg.get<'30m'>('promptCache.ttl') ?? '30m',
+    };
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -408,6 +412,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
       runCommand,
       modelContext,
+      promptCache,
       jev,
       showThinking,
       savedInPlugin: !!storedProfile || useLegacyProfile || !!formatKeyValue,
@@ -502,6 +507,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       policyContext: live.policyContext,
       runCommand: live.runCommand,
       modelContext: live.modelContext,
+      promptCache: live.promptCache,
       orchestration: live.orchestration,
       extensions: createStAnalyzerConfigExtension(this.context),
       jev: {

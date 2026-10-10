@@ -13,6 +13,7 @@ import {
   extractChatMessages,
   MaxTurnsExceededError,
   MAX_TURNS,
+  makeLoggingFetch,
   normalizeWorkflowContract,
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
@@ -27,6 +28,65 @@ import {
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
 const diagLines = [];
 setAgentLogger((line) => diagLines.push(line));
+
+// [0a] 第三方兼容网关拒绝 Prompt Cache 时，只重试一次并关闭后续注入；
+// 网关返回 usage 缓存明细时，诊断日志必须保留命中 token。
+{
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let callCount = 0;
+  globalThis.fetch = async (_input, init = {}) => {
+    callCount += 1;
+    const body = JSON.parse(init.body);
+    requests.push(body);
+    if (callCount === 1) {
+      return new Response(
+        JSON.stringify({ error: { message: 'prompt_cache_options is not supported' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        }],
+        usage: { prompt_tokens_details: { cached_tokens: 12 } },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  const before = diagLines.length;
+  try {
+    const fetcher = makeLoggingFetch({
+      promptCache: { enabled: true, ttl: '30m' },
+    });
+    const response = await fetcher('https://gateway.test/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'mock-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const retryBody = requests[1] ?? {};
+  const cacheLines = diagLines.slice(before);
+  if (
+    callCount !== 2 ||
+    requests[0]?.prompt_cache_options?.ttl !== '30m' ||
+    retryBody.prompt_cache_options !== undefined ||
+    !cacheLines.some((line) => line.includes('网关不支持 prompt_cache_options')) ||
+    !cacheLines.some((line) => line.includes('cache=cached:12'))
+  ) {
+    throw new Error(`Prompt Cache 网关回退失败: ${JSON.stringify({ callCount, requests, cacheLines })}`);
+  }
+  console.log('[0a] Prompt Cache 不兼容回退与命中日志:通过');
+}
 
 // [0] 出站请求边界:任意工具产生空参数、非法 JSON 或非对象参数时,
 // 下一次 OpenAI 兼容请求必须被修复,且已经合法的对象参数保持原样。

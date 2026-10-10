@@ -19,6 +19,12 @@ import type { ModelContextProfile } from "./contextManager";
 import type { CommandRunner } from "../tools/commandRunner";
 import type { ClarificationService } from "./clarification";
 
+export interface PromptCacheSettings {
+  enabled?: boolean;
+  /** OpenAI-compatible prompt cache minimum lifetime. */
+  ttl?: "30m";
+}
+
 export interface AgentConfig {
   /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
   baseUrl: string;
@@ -51,6 +57,8 @@ export interface AgentConfig {
   actionPolicy?: ActionPolicy;
   /** Generic model context and local-compaction profile. */
   modelContext?: ModelContextProfile;
+  /** Experimental OpenAI-compatible prompt cache. Disabled by default. */
+  promptCache?: PromptCacheSettings;
   /** Host-selected command execution backend. Defaults to LocalCommandRunner. */
   commandRunner?: CommandRunner;
   /** Host UI channel for asking the user to clarify an ambiguous request. */

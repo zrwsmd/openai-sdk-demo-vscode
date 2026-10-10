@@ -2,7 +2,7 @@ import {
   OpenAIChatCompletionsModel,
 } from "@openai/agents";
 import OpenAI from "openai";
-import type { AgentConfig } from "./agentConfig";
+import type { AgentConfig, PromptCacheSettings } from "./agentConfig";
 import {
   createModelAdapter,
   type ModelAdapter,
@@ -400,6 +400,8 @@ function summarizeOutgoing(body: unknown): string {
       tool_choice?: unknown;
       parallel_tool_calls?: unknown;
       response_format?: { type?: string; json_schema?: { name?: string } };
+      prompt_cache_options?: { ttl?: string; mode?: string };
+      prompt_cache_retention?: string | null;
     };
     const chain = (j.messages ?? [])
       .map((m) =>
@@ -426,7 +428,12 @@ function summarizeOutgoing(body: unknown): string {
       typeof j.parallel_tool_calls === "boolean"
         ? String(j.parallel_tool_calls)
         : "-";
-    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} parallel=${parallel} format=${format} ${chain}`.slice(
+    const promptCache = j.prompt_cache_options
+      ? `${j.prompt_cache_options.mode ?? "implicit"}/${j.prompt_cache_options.ttl ?? "-"}`
+      : j.prompt_cache_retention
+        ? `retention/${j.prompt_cache_retention}`
+        : "-";
+    return `${j.model} stream=${j.stream} tools=${tools} choice=${choice} parallel=${parallel} format=${format} cache=${promptCache} ${chain}`.slice(
       0,
       900,
     );
@@ -576,6 +583,48 @@ function collectNonStreamReasoningChars(message: JsonRecord): number {
   return stringLength(reasoning);
 }
 
+function finiteUsageNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : 0;
+}
+
+function cacheUsageSnapshot(usage: unknown): {
+  present: boolean;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+} {
+  if (!isJsonRecord(usage)) {
+    return { present: false, cachedTokens: 0, cacheWriteTokens: 0 };
+  }
+  const details =
+    (isJsonRecord(usage.prompt_tokens_details)
+      ? usage.prompt_tokens_details
+      : undefined) ??
+    (isJsonRecord(usage.input_tokens_details)
+      ? usage.input_tokens_details
+      : undefined);
+  if (!details) {
+    return { present: false, cachedTokens: 0, cacheWriteTokens: 0 };
+  }
+  return {
+    present: true,
+    cachedTokens: finiteUsageNumber(
+      details.cached_tokens ?? details.cache_read_tokens,
+    ),
+    cacheWriteTokens: finiteUsageNumber(
+      details.cache_write_tokens ?? details.cache_creation_tokens,
+    ),
+  };
+}
+
+function cacheUsageSuffix(usage: unknown): string {
+  const snapshot = cacheUsageSnapshot(usage);
+  return snapshot.present
+    ? ` cache=cached:${snapshot.cachedTokens},write:${snapshot.cacheWriteTokens}`
+    : "";
+}
+
 export function summarizeNonStreamChatCompletionResponse(
   status: number,
   text: string,
@@ -599,6 +648,7 @@ export function summarizeNonStreamChatCompletionResponse(
   }
 
   const errorLine = parsed.error ? JSON.stringify(parsed.error).slice(0, 300) : "";
+  const cacheSuffix = cacheUsageSuffix(parsed.usage);
   const choice = Array.isArray(parsed.choices) && isJsonRecord(parsed.choices[0])
     ? parsed.choices[0]
     : undefined;
@@ -627,6 +677,7 @@ export function summarizeNonStreamChatCompletionResponse(
   const summary =
     `[resp] HTTP ${status} 非流式 正文=${contentChars}字符 ` +
     `推理=${reasoningChars}字符 工具调用=${rawToolCalls.length} finish=${finish}` +
+    cacheSuffix +
     `${errorLine ? " ERROR=" + errorLine : ""}`;
   if (outputPreview || refusalPreview) {
     agentLog(
@@ -641,21 +692,123 @@ export function summarizeNonStreamChatCompletionResponse(
   return { summary, toolArgs, emptyTail };
 }
 
-export function makeLoggingFetch(): unknown {
+type PromptCacheSupport = "unknown" | "supported" | "unsupported";
+
+interface LoggingFetchOptions {
+  promptCache?: PromptCacheSettings;
+}
+
+function injectPromptCacheOptions(
+  body: unknown,
+  settings: PromptCacheSettings | undefined,
+): { body: unknown; applied: boolean } {
+  if (!settings?.enabled) return { body, applied: false };
+  const text = requestBodyText(body);
+  if (text === undefined) return { body, applied: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return { body, applied: false };
+  }
+  if (!isJsonRecord(parsed)) {
+    return { body, applied: false };
+  }
+  if (parsed.prompt_cache_options !== undefined) {
+    return { body, applied: true };
+  }
+  return {
+    body: JSON.stringify({
+      ...parsed,
+      prompt_cache_options: {
+        ttl: settings.ttl ?? "30m",
+      },
+    }),
+    applied: true,
+  };
+}
+
+function withoutPromptCacheOptions(body: unknown): unknown {
+  const text = requestBodyText(body);
+  if (text === undefined) return body;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return body;
+  }
+  if (!isJsonRecord(parsed)) return body;
+  const {
+    prompt_cache_options: _promptCacheOptions,
+    prompt_cache_retention: _promptCacheRetention,
+    ...rest
+  } = parsed;
+  return JSON.stringify(rest);
+}
+
+function isPromptCacheConflictResponse(
+  status: number,
+  responseText: string,
+): boolean {
+  if (status !== 400 && status !== 422) return false;
+  const text = responseText.toLowerCase();
+  const mentionsCache =
+    /prompt[_ -]?cache|cache[_ -]?(option|retention)|cached[_ -]?tokens/.test(
+      text,
+    );
+  const describesConflict =
+    /not supported|unsupported|unknown|unrecognized|invalid|not allowed|does not allow|extra fields|unexpected|additional properties/.test(
+      text,
+    );
+  return mentionsCache && describesConflict;
+}
+
+export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
+  let promptCacheSupport: PromptCacheSupport = "unknown";
   return async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const isChat = url.includes("/chat/completions");
-    const sanitized = sanitizeChatCompletionRequestBody(init?.body);
+    const isOpenAIRequest = isChat || url.includes("/responses");
+    const cachePrepared = isOpenAIRequest && promptCacheSupport !== "unsupported"
+      ? injectPromptCacheOptions(init?.body, options.promptCache)
+      : { body: init?.body, applied: false };
+    const sanitized = sanitizeChatCompletionRequestBody(cachePrepared.body);
     const requestInit = sanitized.repaired > 0
       ? { ...(init ?? {}), body: sanitized.body as RequestInit["body"] }
-      : init;
+      : cachePrepared.body !== init?.body
+        ? { ...(init ?? {}), body: cachePrepared.body as RequestInit["body"] }
+        : init;
     if (sanitized.repaired > 0) {
       agentLog(
         `[req-sanitize] 已修复非法工具参数 count=${sanitized.repaired} tools=${sanitized.toolNames.join(",") || "?"}，已用 {} 继续请求`,
       );
     }
     if (isChat) agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
-    const resp = await fetch(input as never, requestInit as never);
+    let resp = await fetch(input as never, requestInit as never);
+    if (
+      isOpenAIRequest &&
+      cachePrepared.applied &&
+      promptCacheSupport === "unknown" &&
+      (resp.status === 400 || resp.status === 422)
+    ) {
+      const errorText = await resp.clone().text().catch(() => "");
+      if (isPromptCacheConflictResponse(resp.status, errorText)) {
+        promptCacheSupport = "unsupported";
+        agentLog(
+          `[prompt-cache] 网关不支持 prompt_cache_options，status=${resp.status}，本次及后续请求自动关闭并重试`,
+        );
+        const fallbackBody = withoutPromptCacheOptions(requestInit?.body);
+        const fallbackInit = {
+          ...(requestInit ?? {}),
+          body: fallbackBody as RequestInit["body"],
+        };
+        agentLog(`[req] ${summarizeOutgoing(fallbackBody)}`);
+        resp = await fetch(input as never, fallbackInit as never);
+      }
+    } else if (isOpenAIRequest && cachePrepared.applied && resp.ok) {
+      promptCacheSupport = "supported";
+      agentLog("[prompt-cache] 网关已接受 prompt_cache_options");
+    }
     if (!isChat || !resp.body) return resp;
     const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
     const requestUsesStream = contentType.includes("text/event-stream")
@@ -697,6 +850,9 @@ export function makeLoggingFetch(): unknown {
       let toolCallDeltas = 0;
       let finish = "-";
       let errorLine = "";
+      let cacheUsageSeen = false;
+      let cachedTokens = 0;
+      let cacheWriteTokens = 0;
       const toolCallArgs = new Map<
         number,
         { id?: string; name?: string; args: string }
@@ -709,6 +865,8 @@ export function makeLoggingFetch(): unknown {
         try {
           const j = JSON.parse(payload) as {
             error?: unknown;
+            usage?: unknown;
+            response?: { usage?: unknown };
             choices?: {
               finish_reason?: string | null;
               delta?: {
@@ -726,6 +884,12 @@ export function makeLoggingFetch(): unknown {
           if (j.error) {
             errorLine = JSON.stringify(j.error).slice(0, 300);
             continue;
+          }
+          const cache = cacheUsageSnapshot(j.usage ?? j.response?.usage);
+          if (cache.present) {
+            cacheUsageSeen = true;
+            cachedTokens = Math.max(cachedTokens, cache.cachedTokens);
+            cacheWriteTokens = Math.max(cacheWriteTokens, cache.cacheWriteTokens);
           }
           const c = j.choices?.[0];
           if (c?.finish_reason) finish = c.finish_reason;
@@ -751,7 +915,9 @@ export function makeLoggingFetch(): unknown {
         }
       }
       agentLog(
-        `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}${errorLine ? " ERROR=" + errorLine : ""}`,
+        `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}` +
+          `${cacheUsageSeen ? ` cache=cached:${cachedTokens},write:${cacheWriteTokens}` : ""}` +
+          `${errorLine ? " ERROR=" + errorLine : ""}`,
       );
       if (toolCallArgs.size > 0) {
         for (const [idx, call] of toolCallArgs) {
@@ -780,14 +946,22 @@ export function makeLoggingFetch(): unknown {
 // GatewayGuardedModel because its watchdog/capability state belongs to a run.
 const openAIClientCache = new Map<string, OpenAI>();
 
-export function buildChatCompletionsModel(cfg: AgentConfig): GatewayGuardedModel {
-  const key = JSON.stringify([cfg.baseUrl, cfg.apiKey]);
+export function buildChatCompletionsModel(
+  cfg: AgentConfig,
+  promptCache = cfg.promptCache,
+): GatewayGuardedModel {
+  const key = JSON.stringify([
+    cfg.baseUrl,
+    cfg.apiKey,
+    promptCache?.enabled === true,
+    promptCache?.ttl ?? "30m",
+  ]);
   let client = openAIClientCache.get(key);
   if (!client) {
     client = new OpenAI({
       baseURL: cfg.baseUrl,
       apiKey: cfg.apiKey,
-      fetch: makeLoggingFetch() as never,
+      fetch: makeLoggingFetch({ promptCache }) as never,
     });
     openAIClientCache.set(key, client);
   }
@@ -798,8 +972,12 @@ export function buildModelAdapter(
   cfg: AgentConfig,
   usageScope = "main_agent",
 ): ModelAdapter {
+  const promptCache =
+    usageScope === "main_agent" ? cfg.promptCache : undefined;
   return createModelAdapter({ ...cfg, usageScope }, {
-    fetchImpl: makeLoggingFetch() as typeof fetch,
+    fetchImpl: makeLoggingFetch({
+      promptCache,
+    }) as typeof fetch,
     createChatCompletionsModel: () => {
       // Keep the existing guarded gateway implementation unchanged. An
       // explicit Chat Completions selection without a custom endpoint uses
@@ -807,11 +985,11 @@ export function buildModelAdapter(
       if (!cfg.baseUrl) {
         const client = new OpenAI({
           apiKey: cfg.apiKey,
-          fetch: makeLoggingFetch() as never,
+          fetch: makeLoggingFetch({ promptCache }) as never,
         });
         return new OpenAIChatCompletionsModel(client, cfg.model);
       }
-      return buildChatCompletionsModel(cfg);
+      return buildChatCompletionsModel(cfg, promptCache);
     },
   });
 }

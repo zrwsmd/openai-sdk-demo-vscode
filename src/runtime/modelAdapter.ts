@@ -4,6 +4,7 @@ import {
   type ModelSettings,
 } from '@openai/agents';
 import OpenAI from 'openai';
+import type { PromptCacheSettings } from './agentConfig';
 import { createAnthropicMessagesModel } from './anthropicMessagesModel';
 import type { ModelContextProfile } from './contextManager';
 import {
@@ -70,6 +71,31 @@ export function officialResponsesCompactionSettings(
   return usesOfficialOpenAIResponses(config)
     ? { contextManagement: [{ type: 'compaction' }] }
     : undefined;
+}
+
+export function promptCacheModelSettings(
+  config: Pick<ModelAdapterConfig, 'provider' | 'apiFormat' | 'baseUrl'> & {
+    promptCache?: PromptCacheSettings;
+  },
+): Pick<ModelSettings, 'promptCacheOptions'> | undefined {
+  if (!config.promptCache?.enabled) return undefined;
+  const provider = resolveProvider(config.provider);
+  const apiFormat = resolveApiFormat(
+    config.baseUrl,
+    config.apiFormat,
+    provider,
+  );
+  if (
+    provider !== AGENT_PROVIDER_OPENAI ||
+    apiFormat === AGENT_API_FORMAT_MESSAGES
+  ) {
+    return undefined;
+  }
+  return {
+    promptCacheOptions: {
+      ttl: config.promptCache.ttl ?? '30m',
+    },
+  };
 }
 
 export interface ModelAdapterConfig {

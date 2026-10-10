@@ -178,6 +178,19 @@
           "default": 60000,
           "description": "单次摘要请求最多读取的历史字符数；不参与 token 预算触发判断"
         },
+        "plcAgent.promptCache.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "实验性启用 OpenAI 兼容 Prompt Cache；第三方网关不一定支持，运行时会记录请求/命中并在明确不兼容时自动回退"
+        },
+        "plcAgent.promptCache.ttl": {
+          "type": "string",
+          "enum": [
+            "30m"
+          ],
+          "default": "30m",
+          "description": "Prompt Cache 最小保留时间；当前运行时先使用 30m，后续可按网关能力扩展"
+        },
         "plcAgent.jev.enabled": {
           "type": "boolean",
           "default": true,

@@ -46,6 +46,7 @@ import {
 } from "./output";
 import {
   officialResponsesCompactionSettings,
+  promptCacheModelSettings,
 } from "./modelAdapter";
 import {
   renderTaskPlan,
@@ -94,6 +95,7 @@ import {
   buildModelAdapter,
   EmptyGatewayResponseError,
   GatewayGuardedModel,
+  makeLoggingFetch,
 } from "./modelGateway";
 import {
   coerceIndustrialAgentOutput,
@@ -128,6 +130,7 @@ export {
   buildModelAdapter,
   EmptyGatewayResponseError,
   GatewayGuardedModel,
+  makeLoggingFetch,
   sanitizeChatCompletionRequestBody,
   setAgentLogger,
   summarizeNonStreamChatCompletionResponse,
@@ -330,6 +333,14 @@ export async function runAgent(
   );
   const modelAdapter = buildModelAdapter(cfg);
   const model = modelAdapter.model;
+  const promptCacheSettings = promptCacheModelSettings(cfg);
+  if (cfg.promptCache?.enabled) {
+    agentLog(
+      promptCacheSettings
+        ? `[prompt-cache] enabled ttl=${cfg.promptCache.ttl ?? "30m"} provider=${modelAdapter.provider} apiFormat=${modelAdapter.apiFormat}`
+        : `[prompt-cache] enabled but skipped provider=${modelAdapter.provider} apiFormat=${modelAdapter.apiFormat}`,
+    );
+  }
   const workflowState = createWorkflowRuntimeState();
   const toolRegistry = options.toolRegistry ?? getDefaultToolRegistry();
   const registeredToolRisks = toolRegistry.riskMap();
@@ -554,6 +565,7 @@ export async function runAgent(
     const modelSettings = {
       parallelToolCalls: workflowRuntime?.parallelToolCalls ?? true,
       ...(officialResponsesCompactionSettings(cfg) ?? {}),
+      ...(promptCacheSettings ?? {}),
       ...(availableForcedTool && !(model instanceof GatewayGuardedModel)
         ? { toolChoice: availableForcedTool }
         : {}),

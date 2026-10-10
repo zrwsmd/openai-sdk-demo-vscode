@@ -22,6 +22,7 @@ import type {
   WorkflowId,
 } from './workflow/types';
 import type { ModelContextProfile } from './contextManager';
+import type { PromptCacheSettings } from './agentConfig';
 
 export type DurableRunStatus =
   | 'running'
@@ -57,6 +58,8 @@ export interface DurableRunConfig {
   runCommand?: DurableRunCommandConfig;
   /** Generic model context and local-compaction profile persisted for resume/retry. */
   modelContext?: ModelContextProfile;
+  /** Experimental OpenAI-compatible prompt cache settings persisted for resume/retry. */
+  promptCache?: PromptCacheSettings;
   orchestration?: IndustrialAgentMode;
   /** Host/plugin-owned JSON settings persisted with the run for resume/retry. */
   extensions?: Record<string, unknown>;
