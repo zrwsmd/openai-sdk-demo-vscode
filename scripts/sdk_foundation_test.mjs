@@ -307,6 +307,15 @@ assert.equal(inferRequiredTool('请把这段 ST 程序导出保存'), 'export_st
 assert.equal(inferRequiredTool('请运行这个命令检查工程'), 'run_command');
 assert.equal(inferRequiredTool('刚刚写入了哪个文件了'), undefined);
 assert.equal(inferRequiredTool('之前保存的是哪个文件？'), undefined);
+assert.equal(
+  inferRequiredTool('双汇发展（000895.SZ）总结一下这段内容'),
+  undefined,
+);
+assert.equal(
+  inferRequiredTool('分析一下当前工作区里这些 st 文件之间的依赖关系'),
+  undefined,
+);
+assert.equal(inferRequiredTool('查看 config.json'), 'read_file');
 const outputFormat = zodTextFormat(industrialAgentOutputSchema, 'industrial_agent_output');
 const assertClosedObjects = (value) => {
   if (!value || typeof value !== 'object') return;

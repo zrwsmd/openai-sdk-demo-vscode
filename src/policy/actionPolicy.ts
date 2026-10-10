@@ -23,7 +23,9 @@ export class DefaultActionPolicy implements ActionPolicy {
       return undefined;
     }
 
-    const mentionsWorkspaceFile = /(?:文件|工作区|当前项目|workspace|\bfile\b|[`'"“”‘’]?[^\s`'"“”‘’]+\.[a-z0-9]{1,8}\b)/iu.test(text);
+    const mentionsWorkspaceFile =
+      /(?:文件|工作区|当前项目|workspace|\bfile\b)/iu.test(text) ||
+      looksLikeWorkspaceFileReference(text);
     // ActionPolicy is only an intent hint. Retrospective/state questions such as
     // "which file was written just now?" must not be interpreted as a new
     // filesystem action, even when they contain action words.
@@ -33,7 +35,7 @@ export class DefaultActionPolicy implements ActionPolicy {
     if (mentionsWorkspaceFile && asksToEdit) return 'edit_file';
     if (mentionsWorkspaceFile && asksToWrite) return 'write_file';
 
-    const asksToRead = /(?:读取|读一下|读出|查看|打开|内容|\bread\b|\bopen\b|\bcat\b)/iu.test(text);
+    const asksToRead = /(?:读取|读一下|读出|查看|打开|\bread\b|\bopen\b|\bcat\b)/iu.test(text);
     if (mentionsWorkspaceFile && asksToRead) return 'read_file';
 
     if (/(?=.*(?:导出|保存|落盘))(?=.*(?:ST|程序|源码))|export.*program|save.*program/iu.test(text)) {
@@ -64,4 +66,27 @@ function isInformationalActionQuery(text: string): boolean {
     /(?:刚刚|刚才|之前|上次|已经|此前|当前|现在|历史|记录|最近).*(?:写|保存|修改|创建|覆盖|落盘|文件|工作区)/u.test(text) ||
     /(?:写|保存|修改|创建|覆盖|落盘).*(?:了|过|的).*(?:哪个|哪些|什么|文件)/u.test(text);
   return hasQuestionMarker && refersToPriorState;
+}
+
+/**
+ * A dotted token is not automatically a workspace file:
+ * stock symbols (000895.SZ), versions (v1.2) and package names (node.js)
+ * are common in ordinary questions. Keep the heuristic conservative and
+ * recognize common workspace extensions unless the user supplied a path-like
+ * reference or explicitly marked the token as a filename.
+ */
+function looksLikeWorkspaceFileReference(text: string): boolean {
+  const commonExtensions =
+    /(?:txt|md|markdown|json|jsonc|yaml|yml|xml|csv|log|st|iec|scl|pas|c|h|cpp|hpp|ts|tsx|js|jsx|mjs|cjs|py|java|go|rs|toml|ini|cfg|conf|sql|sh|bat|ps1|html|css|scss|svg|drawio)\b/iu;
+  const explicitPath =
+    /(?:[A-Za-z]:[\\/]|(?:^|[\s"'`“”‘’(（])\.{0,2}[\\/]|[\w.-]+[\\/][\w.-]+)/u;
+  const markedFilename =
+    /[`'"“”‘’][^`'"“”‘’\s/\\]+\.[a-z0-9]{1,12}[`'"“”‘’]/iu;
+  const commonFilename =
+    /(?:^|[\s,，。:：;；"'`“”‘’(（]|(?:到|为|在|把|将|向|从|给))[\w.-]+\.[a-z0-9]{1,12}\b/iu;
+  return (
+    explicitPath.test(text) ||
+    markedFilename.test(text) ||
+    (commonFilename.test(text) && commonExtensions.test(text))
+  );
 }
