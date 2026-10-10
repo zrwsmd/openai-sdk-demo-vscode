@@ -1068,7 +1068,7 @@ const openAIClientCache = new Map<string, OpenAI>();
 
 export function buildChatCompletionsModel(
   cfg: AgentConfig,
-  promptCache = cfg.promptCache,
+  promptCache: PromptCacheSettings | undefined,
 ): GatewayGuardedModel {
   const key = JSON.stringify([
     cfg.baseUrl,

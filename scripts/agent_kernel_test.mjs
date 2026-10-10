@@ -147,6 +147,45 @@ setAgentLogger((line) => diagLines.push(line));
   console.log('[0aa] Prompt Cache 能力记忆:通过');
 }
 
+// [0ab] 显式关闭缓存时，即使 AgentConfig 保留了启用配置，也不能从配置中隐式恢复。
+{
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  globalThis.fetch = async (_input, init = {}) => {
+    requestBody = JSON.parse(init.body);
+    return new Response(
+      JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        }],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const fetcher = makeLoggingFetch({ promptCache: undefined });
+    const response = await fetcher(
+      'https://prompt-cache-disabled.test/v1/chat/completions',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'disabled-model',
+          stream: false,
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+      },
+    );
+    await response.text();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  if (requestBody?.prompt_cache_options !== undefined) {
+    throw new Error(`显式关闭 Prompt Cache 仍被注入: ${JSON.stringify(requestBody)}`);
+  }
+  console.log('[0ab] Prompt Cache 显式关闭:通过');
+}
+
 // [0] 出站请求边界:任意工具产生空参数、非法 JSON 或非对象参数时,
 // 下一次 OpenAI 兼容请求必须被修复,且已经合法的对象参数保持原样。
 {
