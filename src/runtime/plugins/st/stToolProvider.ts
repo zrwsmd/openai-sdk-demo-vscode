@@ -161,6 +161,8 @@ function fileBeforeEffect(
         workspaceRoot,
         source: path,
         content,
+        userRequest: context.userText,
+        modelConfig: context.cfg,
         clarification: context.cfg.clarification,
         signal,
       });

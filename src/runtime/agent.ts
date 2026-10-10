@@ -463,6 +463,7 @@ export async function runAgent(
   };
   const registeredTools = toolRegistry.createTools({
     cfg,
+    userText,
     workflowContract: options.deliveryContract,
     workflow: workflowRuntime,
     diagnosticReporter: reportDiagnostics,

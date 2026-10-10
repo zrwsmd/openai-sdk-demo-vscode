@@ -168,6 +168,7 @@ export class ToolRegistry {
 
   createTools(options: {
     cfg: AgentConfig;
+    userText?: string;
     workflowContract?: WorkflowContract;
     workflow?: WorkflowRuntime;
     diagnosticReporter?: DiagnosticSideReporter;
@@ -188,6 +189,7 @@ export class ToolRegistry {
       hooks.push({ selector, hook });
     };
     const context = createToolBuildContext(options.cfg, {
+      userText: options.userText,
       workflowContract: options.workflowContract,
       workflow: options.workflow,
       diagnosticReporter: options.diagnosticReporter,

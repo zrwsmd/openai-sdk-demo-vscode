@@ -1,4 +1,8 @@
 import path from 'node:path';
+import { Agent, Runner } from '@openai/agents';
+import { z } from 'zod';
+import { agentLog, buildModelAdapter } from '../runtime/modelGateway';
+import type { AgentConfig } from '../runtime/agentConfig';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
@@ -58,10 +62,37 @@ export interface PlcRuntimeConfigSyncPlan {
   commit(): Promise<PlcRuntimeConfig>;
 }
 
+export interface PlcTaskSuggestion {
+  taskName: string;
+  periodMs: number;
+  reason?: string;
+}
+
+export interface PlcTaskSuggestionInput {
+  userRequest?: string;
+  programName: string;
+  source: string;
+  stContent: string;
+  existingTasks: readonly {
+    name: string;
+    type: PlcTaskConfig['type'];
+    periodMs?: number;
+    programCount: number;
+  }[];
+}
+
+export type PlcTaskSuggestionProvider = (
+  input: PlcTaskSuggestionInput,
+  signal?: AbortSignal,
+) => Promise<readonly PlcTaskSuggestion[]>;
+
 export interface PreparePlcRuntimeConfigSyncOptions {
   workspaceRoot: string;
   source: string;
   content: string;
+  userRequest?: string;
+  modelConfig?: AgentConfig;
+  taskSuggestionProvider?: PlcTaskSuggestionProvider;
   clarification?: PlcClarificationService;
   signal?: AbortSignal;
 }
@@ -74,6 +105,14 @@ class PlcRuntimeConfigSyncCancelledError extends PlcRuntimeConfigError {
 }
 
 const IEC_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
+const plcTaskSuggestionSchema = z.object({
+  suggestions: z.array(z.object({
+    taskName: z.string().regex(IEC_IDENTIFIER),
+    periodMs: z.number().int().min(1).max(86_400_000),
+    reason: z.string().min(1).max(240),
+  }).strict()).min(1).max(4),
+}).strict();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -120,7 +159,7 @@ function taskLabel(task: PlcTaskConfig): string {
   const period = task.type === 'cyclic' && task.periodMs !== undefined
     ? `${task.periodMs} ms`
     : task.type;
-  return `${task.name} (${period}, priority ${task.priority})`;
+  return `${task.name} (${period})`;
 }
 
 type Selection =
@@ -188,6 +227,144 @@ function tryParseJson(value: string): unknown {
   }
 }
 
+function stripJsonFence(value: string): string {
+  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/iu.exec(value.trim());
+  return match?.[1]?.trim() ?? value.trim();
+}
+
+function extractJsonObject(value: string): string | undefined {
+  const start = value.indexOf('{');
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function parseTaskSuggestionOutput(value: unknown): PlcTaskSuggestion[] {
+  const raw = typeof value === 'string'
+    ? value.trim()
+    : JSON.stringify(value ?? '');
+  const unfenced = stripJsonFence(raw);
+  const candidates = [...new Set([
+    unfenced,
+    extractJsonObject(unfenced),
+  ].filter((candidate): candidate is string => Boolean(candidate)))];
+  for (const candidate of candidates) {
+    try {
+      const parsed = plcTaskSuggestionSchema.safeParse(JSON.parse(candidate));
+      if (parsed.success) return parsed.data.suggestions;
+    } catch {
+      // Try the next candidate, then report one stable error below.
+    }
+  }
+  throw new PlcRuntimeConfigError(
+    `任务建议模型输出不是有效的任务候选 JSON: ${JSON.stringify(unfenced.slice(0, 500))}`,
+  );
+}
+
+function classifierUsesNativeStructuredOutput(cfg: AgentConfig): boolean {
+  return !cfg.baseUrl.trim();
+}
+
+function existingTaskPrompt(
+  tasks: PlcTaskSuggestionInput['existingTasks'],
+): string {
+  if (!tasks.length) return '（当前还没有已存在的任务）';
+  return tasks.map((task) => {
+    const period = task.periodMs === undefined ? task.type : `${task.periodMs}ms`;
+    return `- ${task.name}: ${period}, 已绑定 ${task.programCount} 个 PROGRAM`;
+  }).join('\n');
+}
+
+export async function suggestPlcTaskOptions(
+  cfg: AgentConfig,
+  input: PlcTaskSuggestionInput,
+  signal?: AbortSignal,
+): Promise<readonly PlcTaskSuggestion[]> {
+  const adapter = buildModelAdapter(cfg, 'plc_task_suggester');
+  const nativeStructuredOutput = classifierUsesNativeStructuredOutput(cfg);
+  const taskContext = input.stContent.trim().slice(0, 12_000);
+  const userRequest = input.userRequest?.trim() || '（未提供原始用户需求，请结合 PROGRAM 名和 ST 内容判断）';
+  const prompt =
+    '用户正在生成一个 IEC 61131-3 ST PROGRAM，需要决定新建 PLC 周期任务。' +
+    '你只负责推荐“新建任务”的候选，不要修改已有任务，也不要推荐绑定已有任务。' +
+    '请根据用户需求、PROGRAM 名和 ST 内容，给出 2 到 4 个有差异的任务名与周期组合。' +
+    '任务名必须是合法 IEC 标识符，只能使用英文字母、数字和下划线，且不能以数字开头；' +
+    '任务名应体现业务语义，例如 PressureControlTask、TemperatureMonitorTask。' +
+    '周期必须是正整数毫秒，优先使用常见的 5、10、20、50、100、200、500、1000ms 等值。' +
+    '不要输出 priority、cpuCore 或 resource 字段，这些由程序使用默认值处理。' +
+    '不要把已有任务名称原样作为新任务名；不要输出 markdown 或额外解释。' +
+    (nativeStructuredOutput
+      ? '必须严格返回 schema。'
+      : '必须只返回一个 JSON 对象，格式为 {"suggestions":[{"taskName":"...","periodMs":20,"reason":"..."}]}。') +
+    `\n\n用户原始需求:\n${userRequest}` +
+    `\n\nPROGRAM: ${input.programName}` +
+    `\n\n源文件: ${input.source}` +
+    `\n\n已有任务:\n${existingTaskPrompt(input.existingTasks)}` +
+    `\n\nST 内容:\n${taskContext}`;
+
+  agentLog(
+    `[plc-task] suggest start model=${cfg.model} provider=${adapter.provider} ` +
+      `apiFormat=${adapter.apiFormat} program=${input.programName}`,
+  );
+  const instructions =
+    '你是 PLC 任务周期建议器，只负责推荐“新建任务”的候选。' +
+    '不要修改已有任务，也不要推荐绑定已有任务。' +
+    '任务名必须是合法 IEC 标识符，只能使用英文字母、数字和下划线，且不能以数字开头；' +
+    '任务名应体现业务语义。周期必须是正整数毫秒，优先使用常见周期。' +
+    '不要输出 priority、cpuCore 或 resource 字段。不要输出 markdown 或额外解释。' +
+    (nativeStructuredOutput
+      ? '必须严格返回 schema。'
+      : '必须只返回一个 JSON 对象，格式为 {"suggestions":[{"taskName":"...","periodMs":20,"reason":"..."}]}。');
+  const agent = new Agent({
+    name: 'PLC 任务周期建议器',
+    model: adapter.model,
+    instructions,
+    ...(nativeStructuredOutput ? { outputType: plcTaskSuggestionSchema } : {}),
+  });
+  const tracingDisabled = !(
+    adapter.provider === 'openai' &&
+    adapter.apiFormat === 'responses' &&
+    !cfg.baseUrl.trim()
+  );
+  try {
+    const result = await new Runner({ tracingDisabled }).run(agent, prompt, {
+      stream: false,
+      maxTurns: 1,
+      signal,
+    });
+    const suggestions = nativeStructuredOutput
+      ? plcTaskSuggestionSchema.parse(result.finalOutput).suggestions
+      : parseTaskSuggestionOutput(result.finalOutput);
+    agentLog(`[plc-task] suggest success count=${suggestions.length}`);
+    return suggestions;
+  } catch (error) {
+    agentLog(
+      `[plc-task] suggest failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw error;
+  }
+}
+
 function parseCustomSelection(
   text: string | undefined,
   fallback: Extract<Selection, { action: 'create_config' | 'create_task' }>,
@@ -219,6 +396,49 @@ function parseCustomSelection(
     priority: priority ? Number(priority) : fallback.priority,
     cpuCore: cpuCore ? Number(cpuCore) : fallback.cpuCore,
   };
+}
+
+function defaultTaskSuggestions(
+  programName: string,
+  config: PlcRuntimeConfig | undefined,
+): PlcTaskSuggestion[] {
+  const taskName = uniqueName(`${programName}Task`, allTaskNames(config));
+  return [20, 100, 1000].map((periodMs) => ({
+    taskName,
+    periodMs,
+    reason: '常用周期候选，可按控制响应速度选择。',
+  }));
+}
+
+function normalizeTaskSuggestions(
+  suggestions: readonly PlcTaskSuggestion[],
+  config: PlcRuntimeConfig | undefined,
+): PlcTaskSuggestion[] {
+  const existing = allTaskNames(config);
+  const normalized: PlcTaskSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const suggestion of suggestions) {
+    const taskName = suggestion.taskName.trim();
+    const periodMs = suggestion.periodMs;
+    if (
+      !IEC_IDENTIFIER.test(taskName) ||
+      !Number.isInteger(periodMs) ||
+      periodMs <= 0 ||
+      periodMs > 86_400_000
+    ) {
+      continue;
+    }
+    const uniqueTaskName = uniqueName(taskName, existing);
+    const key = `${uniqueTaskName.toLocaleUpperCase()}:${periodMs}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({
+      taskName: uniqueTaskName,
+      periodMs,
+      ...(suggestion.reason?.trim() ? { reason: suggestion.reason.trim() } : {}),
+    });
+  }
+  return normalized.slice(0, 4);
 }
 
 function createProgramBinding(
@@ -319,23 +539,61 @@ function applySelection(
   };
 }
 
-function optionsForState(
+async function optionsForState(
   state: PlcRuntimeConfigState,
   programName: string,
-): {
+  syncOptions: PreparePlcRuntimeConfigSyncOptions,
+): Promise<{
   options: PlcClarificationOption[];
   createFallback: Extract<Selection, { action: 'create_config' | 'create_task' }>;
-} {
+}> {
   const config = state.status === 'ready' ? state.config : undefined;
   const resource = firstResource(config);
   const createAction = state.status === 'ready' ? 'create_task' : 'create_config';
-  const taskName = uniqueName('MainTask', allTaskNames(config));
+  const fallbackSuggestions = defaultTaskSuggestions(programName, config);
+  const existingTasks = config?.configuration.resources.flatMap((candidateResource) =>
+    candidateResource.tasks.map((task) => ({
+      name: task.name,
+      type: task.type,
+      periodMs: task.periodMs,
+      programCount: task.programs.length,
+    })),
+  ) ?? [];
+  const suggestionProvider = syncOptions.taskSuggestionProvider ??
+    (syncOptions.modelConfig
+      ? (input: PlcTaskSuggestionInput, signal?: AbortSignal) =>
+          suggestPlcTaskOptions(syncOptions.modelConfig!, input, signal)
+      : undefined);
+  let suggestions = fallbackSuggestions;
+  if (suggestionProvider) {
+    try {
+      const modelSuggestions = await suggestionProvider({
+        userRequest: syncOptions.userRequest,
+        programName,
+        source: syncOptions.source,
+        stContent: syncOptions.content,
+        existingTasks,
+      }, syncOptions.signal);
+      suggestions = normalizeTaskSuggestions(modelSuggestions, config);
+      if (!suggestions.length) {
+        agentLog('[plc-task] no valid model suggestions; using default candidates');
+        suggestions = fallbackSuggestions;
+      }
+    } catch (error) {
+      if (syncOptions.signal?.aborted) throw error;
+      agentLog(
+        `[plc-task] using default candidates after suggestion failure: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  const firstSuggestion = suggestions[0] ?? fallbackSuggestions[0];
   const createFallback = {
     action: createAction,
     resourceName: resource.name,
     target: resource.target,
-    taskName,
-    periodMs: 20,
+    taskName: firstSuggestion.taskName,
+    periodMs: firstSuggestion.periodMs,
     priority: 1,
     cpuCore: 1,
   } satisfies Extract<Selection, { action: 'create_config' | 'create_task' }>;
@@ -358,14 +616,22 @@ function optionsForState(
     }
   }
 
-  for (const periodMs of [20, 100, 1000]) {
+  for (const [index, suggestion] of suggestions.entries()) {
+    const defaultId = index < 3 &&
+      suggestion.taskName === fallbackSuggestions[0]?.taskName &&
+      suggestion.periodMs === fallbackSuggestions[index]?.periodMs
+      ? `create:${suggestion.periodMs}ms`
+      : `create:${suggestion.taskName}:${suggestion.periodMs}ms`;
     options.push({
-      id: `create:${periodMs}ms`,
-      label: `创建 ${taskName} · ${periodMs} ms`,
-      description: `资源 ${resource.name}，优先级 1，CPU 核心 1`,
+      id: defaultId,
+      label: `创建 ${suggestion.taskName} · ${suggestion.periodMs} ms`,
+      description: suggestion.reason
+        ? `${suggestion.reason} 资源 ${resource.name}`
+        : `资源 ${resource.name}`,
       value: selectionValue({
         ...createFallback,
-        periodMs,
+        taskName: suggestion.taskName,
+        periodMs: suggestion.periodMs,
       }),
     });
   }
@@ -409,7 +675,11 @@ export async function preparePlcRuntimeConfigSync(
     }
   }
 
-  const { options: choices, createFallback } = optionsForState(state, programName);
+  const { options: choices, createFallback } = await optionsForState(
+    state,
+    programName,
+    options,
+  );
   const response = await options.clarification.request({
     kind: 'plc_task_configuration',
     title: '任务组态确认',
@@ -417,7 +687,7 @@ export async function preparePlcRuntimeConfigSync(
     details: `源文件: ${source}。这只会更新 plc-runtime.json，不会向 ST 文件追加 CONFIGURATION。`,
     options: choices,
     allowCustom: true,
-    customPlaceholder: '例如: MainTask, 20ms, priority=1, cpu=1, resource=resource_MainTask',
+    customPlaceholder: '新建任务可填写: task=PressureControlTask, 20ms',
     required: true,
     metadata: {
       source,

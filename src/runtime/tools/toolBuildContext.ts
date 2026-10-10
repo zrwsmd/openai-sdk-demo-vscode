@@ -129,6 +129,8 @@ export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
 export interface ToolBuildContext {
   cfg: AgentConfig;
+  /** 当前轮用户原始需求，供领域工具生成上下文相关建议；不作为工具参数暴露给模型。 */
+  userText?: string;
   services: RuntimeServiceContainer;
   policy: ToolPolicy;
   plc: PlcAdapter;
@@ -321,6 +323,7 @@ function buildToolGuardrails(
 export function createToolBuildContext(
   cfg: AgentConfig,
   options: {
+    userText?: string;
     workflowContract?: WorkflowContract;
     workflow?: WorkflowRuntime;
     diagnosticReporter?: DiagnosticSideReporter;
@@ -416,6 +419,7 @@ export function createToolBuildContext(
 
   return {
     cfg,
+    userText: options.userText,
     services: cfg.services ?? EMPTY_RUNTIME_SERVICES,
     policy,
     plc,
