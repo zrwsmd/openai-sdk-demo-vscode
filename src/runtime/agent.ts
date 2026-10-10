@@ -1207,9 +1207,28 @@ export async function runAgent(
     return undefined;
   };
 
+  const isInvalidStructuredOutputText = (value: string): boolean => {
+    const trimmed = stripHistoricalContextMarker(value).trim();
+    if (!trimmed) return false;
+    const candidate = tryParseJsonLikeOutput(trimmed);
+    if (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      !Array.isArray(candidate)
+    ) {
+      return true;
+    }
+    return /^\s*(?:```(?:json)?\s*)?\{[\s\S]*\}(?:\s*```)?\s*$/i.test(trimmed);
+  };
+
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
+    const rawOutput = output.trim();
+    const usableModelMessage = rawOutput &&
+      !isInvalidStructuredOutputText(rawOutput)
+      ? rawOutput
+      : undefined;
     const message = authoritativeWorkflowMessage() ||
-      output.trim() ||
+      usableModelMessage ||
       fallbackRequiredToolMessage() ||
       fallbackDeliveryMessage();
     if (!message) return undefined;
@@ -1620,7 +1639,11 @@ export async function runAgent(
           );
         } else {
           finalizerRequired = true;
-          structuredOutput = coerceIndustrialAgentOutput(finalOutput);
+          structuredOutput =
+            typeof finalOutput === "string" &&
+            !isInvalidStructuredOutputText(finalOutput)
+              ? coerceIndustrialAgentOutput(finalOutput)
+              : undefined;
           if (!structuredOutput) {
             salvagedInvalidFinalOutput = true;
             agentLog(
@@ -1650,17 +1673,24 @@ export async function runAgent(
       output.trim()
     ) {
       finalizerRequired = true;
-      structuredOutput = coerceIndustrialAgentOutput(output) ?? {
-        message: stripHistoricalContextMarker(output),
-        diagnostics: [],
-        artifacts: [],
-        data: null,
-      };
-      structuredOutput = sanitizeAssistantOutput(structuredOutput);
-      output = structuredOutput.message;
-      agentLog(
-        "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
-      );
+      const invalidStructuredText = isInvalidStructuredOutputText(output);
+      if (!invalidStructuredText) {
+        structuredOutput = coerceIndustrialAgentOutput(output) ?? {
+          message: stripHistoricalContextMarker(output),
+          diagnostics: [],
+          artifacts: [],
+          data: null,
+        };
+        structuredOutput = sanitizeAssistantOutput(structuredOutput);
+        output = structuredOutput.message;
+        agentLog(
+          "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
+        );
+      } else {
+        agentLog(
+          "[output] 最终输出疑似非法结构化 JSON，不保留为正文，交给运行时根据工具账本完成验收",
+        );
+      }
     }
 
     if (cancelled) return "cancelled";
@@ -1961,7 +1991,9 @@ export async function runAgent(
       }
       if (!structuredOutput) {
         structuredOutput = synthesizeStructuredOutputFromEvidence();
-        if (structuredOutput) output = structuredOutput.message;
+        if (structuredOutput) {
+          output = structuredOutput.message;
+        }
       }
       if (!structuredOutput) {
         const fallbackMessage = fallbackRequiredToolMessage();

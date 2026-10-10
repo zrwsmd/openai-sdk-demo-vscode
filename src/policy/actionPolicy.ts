@@ -83,7 +83,7 @@ function looksLikeWorkspaceFileReference(text: string): boolean {
   const markedFilename =
     /[`'"“”‘’][^`'"“”‘’\s/\\]+\.[a-z0-9]{1,12}[`'"“”‘’]/iu;
   const commonFilename =
-    /(?:^|[\s,，。:：;；"'`“”‘’(（]|(?:到|为|在|把|将|向|从|给))[\w.-]+\.[a-z0-9]{1,12}\b/iu;
+    /(?:^|[\s,，。:：;；"'`“”‘’(（]|(?:到|为|在|把|将|向|从|给))[\p{L}\p{N}_-]+\.[a-z0-9]{1,12}\b/iu;
   return (
     explicitPath.test(text) ||
     markedFilename.test(text) ||
