@@ -173,15 +173,24 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - 按“网关地址 + API 路径格式 + 模型”记忆网关是否支持 `prompt_cache_options`，有界保留最多 64 项。
 - 同一网关能力在新的 fetch/client 实例之间复用，避免重复发送一次“带缓存参数失败，再无缓存重试”的探测请求。
 - 响应日志补充 `input`、`cached`、`write`、`hit` 和 `state`，区分 `hit`、`write`、`miss`、`unknown`。
+- 缓存统计兼容顶层和嵌套 usage 字段，覆盖 OpenAI/Anthropic 及兼容网关常见的
+  `cached_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`、
+  `prompt_cache_hit_tokens`、`prompt_cache_miss_tokens` 等别名；命中率优先按总输入量
+  计算，避免把“未缓存输入”和“缓存命中输入”混作分母。
 - 网关没有返回缓存明细时记录 `cache=unreported,state=unknown`，不把“未上报”误判为未命中。
+- 启用缓存选项的请求额外记录短哈希前缀指纹：
+  `prefix=<hash> full=<hash> toolset=<hash> tools=<n> messages=<n> prefixMessages=<n>`。
+  `prefix` 只包含稳定请求前缀和末条消息之前的消息，`full` 包含完整消息；日志不记录
+  原始提示词内容，可用于观察不同请求是否复用了相同前缀。
 - 不改变 Jev、Workflow、Delivery、工具筛选、审批和恢复链路。
 
 验证：
 
 - `npx tsc --noEmit`
 - `npm run compile`
-- `npm run test:generate; node scripts/sdk_foundation_test.mjs`
-- `npm run test:generate; node scripts/agent_kernel_test.mjs` 的 Prompt Cache 专项 `[0a]`、`[0aa]` 已通过；完整脚本在既有 `[9b]` schema 兜底场景失败，与本次缓存改动无关。
+- `npm run test:generate; node scripts/agent_kernel_test.mjs` 的 Prompt Cache 专项
+  `[0a]`、`[0aa]`、`[0ab]`、`[0ac]` 已通过，完整 Agent 内核回归通过。
+- `npm run test:batch` 全部通过。
 
 ### 6. 规划轻量化
 

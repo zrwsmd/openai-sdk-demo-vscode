@@ -2,6 +2,7 @@ import {
   OpenAIChatCompletionsModel,
 } from "@openai/agents";
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import type { AgentConfig, PromptCacheSettings } from "./agentConfig";
 import {
   createModelAdapter,
@@ -583,10 +584,52 @@ function collectNonStreamReasoningChars(message: JsonRecord): number {
   return stringLength(reasoning);
 }
 
-function finiteUsageNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? Math.trunc(value)
-    : 0;
+function finiteUsageNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && /^\d+(?:\.\d+)?$/u.test(value.trim())) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : undefined;
+  }
+  return undefined;
+}
+
+type UsageMetric = {
+  present: boolean;
+  value: number;
+};
+
+function usageMetricSources(usage: JsonRecord): JsonRecord[] {
+  const sources = [usage];
+  for (const key of [
+    "prompt_tokens_details",
+    "input_tokens_details",
+    "cache_details",
+    "cache_usage",
+    "prompt_cache",
+    "prompt_cache_details",
+  ]) {
+    const value = usage[key];
+    if (isJsonRecord(value)) sources.push(value);
+  }
+  return sources;
+}
+
+function readUsageMetric(
+  sources: readonly JsonRecord[],
+  keys: readonly string[],
+): UsageMetric {
+  let present = false;
+  for (const source of sources) {
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      present = true;
+      const value = finiteUsageNumber(source[key]);
+      if (value !== undefined) return { present: true, value };
+    }
+  }
+  return { present, value: 0 };
 }
 
 function cacheUsageSnapshot(usage: unknown): {
@@ -594,6 +637,7 @@ function cacheUsageSnapshot(usage: unknown): {
   inputTokens: number;
   cachedTokens: number;
   cacheWriteTokens: number;
+  totalInputTokens: number;
 } {
   if (!isJsonRecord(usage)) {
     return {
@@ -601,33 +645,57 @@ function cacheUsageSnapshot(usage: unknown): {
       inputTokens: 0,
       cachedTokens: 0,
       cacheWriteTokens: 0,
+      totalInputTokens: 0,
     };
   }
-  const inputTokens = finiteUsageNumber(usage.prompt_tokens ?? usage.input_tokens);
-  const details =
-    (isJsonRecord(usage.prompt_tokens_details)
-      ? usage.prompt_tokens_details
-      : undefined) ??
-    (isJsonRecord(usage.input_tokens_details)
-      ? usage.input_tokens_details
-      : undefined);
-  if (!details) {
-    return {
-      present: false,
-      inputTokens,
-      cachedTokens: 0,
-      cacheWriteTokens: 0,
-    };
-  }
+
+  const sources = usageMetricSources(usage);
+  const promptTokens = readUsageMetric([usage], ["prompt_tokens"]);
+  const inputTokensMetric = readUsageMetric([usage], ["input_tokens"]);
+  const cachedMetric = readUsageMetric(sources, [
+    "cache_read_input_tokens",
+    "cached_tokens",
+    "cache_read_tokens",
+    "prompt_cache_hit_tokens",
+  ]);
+  const uncachedMetric = readUsageMetric(sources, [
+    "prompt_cache_miss_tokens",
+    "cache_miss_tokens",
+    "uncached_tokens",
+  ]);
+  const cacheWriteMetric = readUsageMetric(sources, [
+    "cache_creation_input_tokens",
+    "cache_write_input_tokens",
+    "cache_creation_tokens",
+    "cache_write_tokens",
+    "prompt_cache_write_tokens",
+  ]);
+  const directAnthropicCacheFields = readUsageMetric([usage], [
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_write_input_tokens",
+  ]).present;
+  const inputTokens = promptTokens.present
+    ? promptTokens.value
+    : inputTokensMetric.present
+      ? inputTokensMetric.value
+      : uncachedMetric.value;
+  const totalInputTokens = promptTokens.present
+    ? promptTokens.value
+    : uncachedMetric.present
+      ? uncachedMetric.value + cachedMetric.value + cacheWriteMetric.value
+      : inputTokensMetric.present
+      ? directAnthropicCacheFields
+        ? inputTokensMetric.value + cachedMetric.value + cacheWriteMetric.value
+        : inputTokensMetric.value
+      : cachedMetric.value + cacheWriteMetric.value;
+
   return {
-    present: true,
+    present: cachedMetric.present || cacheWriteMetric.present || uncachedMetric.present,
     inputTokens,
-    cachedTokens: finiteUsageNumber(
-      details.cached_tokens ?? details.cache_read_tokens,
-    ),
-    cacheWriteTokens: finiteUsageNumber(
-      details.cache_write_tokens ?? details.cache_creation_tokens,
-    ),
+    cachedTokens: cachedMetric.value,
+    cacheWriteTokens: cacheWriteMetric.value,
+    totalInputTokens,
   };
 }
 
@@ -636,6 +704,7 @@ function cacheUsageState(snapshot: {
   inputTokens: number;
   cachedTokens: number;
   cacheWriteTokens: number;
+  totalInputTokens: number;
 }): "hit" | "write" | "miss" | "unknown" {
   if (!snapshot.present) return "unknown";
   if (snapshot.cachedTokens > 0) return "hit";
@@ -648,20 +717,107 @@ function formatCacheUsageSnapshot(snapshot: {
   inputTokens: number;
   cachedTokens: number;
   cacheWriteTokens: number;
+  totalInputTokens: number;
 }): string {
   if (!snapshot.present) return "cache=unreported,state=unknown";
-  const hitRate = snapshot.inputTokens > 0
-    ? `${((snapshot.cachedTokens / snapshot.inputTokens) * 100).toFixed(1)}%`
+  const denominator = snapshot.totalInputTokens > 0
+    ? snapshot.totalInputTokens
+    : snapshot.inputTokens;
+  const hitRate = denominator > 0
+    ? `${((snapshot.cachedTokens / denominator) * 100).toFixed(1)}%`
     : "-";
+  const totalSuffix = snapshot.totalInputTokens !== snapshot.inputTokens
+    ? `,total:${snapshot.totalInputTokens}`
+    : "";
   return (
     `cache=cached:${snapshot.cachedTokens},write:${snapshot.cacheWriteTokens}` +
-    `,input:${snapshot.inputTokens},hit:${hitRate},state=${cacheUsageState(snapshot)}`
+    `,input:${snapshot.inputTokens},hit:${hitRate},state=${cacheUsageState(snapshot)}` +
+    totalSuffix
   );
 }
 
 function cacheUsageSuffix(usage: unknown): string {
   const snapshot = cacheUsageSnapshot(usage);
   return snapshot.present ? ` ${formatCacheUsageSnapshot(snapshot)}` : "";
+}
+
+export interface PromptCacheFingerprint {
+  prefix: string;
+  full: string;
+  toolset: string;
+  tools: number;
+  messages: number;
+  prefixMessages: number;
+}
+
+function canonicalFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalFingerprintValue(item));
+  }
+  if (isJsonRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalFingerprintValue(value[key])]),
+    );
+  }
+  return value;
+}
+
+function fingerprintValue(value: unknown): string {
+  const serialized = JSON.stringify(canonicalFingerprintValue(value)) ?? "null";
+  return createHash("sha256").update(serialized, "utf8").digest("hex").slice(0, 12);
+}
+
+export function createPromptCacheFingerprint(body: unknown): PromptCacheFingerprint | undefined {
+  const text = requestBodyText(body);
+  if (text === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isJsonRecord(parsed)) return undefined;
+
+  const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
+  const system = parsed.system ?? parsed.instructions ?? null;
+  const messages = Array.isArray(parsed.messages)
+    ? parsed.messages
+    : Array.isArray(parsed.input)
+      ? parsed.input
+      : parsed.input === undefined
+        ? []
+        : [parsed.input];
+  const prefixMessages = messages.length > 0
+    ? messages.slice(0, -1)
+    : [];
+  const stablePrefix = { tools, system };
+
+  return {
+    prefix: fingerprintValue({
+      ...stablePrefix,
+      messages: prefixMessages,
+    }),
+    full: fingerprintValue({
+      ...stablePrefix,
+      messages,
+    }),
+    toolset: fingerprintValue(tools),
+    tools: tools.length,
+    messages: messages.length,
+    prefixMessages: prefixMessages.length,
+  };
+}
+
+export function formatPromptCacheFingerprint(
+  fingerprint: PromptCacheFingerprint,
+): string {
+  return (
+    `prefix=${fingerprint.prefix} full=${fingerprint.full}` +
+    ` toolset=${fingerprint.toolset} tools=${fingerprint.tools}` +
+    ` messages=${fingerprint.messages} prefixMessages=${fingerprint.prefixMessages}`
+  );
 }
 
 export function summarizeNonStreamChatCompletionResponse(
@@ -687,7 +843,11 @@ export function summarizeNonStreamChatCompletionResponse(
   }
 
   const errorLine = parsed.error ? JSON.stringify(parsed.error).slice(0, 300) : "";
-  const cacheSuffix = cacheUsageSuffix(parsed.usage);
+  const cacheSuffix = cacheUsageSuffix(
+    parsed.usage ??
+      (isJsonRecord(parsed.response) ? parsed.response.usage : undefined) ??
+      parsed.usage_metadata,
+  );
   const choice = Array.isArray(parsed.choices) && isJsonRecord(parsed.choices[0])
     ? parsed.choices[0]
     : undefined;
@@ -869,12 +1029,20 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       : cachePrepared.body !== init?.body
         ? { ...(init ?? {}), body: cachePrepared.body as RequestInit["body"] }
         : init;
+    let promptFingerprint = cachePrepared.applied
+      ? createPromptCacheFingerprint(requestInit?.body)
+      : undefined;
     if (sanitized.repaired > 0) {
       agentLog(
         `[req-sanitize] 已修复非法工具参数 count=${sanitized.repaired} tools=${sanitized.toolNames.join(",") || "?"}，已用 {} 继续请求`,
       );
     }
-    if (isChat) agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
+    if (isChat) {
+      agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
+      if (promptFingerprint) {
+        agentLog(`[prompt-cache] ${formatPromptCacheFingerprint(promptFingerprint)}`);
+      }
+    }
     if (cachePrepared.applied && promptCacheSupport !== "unknown") {
       agentLog(
         `[prompt-cache] 复用网关能力 route=${capabilityKey} state=${promptCacheSupport}`,
@@ -902,6 +1070,10 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
           body: fallbackBody as RequestInit["body"],
         };
         agentLog(`[req] ${summarizeOutgoing(fallbackBody)}`);
+        promptFingerprint = createPromptCacheFingerprint(fallbackBody);
+        if (promptFingerprint) {
+          agentLog(`[prompt-cache] ${formatPromptCacheFingerprint(promptFingerprint)}`);
+        }
         resp = await fetch(input as never, fallbackInit as never);
       }
     } else if (isOpenAIRequest && cachePrepared.applied && resp.ok) {
@@ -938,6 +1110,9 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
           nonStream.summary +
             (cacheAppliedForResponse && !nonStream.summary.includes(" cache=")
               ? " cache=unreported,state=unknown"
+              : "") +
+            (promptFingerprint
+              ? ` prefix=${promptFingerprint.prefix} full=${promptFingerprint.full}`
               : ""),
         );
         for (const [idx, call] of nonStream.toolArgs.entries()) {
@@ -961,6 +1136,7 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       let inputTokens = 0;
       let cachedTokens = 0;
       let cacheWriteTokens = 0;
+      let totalInputTokens = 0;
       const toolCallArgs = new Map<
         number,
         { id?: string; name?: string; args: string }
@@ -999,6 +1175,7 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
             inputTokens = Math.max(inputTokens, cache.inputTokens);
             cachedTokens = Math.max(cachedTokens, cache.cachedTokens);
             cacheWriteTokens = Math.max(cacheWriteTokens, cache.cacheWriteTokens);
+            totalInputTokens = Math.max(totalInputTokens, cache.totalInputTokens);
           }
           const c = j.choices?.[0];
           if (c?.finish_reason) finish = c.finish_reason;
@@ -1032,11 +1209,15 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
                   inputTokens,
                   cachedTokens,
                   cacheWriteTokens,
+                  totalInputTokens,
                 })}`
               : cacheAppliedForResponse
                 ? " cache=unreported,state=unknown"
                 : ""
           }` +
+          (promptFingerprint
+            ? ` prefix=${promptFingerprint.prefix} full=${promptFingerprint.full}`
+            : "") +
           `${errorLine ? " ERROR=" + errorLine : ""}`,
       );
       if (toolCallArgs.size > 0) {

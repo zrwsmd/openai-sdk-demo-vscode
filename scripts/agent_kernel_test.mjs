@@ -17,6 +17,7 @@ import {
   normalizeWorkflowContract,
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
+  createPromptCacheFingerprint,
   projectNewTurnSessionHistory,
   createHistoricalToolArgumentGuard,
   createNewTurnModelInputSession,
@@ -186,6 +187,133 @@ setAgentLogger((line) => diagLines.push(line));
     throw new Error(`显式关闭 Prompt Cache 仍被注入: ${JSON.stringify(requestBody)}`);
   }
   console.log('[0ab] Prompt Cache 显式关闭:通过');
+}
+
+// [0ac] 兼容不同网关的缓存 usage 字段，并观测实际请求前缀是否稳定。
+{
+  const originalFetch = globalThis.fetch;
+  const diagnosticsStart = diagLines.length;
+  let callCount = 0;
+  const baseBody = {
+    model: 'compat-cache-model',
+    stream: false,
+    tools: [{
+      type: 'function',
+      function: { name: 'read_file', description: 'read a file', parameters: {} },
+    }],
+    messages: [
+      { role: 'system', content: 'stable system' },
+      { role: 'user', content: 'first question' },
+    ],
+  };
+  globalThis.fetch = async (_input, init = {}) => {
+    callCount += 1;
+    const body = JSON.parse(init.body);
+    const usage = callCount === 1
+      ? { prompt_cache_miss_tokens: 40, prompt_cache_hit_tokens: 60 }
+      : callCount === 2
+        ? { input_tokens: 100, cache_creation_input_tokens: 100 }
+        : callCount === 3
+          ? { prompt_tokens: 80, prompt_tokens_details: { cached_tokens: 20 } }
+          : { input_tokens: 25, cache_read_input_tokens: 75 };
+    if (body.stream === true) {
+      const chunks = [
+        {
+          choices: [{ delta: { content: 'ok' }, finish_reason: null }],
+          usage,
+        },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage,
+        },
+        '[DONE]',
+      ];
+      return new Response(
+        chunks
+          .map((chunk) => `data: ${typeof chunk === 'string' ? chunk : JSON.stringify(chunk)}\n\n`)
+          .join(''),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        }],
+        usage,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const fetcher = makeLoggingFetch({
+      promptCache: { enabled: true, ttl: '30m' },
+    });
+    for (const body of [
+      baseBody,
+      baseBody,
+      { ...baseBody, messages: [...baseBody.messages.slice(0, 1), { role: 'user', content: 'second question' }] },
+    ]) {
+      const response = await fetcher(
+        'https://prompt-cache-observation.test/v1/chat/completions',
+        { method: 'POST', body: JSON.stringify(body) },
+      );
+      await response.text();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const streamResponse = await fetcher(
+      'https://prompt-cache-observation.test/v1/chat/completions',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ...baseBody,
+          stream: true,
+          messages: [...baseBody.messages.slice(0, 1), { role: 'user', content: 'stream question' }],
+        }),
+      },
+    );
+    await streamResponse.text();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const cacheLines = diagLines.slice(diagnosticsStart);
+  const fingerprintLines = cacheLines.filter((line) => line.includes('[prompt-cache] prefix='));
+  const fingerprints = fingerprintLines.map((line) => {
+    const match = line.match(/prefix=([0-9a-f]{12}) full=([0-9a-f]{12})/u);
+    return match ? { prefix: match[1], full: match[2] } : undefined;
+  }).filter(Boolean);
+  const first = createPromptCacheFingerprint(JSON.stringify({
+    ...baseBody,
+    stream: false,
+  }));
+  const second = createPromptCacheFingerprint(JSON.stringify({
+    ...baseBody,
+    stream: false,
+    messages: [...baseBody.messages.slice(0, 1), { role: 'user', content: 'second question' }],
+  }));
+  if (
+    callCount !== 4 ||
+    !cacheLines.some((line) =>
+      line.includes('cache=cached:60,write:0,input:40,hit:60.0%,state=hit,total:100'),
+    ) ||
+    !cacheLines.some((line) =>
+      line.includes('cache=cached:0,write:100,input:100,hit:0.0%,state=write,total:200'),
+    ) ||
+    !cacheLines.some((line) => line.includes('cache=cached:20,write:0,input:80,hit:25.0%,state=hit')) ||
+    !cacheLines.some((line) =>
+      line.includes('cache=cached:75,write:0,input:25,hit:75.0%,state=hit,total:100'),
+    ) ||
+    fingerprints.length < 4 ||
+    !first ||
+    !second ||
+    first.prefix !== second.prefix ||
+    first.full === second.full
+  ) {
+    throw new Error(`Prompt Cache 统计或前缀指纹观测失败: ${JSON.stringify({ callCount, cacheLines, fingerprints, first, second })}`);
+  }
+  console.log('[0ac] Prompt Cache 统计兼容与前缀指纹:通过');
 }
 
 // [0] 出站请求边界:任意工具产生空参数、非法 JSON 或非对象参数时,

@@ -133,6 +133,8 @@ export {
   EmptyGatewayResponseError,
   GatewayGuardedModel,
   makeLoggingFetch,
+  createPromptCacheFingerprint,
+  formatPromptCacheFingerprint,
   sanitizeChatCompletionRequestBody,
   setAgentLogger,
   summarizeNonStreamChatCompletionResponse,
