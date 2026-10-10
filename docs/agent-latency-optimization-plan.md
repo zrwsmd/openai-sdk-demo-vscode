@@ -231,9 +231,12 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 
 实现：
 
-- 将基础规则、当前工具说明、模式级固定规则和上下文边界放到动态 marker 之前。
-- 将通用计划内容、Team 计划、交付契约详情、Workflow 状态和恢复/验收提醒放到 marker
-  之后；这些内容仍然完整发送，没有删除 Jev、Workflow、Delivery、审批或恢复信息。
+- 将基础规则、当前工具说明和模式级固定规则放到动态 marker 之前。
+- 将新任务/恢复任务的上下文边界、通用计划内容、Team 计划、交付契约详情、Workflow
+  状态和恢复/验收提醒放到 marker 之后；这些内容仍然完整发送，没有删除 Jev、Workflow、
+  Delivery、审批或恢复信息。
+- 上下文边界说明会随 `isolateHistoricalToolChain` 在新任务和恢复任务之间切换，因此归入
+  动态段，避免澄清回复导致稳定前缀整体失效。
 - 请求日志新增 `system`、`systemPrefix`、`systemDynamic` 三个短指纹，用于区分固定系统
   前缀和随本轮变化的动态尾部；不记录原文。
 - 旧的 `prefix/full` 指纹继续保留，用于观察完整消息历史变化和网关实际命中情况。

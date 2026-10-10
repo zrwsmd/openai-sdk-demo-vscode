@@ -575,18 +575,18 @@ export async function runAgent(
         ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
         : "")
     : "";
-  const workflowDynamicInstructions =
-    workflowRuntime && !options.deliveryContract?.requiresDeliverable
-      ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
-      : "";
-  const stableInstructions =
-    stableExecutionInstructions +
-    contextBoundaryInstructions +
-    deliveryStableInstructions;
-  const dynamicInstructions =
-    dynamicExecutionInstructions +
-    deliveryDynamicInstructions +
-    workflowDynamicInstructions;
+   const workflowDynamicInstructions =
+     workflowRuntime && !options.deliveryContract?.requiresDeliverable
+       ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
+       : "";
+   const stableInstructions =
+     stableExecutionInstructions +
+     deliveryStableInstructions;
+   const dynamicInstructions =
+     contextBoundaryInstructions +
+     dynamicExecutionInstructions +
+     deliveryDynamicInstructions +
+     workflowDynamicInstructions;
   let runtimeCompletionRepairInstruction = "";
   let runtimeActionReminderInstruction = "";
   const buildAgent = (forcedTool?: string) => {
