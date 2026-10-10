@@ -591,12 +591,19 @@ function finiteUsageNumber(value: unknown): number {
 
 function cacheUsageSnapshot(usage: unknown): {
   present: boolean;
+  inputTokens: number;
   cachedTokens: number;
   cacheWriteTokens: number;
 } {
   if (!isJsonRecord(usage)) {
-    return { present: false, cachedTokens: 0, cacheWriteTokens: 0 };
+    return {
+      present: false,
+      inputTokens: 0,
+      cachedTokens: 0,
+      cacheWriteTokens: 0,
+    };
   }
+  const inputTokens = finiteUsageNumber(usage.prompt_tokens ?? usage.input_tokens);
   const details =
     (isJsonRecord(usage.prompt_tokens_details)
       ? usage.prompt_tokens_details
@@ -605,10 +612,16 @@ function cacheUsageSnapshot(usage: unknown): {
       ? usage.input_tokens_details
       : undefined);
   if (!details) {
-    return { present: false, cachedTokens: 0, cacheWriteTokens: 0 };
+    return {
+      present: false,
+      inputTokens,
+      cachedTokens: 0,
+      cacheWriteTokens: 0,
+    };
   }
   return {
     present: true,
+    inputTokens,
     cachedTokens: finiteUsageNumber(
       details.cached_tokens ?? details.cache_read_tokens,
     ),
@@ -618,11 +631,37 @@ function cacheUsageSnapshot(usage: unknown): {
   };
 }
 
+function cacheUsageState(snapshot: {
+  present: boolean;
+  inputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+}): "hit" | "write" | "miss" | "unknown" {
+  if (!snapshot.present) return "unknown";
+  if (snapshot.cachedTokens > 0) return "hit";
+  if (snapshot.cacheWriteTokens > 0) return "write";
+  return "miss";
+}
+
+function formatCacheUsageSnapshot(snapshot: {
+  present: boolean;
+  inputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+}): string {
+  if (!snapshot.present) return "cache=unreported,state=unknown";
+  const hitRate = snapshot.inputTokens > 0
+    ? `${((snapshot.cachedTokens / snapshot.inputTokens) * 100).toFixed(1)}%`
+    : "-";
+  return (
+    `cache=cached:${snapshot.cachedTokens},write:${snapshot.cacheWriteTokens}` +
+    `,input:${snapshot.inputTokens},hit:${hitRate},state=${cacheUsageState(snapshot)}`
+  );
+}
+
 function cacheUsageSuffix(usage: unknown): string {
   const snapshot = cacheUsageSnapshot(usage);
-  return snapshot.present
-    ? ` cache=cached:${snapshot.cachedTokens},write:${snapshot.cacheWriteTokens}`
-    : "";
+  return snapshot.present ? ` ${formatCacheUsageSnapshot(snapshot)}` : "";
 }
 
 export function summarizeNonStreamChatCompletionResponse(
@@ -694,6 +733,57 @@ export function summarizeNonStreamChatCompletionResponse(
 
 type PromptCacheSupport = "unknown" | "supported" | "unsupported";
 
+const PROMPT_CACHE_CAPABILITY_CACHE_LIMIT = 64;
+const promptCacheCapabilityCache = new Map<string, PromptCacheSupport>();
+
+function promptCacheCapabilityKey(input: string | URL, body: unknown): string {
+  const url = String(input);
+  const route = url.includes("/responses") ? "responses" : "chat_completions";
+  let gateway = url;
+  try {
+    const parsedUrl = new URL(url);
+    const endpoint = route === "responses" ? "/responses" : "/chat/completions";
+    const endpointIndex = parsedUrl.pathname.lastIndexOf(endpoint);
+    const basePath = endpointIndex >= 0
+      ? parsedUrl.pathname.slice(0, endpointIndex)
+      : parsedUrl.pathname;
+    gateway = `${parsedUrl.origin}${basePath}`;
+  } catch {
+    gateway = url.replace(/\/(?:chat\/completions|responses)\/?$/, "");
+  }
+
+  let model = "?";
+  const text = requestBodyText(body);
+  if (text !== undefined) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (isJsonRecord(parsed) && typeof parsed.model === "string" && parsed.model.trim()) {
+        model = parsed.model.trim();
+      }
+    } catch {
+      /* 能力 key 不应阻断真实请求 */
+    }
+  }
+  return `${gateway}|${route}|${model}`;
+}
+
+function rememberedPromptCacheSupport(key: string): PromptCacheSupport {
+  return promptCacheCapabilityCache.get(key) ?? "unknown";
+}
+
+function rememberPromptCacheSupport(
+  key: string,
+  support: PromptCacheSupport,
+): void {
+  promptCacheCapabilityCache.delete(key);
+  promptCacheCapabilityCache.set(key, support);
+  while (promptCacheCapabilityCache.size > PROMPT_CACHE_CAPABILITY_CACHE_LIMIT) {
+    const oldest = promptCacheCapabilityCache.keys().next().value;
+    if (typeof oldest !== "string") break;
+    promptCacheCapabilityCache.delete(oldest);
+  }
+}
+
 interface LoggingFetchOptions {
   promptCache?: PromptCacheSettings;
 }
@@ -764,11 +854,12 @@ function isPromptCacheConflictResponse(
 }
 
 export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
-  let promptCacheSupport: PromptCacheSupport = "unknown";
   return async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const isChat = url.includes("/chat/completions");
     const isOpenAIRequest = isChat || url.includes("/responses");
+    const capabilityKey = promptCacheCapabilityKey(input, init?.body);
+    let promptCacheSupport = rememberedPromptCacheSupport(capabilityKey);
     const cachePrepared = isOpenAIRequest && promptCacheSupport !== "unsupported"
       ? injectPromptCacheOptions(init?.body, options.promptCache)
       : { body: init?.body, applied: false };
@@ -784,7 +875,13 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       );
     }
     if (isChat) agentLog(`[req] ${summarizeOutgoing(requestInit?.body)}`);
+    if (cachePrepared.applied && promptCacheSupport !== "unknown") {
+      agentLog(
+        `[prompt-cache] 复用网关能力 route=${capabilityKey} state=${promptCacheSupport}`,
+      );
+    }
     let resp = await fetch(input as never, requestInit as never);
+    let cacheAppliedForResponse = cachePrepared.applied;
     if (
       isOpenAIRequest &&
       cachePrepared.applied &&
@@ -794,6 +891,8 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       const errorText = await resp.clone().text().catch(() => "");
       if (isPromptCacheConflictResponse(resp.status, errorText)) {
         promptCacheSupport = "unsupported";
+        rememberPromptCacheSupport(capabilityKey, promptCacheSupport);
+        cacheAppliedForResponse = false;
         agentLog(
           `[prompt-cache] 网关不支持 prompt_cache_options，status=${resp.status}，本次及后续请求自动关闭并重试`,
         );
@@ -806,8 +905,11 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
         resp = await fetch(input as never, fallbackInit as never);
       }
     } else if (isOpenAIRequest && cachePrepared.applied && resp.ok) {
-      promptCacheSupport = "supported";
-      agentLog("[prompt-cache] 网关已接受 prompt_cache_options");
+      if (promptCacheSupport !== "supported") {
+        promptCacheSupport = "supported";
+        rememberPromptCacheSupport(capabilityKey, promptCacheSupport);
+        agentLog("[prompt-cache] 网关已接受 prompt_cache_options");
+      }
     }
     if (!isChat || !resp.body) return resp;
     const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
@@ -832,7 +934,12 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       const looksLikeSse = trimmed.startsWith("data:") || trimmed.includes("\ndata:") || contentType.includes("text/event-stream");
       if (!requestUsesStream || (looksLikeJsonObject && !looksLikeSse)) {
         const nonStream = summarizeNonStreamChatCompletionResponse(resp.status, text);
-        agentLog(nonStream.summary);
+        agentLog(
+          nonStream.summary +
+            (cacheAppliedForResponse && !nonStream.summary.includes(" cache=")
+              ? " cache=unreported,state=unknown"
+              : ""),
+        );
         for (const [idx, call] of nonStream.toolArgs.entries()) {
           const snippet =
             call.args.length > 500 ? call.args.slice(0, 500) + "…" : call.args;
@@ -851,6 +958,7 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       let finish = "-";
       let errorLine = "";
       let cacheUsageSeen = false;
+      let inputTokens = 0;
       let cachedTokens = 0;
       let cacheWriteTokens = 0;
       const toolCallArgs = new Map<
@@ -888,6 +996,7 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
           const cache = cacheUsageSnapshot(j.usage ?? j.response?.usage);
           if (cache.present) {
             cacheUsageSeen = true;
+            inputTokens = Math.max(inputTokens, cache.inputTokens);
             cachedTokens = Math.max(cachedTokens, cache.cachedTokens);
             cacheWriteTokens = Math.max(cacheWriteTokens, cache.cacheWriteTokens);
           }
@@ -916,7 +1025,18 @@ export function makeLoggingFetch(options: LoggingFetchOptions = {}): unknown {
       }
       agentLog(
         `[resp] HTTP ${resp.status} 正文=${contentChars}字符 推理=${reasoningChars}字符 工具增量=${toolCallDeltas} finish=${finish}` +
-          `${cacheUsageSeen ? ` cache=cached:${cachedTokens},write:${cacheWriteTokens}` : ""}` +
+          `${
+            cacheUsageSeen
+              ? ` ${formatCacheUsageSnapshot({
+                  present: true,
+                  inputTokens,
+                  cachedTokens,
+                  cacheWriteTokens,
+                })}`
+              : cacheAppliedForResponse
+                ? " cache=unreported,state=unknown"
+                : ""
+          }` +
           `${errorLine ? " ERROR=" + errorLine : ""}`,
       );
       if (toolCallArgs.size > 0) {

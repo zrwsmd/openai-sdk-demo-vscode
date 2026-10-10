@@ -162,6 +162,26 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - `scripts/tool_catalog_test.mjs`
 - `npm run test:workflow`
 
+### 5.1 Prompt Cache 观测与网关能力记忆
+
+状态：已完成第一阶段。
+
+实现：
+
+- 保持 Prompt Cache 默认关闭，并继续只对主 Agent 的 OpenAI 兼容请求注入缓存选项。
+- 按“网关地址 + API 路径格式 + 模型”记忆网关是否支持 `prompt_cache_options`，有界保留最多 64 项。
+- 同一网关能力在新的 fetch/client 实例之间复用，避免重复发送一次“带缓存参数失败，再无缓存重试”的探测请求。
+- 响应日志补充 `input`、`cached`、`write`、`hit` 和 `state`，区分 `hit`、`write`、`miss`、`unknown`。
+- 网关没有返回缓存明细时记录 `cache=unreported,state=unknown`，不把“未上报”误判为未命中。
+- 不改变 Jev、Workflow、Delivery、工具筛选、审批和恢复链路。
+
+验证：
+
+- `npx tsc --noEmit`
+- `npm run compile`
+- `npm run test:generate; node scripts/sdk_foundation_test.mjs`
+- `npm run test:generate; node scripts/agent_kernel_test.mjs` 的 Prompt Cache 专项 `[0a]`、`[0aa]` 已通过；完整脚本在既有 `[9b]` schema 兜底场景失败，与本次缓存改动无关。
+
 ### 6. 规划轻量化
 
 目标：减少 Plan 规划对首响应的阻塞，同时保留复杂任务规划能力。

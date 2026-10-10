@@ -51,7 +51,10 @@ setAgentLogger((line) => diagLines.push(line));
           finish_reason: 'stop',
           message: { role: 'assistant', content: 'ok' },
         }],
-        usage: { prompt_tokens_details: { cached_tokens: 12 } },
+        usage: {
+          prompt_tokens: 100,
+          prompt_tokens_details: { cached_tokens: 12 },
+        },
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
@@ -81,11 +84,67 @@ setAgentLogger((line) => diagLines.push(line));
     requests[0]?.prompt_cache_options?.ttl !== '30m' ||
     retryBody.prompt_cache_options !== undefined ||
     !cacheLines.some((line) => line.includes('网关不支持 prompt_cache_options')) ||
-    !cacheLines.some((line) => line.includes('cache=cached:12'))
+    !cacheLines.some((line) => line.includes('cache=cached:12,write:0,input:100,hit:12.0%,state=hit'))
   ) {
     throw new Error(`Prompt Cache 网关回退失败: ${JSON.stringify({ callCount, requests, cacheLines })}`);
   }
   console.log('[0a] Prompt Cache 不兼容回退与命中日志:通过');
+}
+
+// [0aa] 网关能力在新的 fetch/client 实例之间复用,避免同一网关和模型重复探测。
+{
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const diagnosticsStart = diagLines.length;
+  globalThis.fetch = async (_input, init = {}) => {
+    requests.push(JSON.parse(init.body));
+    return new Response(
+      JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        }],
+        usage: {
+          prompt_tokens: 120,
+          prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 120 },
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const url = 'https://prompt-cache-capability.test/v1/chat/completions';
+    const body = {
+      model: 'capability-model',
+      stream: false,
+      messages: [{ role: 'user', content: 'hello' }],
+    };
+    for (const fetcher of [
+      makeLoggingFetch({ promptCache: { enabled: true, ttl: '30m' } }),
+      makeLoggingFetch({ promptCache: { enabled: true, ttl: '30m' } }),
+    ]) {
+      const response = await fetcher(url, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      await response.text();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const capabilityLines = diagLines.slice(diagnosticsStart);
+  const accepted = capabilityLines.filter((line) => line.includes('网关已接受 prompt_cache_options'));
+  const reused = capabilityLines.filter((line) => line.includes('复用网关能力'));
+  if (
+    requests.length !== 2 ||
+    requests.some((request) => request.prompt_cache_options?.ttl !== '30m') ||
+    accepted.length !== 1 ||
+    reused.length !== 1
+  ) {
+    throw new Error(`Prompt Cache 能力记忆失败: ${JSON.stringify({ requests, accepted, reused })}`);
+  }
+  console.log('[0aa] Prompt Cache 能力记忆:通过');
 }
 
 // [0] 出站请求边界:任意工具产生空参数、非法 JSON 或非对象参数时,
