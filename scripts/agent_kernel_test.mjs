@@ -18,6 +18,7 @@ import {
   sanitizeChatCompletionRequestBody,
   summarizeNonStreamChatCompletionResponse,
   createPromptCacheFingerprint,
+  PROMPT_CACHE_DYNAMIC_MARKER,
   projectNewTurnSessionHistory,
   createHistoricalToolArgumentGuard,
   createNewTurnModelInputSession,
@@ -293,6 +294,26 @@ setAgentLogger((line) => diagLines.push(line));
     stream: false,
     messages: [...baseBody.messages.slice(0, 1), { role: 'user', content: 'second question' }],
   }));
+  const layeredFirst = createPromptCacheFingerprint(JSON.stringify({
+    ...baseBody,
+    messages: [{
+      role: 'system',
+      content: `stable rules${PROMPT_CACHE_DYNAMIC_MARKER}dynamic one`,
+    }, {
+      role: 'user',
+      content: 'same request',
+    }],
+  }));
+  const layeredSecond = createPromptCacheFingerprint(JSON.stringify({
+    ...baseBody,
+    messages: [{
+      role: 'system',
+      content: `stable rules${PROMPT_CACHE_DYNAMIC_MARKER}dynamic two`,
+    }, {
+      role: 'user',
+      content: 'same request',
+    }],
+  }));
   if (
     callCount !== 4 ||
     !cacheLines.some((line) =>
@@ -309,9 +330,21 @@ setAgentLogger((line) => diagLines.push(line));
     !first ||
     !second ||
     first.prefix !== second.prefix ||
-    first.full === second.full
+    first.full === second.full ||
+    !layeredFirst ||
+    !layeredSecond ||
+    layeredFirst.systemPrefix !== layeredSecond.systemPrefix ||
+    layeredFirst.systemDynamic === layeredSecond.systemDynamic
   ) {
-    throw new Error(`Prompt Cache 统计或前缀指纹观测失败: ${JSON.stringify({ callCount, cacheLines, fingerprints, first, second })}`);
+    throw new Error(`Prompt Cache 统计或前缀指纹观测失败: ${JSON.stringify({
+      callCount,
+      cacheLines,
+      fingerprints,
+      first,
+      second,
+      layeredFirst,
+      layeredSecond,
+    })}`);
   }
   console.log('[0ac] Prompt Cache 统计兼容与前缀指纹:通过');
 }

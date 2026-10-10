@@ -96,6 +96,7 @@ import {
   EmptyGatewayResponseError,
   GatewayGuardedModel,
   makeLoggingFetch,
+  PROMPT_CACHE_DYNAMIC_MARKER,
 } from "./modelGateway";
 import {
   coerceIndustrialAgentOutput,
@@ -135,6 +136,7 @@ export {
   makeLoggingFetch,
   createPromptCacheFingerprint,
   formatPromptCacheFingerprint,
+  PROMPT_CACHE_DYNAMIC_MARKER,
   sanitizeChatCompletionRequestBody,
   setAgentLogger,
   summarizeNonStreamChatCompletionResponse,
@@ -521,7 +523,7 @@ export async function runAgent(
     availableToolNameList,
     toolRegistry.getToolCatalog(),
   );
-  const executionInstructions = (
+  const stableExecutionInstructions = (
     activePlan
       ? BASE_AGENT_PROMPT +
         availableToolsPrompt +
@@ -532,39 +534,59 @@ export async function runAgent(
         "开始每一步前调用 report_plan_progress(stepId, started)。完成前必须检查本步骤的完成标准与真实工具回执或已确认输入是否一致，再调用 report_plan_progress(stepId, completed, verification)。" +
         "verification.evidence 必须具体说明观察到的证据；证据不足、工具失败或结果不符合标准时，填写 verdict=retry（继续修正）或 revise（换一种完成当前步骤的办法），并提供 issue 与 nextAction。" +
         "只有 verdict=passed 会推进步骤；收到未通过的工具回执后必须继续处理当前步骤，不能跳到下一步或给最终答复。" +
-        "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。计划如下：\n" +
-        renderTaskPlan(activePlan)
+        "前一步未完成时不得开始后一步；所有步骤完成前不得给出最终答复。"
       : options.teamTask
         ? BASE_AGENT_PROMPT +
           availableToolsPrompt +
           "\n\n" +
           GENERIC_PLAN_SYSTEM_PROMPT +
           "\n\n你是 Team 的 executor。只能在下列已审查计划范围内执行；仍必须遵守工具审批、工作区限制和真实工具回执。" +
-          "不要自行扩大目标或跳过验证条件。\n已审查计划：" + options.teamTask.planSummary +
-          "\n完成标准：" + (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
+          "不要自行扩大目标或跳过验证条件。"
         : workflowRuntime
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
-  ) + (isolateHistoricalToolChain
+  );
+  const dynamicExecutionInstructions = activePlan
+    ? "\n\n计划如下：\n" + renderTaskPlan(activePlan)
+    : options.teamTask
+      ? "\n\n已审查计划：" + options.teamTask.planSummary +
+        "\n完成标准：" +
+        (options.teamTask.verificationCriteria.join("；") || "结果满足用户请求且可由真实证据验证")
+      : "";
+  const contextBoundaryInstructions = isolateHistoricalToolChain
     ? NEW_TURN_CONTEXT_PROMPT
-    : "\n\n当前是同一任务的恢复执行。可以参考并继续使用该任务已有的工具回执，但不要引入无关任务的工具调用。");
-  const deliveryInstructions = options.deliveryContract?.requiresDeliverable
-    ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。\n" +
-      renderDeliveryContract(options.deliveryContract) +
+    : "\n\n当前是同一任务的恢复执行。可以参考并继续使用该任务已有的工具回执，但不要引入无关任务的工具调用。";
+  const deliveryStableInstructions = options.deliveryContract?.requiresDeliverable
+    ? "\n\n本轮存在运行时交付契约。你最终必须提供可验证交付证据,否则系统不会允许结束。" +
       "\n如果直接在聊天中交付代码、文档、报告、数据或文本,必须同时把完整交付内容放入最终输出 artifacts[].content；message 只做摘要或也可展示同一内容。" +
       "如果通过工具交付,必须等待对应工具成功回执。不能只承诺将要生成、将要写入或稍后继续。" +
       (workflowRuntime
-        ? workflowRuntime.instructions()
+        ? ""
         : "\n契约要求工作区落盘时，必须调用 write_file 写入当前工作区；只有 write_file 成功并完成回读校验后才能声称已保存。") +
       "契约列出的验证工具必须实际调用并依据成功回执完成；不要用文字描述代替工具调用。" +
       (requiresInlineFinalArtifact
         ? "\n本轮至少有一个交付物只能用 final_artifact 验收。优先调用 deliver_artifact 提交完整内容；也可以同时把内容放入最终 JSON 的 artifacts 数组。无论采用哪种方式，交付内容必须完整，不能只放摘要、计划或口头承诺。"
         : "")
     : "";
-  const workflowInstructions =
+  const deliveryDynamicInstructions = options.deliveryContract?.requiresDeliverable
+    ? "\n\n" +
+      renderDeliveryContract(options.deliveryContract) +
+      (workflowRuntime
+        ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
+        : "")
+    : "";
+  const workflowDynamicInstructions =
     workflowRuntime && !options.deliveryContract?.requiresDeliverable
       ? "\n\n当前 workflow 运行约束：" + workflowRuntime.instructions()
       : "";
+  const stableInstructions =
+    stableExecutionInstructions +
+    contextBoundaryInstructions +
+    deliveryStableInstructions;
+  const dynamicInstructions =
+    dynamicExecutionInstructions +
+    deliveryDynamicInstructions +
+    workflowDynamicInstructions;
   let runtimeCompletionRepairInstruction = "";
   let runtimeActionReminderInstruction = "";
   const buildAgent = (forcedTool?: string) => {
@@ -598,9 +620,9 @@ export async function runAgent(
       .filter(Boolean)
       .join("\n\n");
     const instructions =
-      executionInstructions +
-      deliveryInstructions +
-      workflowInstructions +
+      stableInstructions +
+      PROMPT_CACHE_DYNAMIC_MARKER +
+      dynamicInstructions +
       (runtimeInstructions ? `\n\n${runtimeInstructions}` : "");
     // The legacy native handoff team remains available for direct callers.
     // Coordinated V3 runs always provide teamTask and use this controlled

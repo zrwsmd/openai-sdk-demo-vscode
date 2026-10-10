@@ -216,6 +216,36 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
 - `npm run test:batch`
 - `npm run test:generate; node scripts/agent_kernel_test.mjs`
 
+### 5.3 稳定前缀分层与观测
+
+状态：已完成第一版。
+
+日志结论：
+
+- `st_dependency_map` 首轮是 `cache miss`，工具回执回喂后的第二轮达到
+  `cached:1024`、命中率 `70.6%`，说明第三方网关的缓存已经实际生效。
+- 工具回执回喂后 `prefix` 指纹变化是预期的：旧定义把新增的 assistant/tool 历史也纳入
+  `prefix`，它不能单独代表系统提示词的稳定前缀。
+- 普通问候请求的系统提示词约 2399 字符、输入约 5019 token，动态工具说明和运行时上下文
+  已经足以影响首轮缓存命中，适合继续观测和拆分。
+
+实现：
+
+- 将基础规则、当前工具说明、模式级固定规则和上下文边界放到动态 marker 之前。
+- 将通用计划内容、Team 计划、交付契约详情、Workflow 状态和恢复/验收提醒放到 marker
+  之后；这些内容仍然完整发送，没有删除 Jev、Workflow、Delivery、审批或恢复信息。
+- 请求日志新增 `system`、`systemPrefix`、`systemDynamic` 三个短指纹，用于区分固定系统
+  前缀和随本轮变化的动态尾部；不记录原文。
+- 旧的 `prefix/full` 指纹继续保留，用于观察完整消息历史变化和网关实际命中情况。
+
+验证：
+
+- `[0ac]` 增加稳定系统前缀相同、动态系统尾部不同的指纹回归。
+- `npx tsc --noEmit`
+- `npm run compile`
+- `npm run test:batch`
+- `npm run test:generate; node scripts/agent_kernel_test.mjs`
+
 ### 6. 规划轻量化
 
 目标：减少 Plan 规划对首响应的阻塞，同时保留复杂任务规划能力。

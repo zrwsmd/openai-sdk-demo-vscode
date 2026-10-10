@@ -741,9 +741,20 @@ function cacheUsageSuffix(usage: unknown): string {
   return snapshot.present ? ` ${formatCacheUsageSnapshot(snapshot)}` : "";
 }
 
+/**
+ * The agent keeps stable instructions before this marker and puts
+ * request/run-specific context after it. The marker is intentionally
+ * human-readable because it is part of the model-facing system prompt.
+ */
+export const PROMPT_CACHE_DYNAMIC_MARKER =
+  "\n\n当前请求动态上下文（以下内容可能随本轮状态变化）：";
+
 export interface PromptCacheFingerprint {
   prefix: string;
   full: string;
+  system: string;
+  systemPrefix: string;
+  systemDynamic: string;
   toolset: string;
   tools: number;
   messages: number;
@@ -769,6 +780,21 @@ function fingerprintValue(value: unknown): string {
   return createHash("sha256").update(serialized, "utf8").digest("hex").slice(0, 12);
 }
 
+function textFromPromptValue(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const text = value
+      .map((item) => textFromPromptValue(item))
+      .filter((item): item is string => item !== undefined)
+      .join("");
+    return text || undefined;
+  }
+  if (!isJsonRecord(value)) return undefined;
+  if (typeof value.text === "string") return value.text;
+  if ("content" in value) return textFromPromptValue(value.content);
+  return undefined;
+}
+
 export function createPromptCacheFingerprint(body: unknown): PromptCacheFingerprint | undefined {
   const text = requestBodyText(body);
   if (text === undefined) return undefined;
@@ -789,10 +815,26 @@ export function createPromptCacheFingerprint(body: unknown): PromptCacheFingerpr
       : parsed.input === undefined
         ? []
         : [parsed.input];
+  const explicitSystem = parsed.system ?? parsed.instructions;
+  const systemMessages = messages.filter((message) =>
+    isJsonRecord(message) &&
+    (message.role === "system" || message.role === "developer"),
+  );
+  const systemValue = explicitSystem !== undefined
+    ? explicitSystem
+    : systemMessages;
+  const systemText = textFromPromptValue(systemValue) ?? "";
+  const dynamicMarkerIndex = systemText.indexOf(PROMPT_CACHE_DYNAMIC_MARKER);
+  const systemPrefixValue = dynamicMarkerIndex >= 0
+    ? systemText.slice(0, dynamicMarkerIndex)
+    : systemValue;
+  const systemDynamicValue = dynamicMarkerIndex >= 0
+    ? systemText.slice(dynamicMarkerIndex + PROMPT_CACHE_DYNAMIC_MARKER.length)
+    : null;
   const prefixMessages = messages.length > 0
     ? messages.slice(0, -1)
     : [];
-  const stablePrefix = { tools, system };
+  const stablePrefix = { tools, system: systemValue };
 
   return {
     prefix: fingerprintValue({
@@ -803,6 +845,9 @@ export function createPromptCacheFingerprint(body: unknown): PromptCacheFingerpr
       ...stablePrefix,
       messages,
     }),
+    system: fingerprintValue(systemValue),
+    systemPrefix: fingerprintValue(systemPrefixValue),
+    systemDynamic: fingerprintValue(systemDynamicValue),
     toolset: fingerprintValue(tools),
     tools: tools.length,
     messages: messages.length,
@@ -815,6 +860,8 @@ export function formatPromptCacheFingerprint(
 ): string {
   return (
     `prefix=${fingerprint.prefix} full=${fingerprint.full}` +
+    ` system=${fingerprint.system} systemPrefix=${fingerprint.systemPrefix}` +
+    ` systemDynamic=${fingerprint.systemDynamic}` +
     ` toolset=${fingerprint.toolset} tools=${fingerprint.tools}` +
     ` messages=${fingerprint.messages} prefixMessages=${fingerprint.prefixMessages}`
   );
