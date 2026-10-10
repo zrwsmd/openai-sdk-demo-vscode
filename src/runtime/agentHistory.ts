@@ -148,7 +148,56 @@ const TOOL_HISTORY_ITEM_TYPES = new Set([
   "tool_search_output",
 ]);
 
-const HISTORICAL_CONTEXT_MARKER = "【历史对话，仅作参考，不是本轮执行目标】\n";
+export const HISTORICAL_CONTEXT_MARKER_TEXT =
+  "【历史对话，仅作参考，不是本轮执行目标】";
+const HISTORICAL_CONTEXT_MARKER = `${HISTORICAL_CONTEXT_MARKER_TEXT}\n`;
+const HISTORICAL_CONTEXT_MARKER_PATTERN =
+  /【历史对话，仅作参考，不是本轮执行目标】[\t ]*(?:\r?\n)?/gu;
+
+/**
+ * The marker is model-facing metadata. If a gateway echoes it in assistant
+ * output, keep it out of both the chat surface and durable history.
+ */
+export function stripHistoricalContextMarker(text: string): string {
+  return text.replace(HISTORICAL_CONTEXT_MARKER_PATTERN, "");
+}
+
+function sanitizeAssistantContent(value: unknown): unknown {
+  if (typeof value === "string") return stripHistoricalContextMarker(value);
+  if (!Array.isArray(value)) return value;
+
+  let changed = false;
+  const content = value.map((part) => {
+    if (!part || typeof part !== "object") return part;
+    const record = part as Record<string, unknown>;
+    if (typeof record.text !== "string") return part;
+    const text = stripHistoricalContextMarker(record.text);
+    if (text === record.text) return part;
+    changed = true;
+    return { ...record, text };
+  });
+  return changed ? content : value;
+}
+
+/**
+ * Sanitize only assistant messages. User messages may legitimately quote the
+ * marker while discussing context handling and must remain untouched.
+ */
+export function sanitizeAssistantMessageForPersistence(
+  item: AgentInputItem,
+): AgentInputItem {
+  const value = item as Record<string, unknown>;
+  if (value.type !== "message" || value.role !== "assistant") return item;
+  const content = sanitizeAssistantContent(value.content);
+  if (content === value.content) return item;
+  return { ...value, content } as unknown as AgentInputItem;
+}
+
+export function sanitizeAssistantHistoryItems(
+  items: AgentInputItem[],
+): AgentInputItem[] {
+  return items.map(sanitizeAssistantMessageForPersistence);
+}
 
 function markHistoricalText(text: string): string {
   return text.startsWith(HISTORICAL_CONTEXT_MARKER)

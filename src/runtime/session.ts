@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AgentInputItem, Session } from '@openai/agents';
+import {
+  sanitizeAssistantHistoryItems,
+  stripHistoricalContextMarker,
+} from './agentHistory';
 
 export class JsonFileSession implements Session {
   private items: AgentInputItem[] = [];
@@ -44,7 +48,10 @@ export class JsonFileSession implements Session {
       }
       if (!Array.isArray(data.items)) throw new Error('invalid session items');
       this.sessionId = typeof data.sessionId === 'string' ? data.sessionId : randomUUID();
-      this.items = data.items as AgentInputItem[];
+      this.items = sanitizeAssistantHistoryItems(data.items as AgentInputItem[]);
+      if (JSON.stringify(this.items) !== JSON.stringify(data.items)) {
+        await this.persistSnapshot();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw new Error(
@@ -115,7 +122,7 @@ export class JsonFileSession implements Session {
   async addItems(items: AgentInputItem[]): Promise<void> {
     await this.enqueue(async () => {
       await this.loadFromDisk(true);
-      this.items.push(...items);
+      this.items.push(...sanitizeAssistantHistoryItems(items));
       await this.persistSnapshot();
     });
   }
@@ -142,7 +149,7 @@ export class JsonFileSession implements Session {
   async replaceItems(items: AgentInputItem[]): Promise<void> {
     await this.enqueue(async () => {
       await this.loadFromDisk(true);
-      this.items = items.map((item) => ({ ...item }));
+      this.items = sanitizeAssistantHistoryItems(items).map((item) => ({ ...item }));
       await this.persistSnapshot();
     });
   }
@@ -172,7 +179,9 @@ export function extractChatMessages(items: AgentInputItem[]): { role: 'user' | '
         .map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''))
         .join('');
     }
-    if (it.role === 'assistant') text = projectAssistantHistoryText(text);
+    if (it.role === 'assistant') {
+      text = stripHistoricalContextMarker(projectAssistantHistoryText(text));
+    }
     if (text.trim()) out.push({ role: it.role === 'user' ? 'user' : 'agent', text });
   }
   return out;

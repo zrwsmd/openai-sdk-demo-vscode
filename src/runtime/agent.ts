@@ -118,11 +118,13 @@ import {
 import {
   composeToolSet,
   createNewTurnModelInputSession,
+  HISTORICAL_CONTEXT_MARKER_TEXT,
   loadHistoricalToolArgumentGuard,
   loadHistoricalToolResults,
   NEW_TURN_CONTEXT_PROMPT,
   projectNewTurnSessionHistory,
   renderAvailableToolsPrompt,
+  stripHistoricalContextMarker,
   toolNameOf,
 } from "./agentHistory";
 
@@ -165,6 +167,8 @@ export {
   loadHistoricalToolArgumentGuard,
   markHistoricalMessageForModelInput,
   projectNewTurnSessionHistory,
+  sanitizeAssistantMessageForPersistence,
+  stripHistoricalContextMarker,
 } from "./agentHistory";
 
 export { inferRequiredTool } from "../policy/actionPolicy";
@@ -675,6 +679,40 @@ export async function runAgent(
   let structuredOutput: IndustrialAgentOutput | undefined;
   let finalizerRequired = false;
   let terminalFailureOutput: IndustrialAgentOutput | undefined;
+  let rawStreamText = "";
+  let visibleStreamText = "";
+
+  const sanitizeStreamDelta = (text: string): string => {
+    rawStreamText += text;
+    const sanitized = stripHistoricalContextMarker(rawStreamText);
+    let holdLength = 0;
+    for (
+      let length = Math.min(HISTORICAL_CONTEXT_MARKER_TEXT.length, sanitized.length);
+      length > 0;
+      length -= 1
+    ) {
+      if (
+        sanitized.endsWith(HISTORICAL_CONTEXT_MARKER_TEXT.slice(0, length)) &&
+        !rawStreamText.endsWith(HISTORICAL_CONTEXT_MARKER_TEXT)
+      ) {
+        holdLength = length;
+        break;
+      }
+    }
+    const ready = sanitized.slice(0, sanitized.length - holdLength);
+    const delta = ready.startsWith(visibleStreamText)
+      ? ready.slice(visibleStreamText.length)
+      : ready;
+    visibleStreamText = ready;
+    return delta;
+  };
+
+  const sanitizeAssistantOutput = (
+    value: IndustrialAgentOutput,
+  ): IndustrialAgentOutput => ({
+    ...value,
+    message: stripHistoricalContextMarker(value.message),
+  });
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填
   const toolNameByCallId = new Map<string, string>();
@@ -1493,15 +1531,28 @@ export async function runAgent(
     structuredOutput: structuredMode,
     eventFactory: options.protocol.eventFactory,
     emit: (event) => {
-      if (shouldSuppressProtocolEvent(event)) return;
-      observeProtocolEvent(event);
-      options.protocol.onEvent(event);
+      let visibleEvent = event;
+      if (event.type === "text.delta") {
+        const payload = event.payload as Record<string, unknown>;
+        const text = typeof payload.text === "string" ? payload.text : "";
+        const delta = sanitizeStreamDelta(text);
+        if (!delta) return;
+        visibleEvent = {
+          ...event,
+          payload: { ...payload, text: delta },
+        };
+      }
+      if (shouldSuppressProtocolEvent(visibleEvent)) return;
+      observeProtocolEvent(visibleEvent);
+      options.protocol.onEvent(visibleEvent);
     },
   });
 
   const pump = async (
     stream: StreamedRunResult<any, any>,
   ): Promise<"done" | "empty-bailed" | "cancelled"> => {
+    rawStreamText = "";
+    visibleStreamText = "";
     let bailed = false;
     let cancelled = false;
     let salvagedInvalidFinalOutput = false;
@@ -1557,19 +1608,26 @@ export async function runAgent(
       stream.finalOutput !== undefined
     ) {
       if (structuredMode) {
-        const candidate = tryParseJsonLikeOutput(stream.finalOutput);
+        const finalOutput =
+          typeof stream.finalOutput === "string"
+            ? stripHistoricalContextMarker(stream.finalOutput)
+            : stream.finalOutput;
+        const candidate = tryParseJsonLikeOutput(finalOutput);
         const parsed = industrialAgentOutputDefinition.schema.safeParse(candidate);
         if (parsed.success) {
-          structuredOutput = parsed.data as IndustrialAgentOutput;
+          structuredOutput = sanitizeAssistantOutput(
+            parsed.data as IndustrialAgentOutput,
+          );
         } else {
           finalizerRequired = true;
-          structuredOutput = coerceIndustrialAgentOutput(stream.finalOutput);
+          structuredOutput = coerceIndustrialAgentOutput(finalOutput);
           if (!structuredOutput) {
             salvagedInvalidFinalOutput = true;
             agentLog(
               "[output] 最终输出不符合 schema，等待运行时根据工具账本完成验收",
             );
           } else {
+            structuredOutput = sanitizeAssistantOutput(structuredOutput);
             agentLog(
               "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
             );
@@ -1582,7 +1640,7 @@ export async function runAgent(
           ).text;
         }
       } else if (typeof stream.finalOutput === "string") {
-        output = stream.finalOutput;
+        output = stripHistoricalContextMarker(stream.finalOutput);
       }
     }
     if (
@@ -1593,11 +1651,12 @@ export async function runAgent(
     ) {
       finalizerRequired = true;
       structuredOutput = coerceIndustrialAgentOutput(output) ?? {
-        message: output,
+        message: stripHistoricalContextMarker(output),
         diagnostics: [],
         artifacts: [],
         data: null,
       };
+      structuredOutput = sanitizeAssistantOutput(structuredOutput);
       output = structuredOutput.message;
       agentLog(
         "[output] 最终输出不符合 schema，已保留正文并交给运行时完成验收继续处理",
@@ -1894,8 +1953,8 @@ export async function runAgent(
         const finalized = await finalizeStructuredOutputFromRuntime();
         finalizerRequired = false;
         if (finalized) {
-          structuredOutput = finalized;
-          output = finalized.message;
+          structuredOutput = sanitizeAssistantOutput(finalized);
+          output = structuredOutput.message;
         } else if (hadInvalidFinalOutput) {
           structuredOutput = undefined;
         }
@@ -1921,14 +1980,15 @@ export async function runAgent(
       assertPlanCompleted();
       const authoritativeMessage = authoritativeWorkflowMessage();
       const fallbackMessage = fallbackRequiredToolMessage();
+      structuredOutput = sanitizeAssistantOutput(structuredOutput);
       const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
         : "";
-      const message = authoritativeMessage ?? (
+      const message = stripHistoricalContextMarker(authoritativeMessage ?? (
         rawMessage && !isInternalToolArtifactComplaint(rawMessage)
           ? rawMessage
           : fallbackMessage ?? structuredOutput.message
-      );
+      ));
       const structuredProjection = projectAgentOutput(
         industrialAgentOutputDefinition,
         structuredOutput,

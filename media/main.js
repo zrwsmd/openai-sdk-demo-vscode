@@ -825,6 +825,10 @@ function sanitizeAssistantText(text) {
   const raw = String(text ?? '');
   const trimmed = raw.trim();
   if (!trimmed) return '';
+  const withoutHistoricalMarker = raw.replace(
+    /【历史对话，仅作参考，不是本轮执行目标】[\t ]*(?:\r?\n)?/gu,
+    ''
+  );
   const internalPatterns = [
     /^Tool call validation failed due to the following issue:/i,
     /^Please approve this write operation to save\b/i,
@@ -832,7 +836,7 @@ function sanitizeAssistantText(text) {
   ];
   return internalPatterns.some((pattern) => pattern.test(trimmed))
     ? ''
-    : raw;
+    : withoutHistoricalMarker;
 }
 
 function byteLength(text) {

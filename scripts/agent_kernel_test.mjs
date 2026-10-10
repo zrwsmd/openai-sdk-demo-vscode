@@ -21,6 +21,8 @@ import {
   createHistoricalToolArgumentGuard,
   createNewTurnModelInputSession,
   isToolHistoryItem,
+  sanitizeAssistantMessageForPersistence,
+  stripHistoricalContextMarker,
   composeToolSet,
   isRetryableAgentError,
 } from './agent.testbundle.mjs';
@@ -1026,6 +1028,33 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     throw new Error('明确的历史上下文续接被错误拦截');
   }
   console.log('[3a2] 跨工具历史参数恢复 guard:通过');
+}
+
+// [3a3] 历史上下文标记只允许出现在模型输入投影中,不允许泄漏到助手输出、
+//       持久化会话或历史回放文本；用户主动引用该标记时仍保留原文。
+{
+  const marker = '【历史对话，仅作参考，不是本轮执行目标】';
+  const assistant = {
+    type: 'message',
+    role: 'assistant',
+    content: `${marker}\n德国的首都是柏林（Berlin）。`,
+  };
+  const sanitized = sanitizeAssistantMessageForPersistence(assistant);
+  if (sanitized.content !== '德国的首都是柏林（Berlin）。') {
+    throw new Error('助手历史中的内部上下文标记没有被清理');
+  }
+  if (stripHistoricalContextMarker(`${marker}\n答案` ) !== '答案') {
+    throw new Error('内部上下文标记清理函数未移除标记');
+  }
+  const user = {
+    type: 'message',
+    role: 'user',
+    content: `请解释 ${marker}`,
+  };
+  if (sanitizeAssistantMessageForPersistence(user).content !== user.content) {
+    throw new Error('用户主动引用内部上下文标记时被错误改写');
+  }
+  console.log('[3a3] 助手输出内部上下文标记已隔离');
 }
 
 // [3b] 同一任务的安全重启可以显式保留工具链,供失败后继续处理;
