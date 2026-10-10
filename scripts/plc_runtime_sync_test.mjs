@@ -48,7 +48,7 @@ function clarification(select) {
   const config = await readPlcRuntimeConfig(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME));
   const task = config?.configuration.resources[0].tasks[0];
   if (
-    task?.name !== 'PumpTask' ||
+    task?.name !== 'SlowMonitorTask' ||
     task.periodMs !== 100 ||
     task.programs[0].typeName !== 'Pump' ||
     task.programs[0].source !== 'src/Pump.st'
@@ -69,7 +69,7 @@ function clarification(select) {
 {
   const suggestionInputs = [];
   const fake = clarification((request) => {
-    const option = request.options.find((item) => item.id === 'create:PressureControlTask:20ms');
+    const option = request.options.find((item) => item.id === 'create:MainControlTask:20ms');
     return option ? option.id : 'cancel';
   });
   const suggestionWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-sync-suggest-test-'));
@@ -82,14 +82,14 @@ function clarification(select) {
       suggestionInputs.push(input);
       return [
         {
-          taskName: 'PressureControlTask',
+          taskGroup: 'main_control',
           periodMs: 20,
-          reason: 'PID 调节需要较快的控制周期。',
+          reason: '这是常规主控制逻辑，后续可继续绑定同类 PROGRAM。',
         },
         {
-          taskName: 'PressureMonitorTask',
+          taskGroup: 'slow_monitor',
           periodMs: 100,
-          reason: '监控任务可以使用较慢周期。',
+          reason: '监视逻辑可以使用较慢周期。',
         },
       ];
     },
@@ -98,7 +98,7 @@ function clarification(select) {
   if (
     !plan ||
     plan.action !== 'create_config' ||
-    plan.taskName !== 'PressureControlTask' ||
+    plan.taskName !== 'MainControlTask' ||
     plan.periodMs !== 20 ||
     suggestionInputs[0]?.userRequest !== '生成 PID 恒压供水控制，压力变化需要及时响应。' ||
     suggestionInputs[0]?.programName !== 'PID_ConstantPressure'
@@ -108,7 +108,7 @@ function clarification(select) {
   await plan.commit();
   const config = await readPlcRuntimeConfig(path.join(suggestionWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME));
   const suggestedTask = config?.configuration.resources[0].tasks[0];
-  if (suggestedTask?.name !== 'PressureControlTask' || suggestedTask.periodMs !== 20) {
+  if (suggestedTask?.name !== 'MainControlTask' || suggestedTask.periodMs !== 20) {
     throw new Error('selected model task suggestion was not persisted');
   }
 }
