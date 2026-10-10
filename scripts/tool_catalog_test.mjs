@@ -53,6 +53,28 @@ assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
 ]);
 assert.deepEqual(coreCatalog.toolsForFallback('command_query'), ['run_command']);
 assert.deepEqual(
+  coreCatalog.orderToolNames([
+    'edit_file',
+    'report_plan_progress',
+    'read_file',
+    'write_file',
+    'edit_file',
+  ]),
+  ['read_file', 'write_file', 'edit_file', 'report_plan_progress'],
+);
+assert.equal(
+  coreCatalog.renderToolCapabilityPrompt([
+    'write_file',
+    'read_file',
+    'report_plan_progress',
+  ]),
+  coreCatalog.renderToolCapabilityPrompt([
+    'report_plan_progress',
+    'read_file',
+    'write_file',
+  ]),
+);
+assert.deepEqual(
   coreCatalog.findByTag('workspace').map((item) => item.name),
   ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'run_command'],
 );
@@ -176,6 +198,35 @@ const appRegistry = new ToolRegistry([
   createStToolProvider(),
 ]);
 const appCatalog = appRegistry.getToolCatalog();
+assert.deepEqual(
+  appRegistry.createTools({
+    cfg: {
+      baseUrl: '',
+      apiKey: 'test',
+      model: 'test',
+      exportDir: process.cwd(),
+      workspaceRoot: process.cwd(),
+    },
+  }).map((tool) => tool.name),
+  [
+    'get_io_table',
+    'read_plc_variables',
+    'list_files',
+    'read_file',
+    'search_files',
+    'write_file',
+    'edit_file',
+    'request_clarification',
+    'run_command',
+    'validate_st_code',
+    'export_st_program',
+    'st_dependency_map',
+    'st_change_impact',
+    'st_symbol_references',
+    'st_library_symbol',
+    'audit_plc_runtime_config',
+  ],
+);
 assert.equal(appCatalog.get('st_dependency_map')?.providerId, 'st');
 assert.equal(appCatalog.get('st_dependency_map')?.domain, 'structured_text');
 assert.equal(appCatalog.get('export_st_program')?.evidence?.includes('successful_export'), true);
@@ -742,5 +793,37 @@ const explicitAllowlistDecision = await decisionService.decide(
   },
 );
 assert.deepEqual(explicitAllowlistDecision.allowedTools, ['legacy_custom_tool']);
+
+const orderedAllowlistDecision = await new WorkflowDecisionService(
+  () => {},
+  new AgentDecisionService(() => {}),
+  new WorkflowRegistry(),
+  coreCatalog,
+).decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: '',
+    workspaceRoot: '',
+    jev: { enabled: false },
+  },
+  '编辑并读取文件',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'file_edit',
+      confidence: 0.9,
+      reason: 'stable allowlist ordering',
+      allowedTools: ['edit_file', 'report_plan_progress', 'read_file', 'write_file'],
+    }),
+  },
+);
+assert.deepEqual(
+  orderedAllowlistDecision.allowedTools,
+  ['read_file', 'write_file', 'edit_file', 'report_plan_progress'],
+);
 
 console.log('tool catalog tests passed');

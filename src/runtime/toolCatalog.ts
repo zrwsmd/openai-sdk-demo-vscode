@@ -517,6 +517,41 @@ export class ToolCatalog {
   }
 
   /**
+   * Return a deduplicated, deterministic tool-name order.
+   *
+   * Registered capabilities keep their declaration order so the prompt and
+   * provider tool array remain readable and backwards-compatible. Runtime
+   * control or legacy tools that are not in the catalog use lexical order as
+   * a deterministic fallback.
+   */
+  orderToolNames(names: readonly string[]): readonly string[] {
+    const unique = [
+      ...new Set(
+        names
+          .filter((name): name is string => typeof name === "string")
+          .map((name) => name.trim())
+          .filter(Boolean),
+      ),
+    ];
+    const order = new Map(
+      this.list().map((capability, index) => [capability.name, index]),
+    );
+    unique.sort((left, right) => {
+      const leftOrder = order.get(left);
+      const rightOrder = order.get(right);
+      if (leftOrder !== undefined && rightOrder !== undefined) {
+        return leftOrder - rightOrder;
+      }
+      if (leftOrder !== undefined) return -1;
+      if (rightOrder !== undefined) return 1;
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    });
+    return Object.freeze(unique);
+  }
+
+  /**
    * Render generic capability metadata for the model-facing tool prompt.
    *
    * The catalog is not an authorization boundary: the caller supplies the
@@ -524,14 +559,15 @@ export class ToolCatalog {
    * visible by name without requiring a catalog entry.
    */
   renderToolCapabilityPrompt(toolNames: readonly string[]): string {
+    const orderedToolNames = this.orderToolNames(toolNames);
     const cacheKey = JSON.stringify([
       this.catalogVersion,
-      toolNames,
+      orderedToolNames,
     ]);
     const cached = this.capabilityPromptCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    const rendered = toolNames
+    const rendered = orderedToolNames
       .map((toolName) => {
         const capability = this.get(toolName);
         if (!capability) return `- ${toolName}`;
@@ -604,9 +640,14 @@ export class ToolCatalog {
     const limit = query.limit && query.limit > 0 ? Math.floor(query.limit) : undefined;
     const matches = this.list()
       .filter((capability) => !names?.length || names.includes(normalized(capability.name)))
-      .map((capability) => matchCapabilityText(text, capability))
-      .filter((match) => match.score >= minScore)
-      .sort((left, right) => right.score - left.score);
+      .map((capability, index) => ({
+        match: matchCapabilityText(text, capability),
+        index,
+      }))
+      .filter(({ match }) => match.score >= minScore)
+      .sort((left, right) =>
+        right.match.score - left.match.score || left.index - right.index)
+      .map(({ match }) => match);
     return limit ? matches.slice(0, limit) : matches;
   }
 
@@ -643,7 +684,7 @@ export class ToolCatalog {
         selected.add(match.capability.name);
       }
     }
-    return [...selected];
+    return this.orderToolNames([...selected]);
   }
 
   toolsForQuery(query: ToolCapabilityQuery = {}): readonly string[] {
@@ -740,11 +781,12 @@ export class ToolCatalog {
       );
       return baseTools;
     }
+    const orderedSelected = this.orderToolNames(selected);
     rememberBounded(
       this.fallbackSelectionCache,
       cacheKey,
-      Object.freeze([...selected]),
+      orderedSelected,
     );
-    return selected;
+    return orderedSelected;
   }
 }

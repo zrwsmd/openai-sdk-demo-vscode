@@ -238,7 +238,7 @@ export class WorkflowDecisionService {
       };
     }
     const allowedTools = decision.allowedTools
-      ? [...new Set(decision.allowedTools)]
+      ? this.orderToolNames(decision.allowedTools)
       : this.allowedToolsForFallback(decision.mode, userText);
     this.log(
       `[workflow] model fallback ${decision.mode}(${decision.confidence.toFixed(2)}): ${decision.reason}` +
@@ -284,6 +284,23 @@ export class WorkflowDecisionService {
       });
     }
     return allowedToolsForFallback(mode);
+  }
+
+  private orderToolNames(names: readonly string[]): readonly string[] {
+    const unique = [
+      ...new Set(
+        names
+          .filter((name): name is string => typeof name === "string")
+          .map((name) => name.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (this.toolCatalog) return this.toolCatalog.orderToolNames(unique);
+    return unique.sort((left, right) => {
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    });
   }
 }
 

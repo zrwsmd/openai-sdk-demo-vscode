@@ -503,13 +503,15 @@ export async function runAgent(
         ? []
         : undefined
     : options.allowedToolNames;
-  const tools = composeToolSet(
-    registeredTools,
-    [
-      ...(planProgressTool ? [planProgressTool] : []),
-      ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
-    ],
-    allowedBusinessToolNames,
+  const tools = toolRegistry.orderTools(
+    composeToolSet(
+      registeredTools,
+      [
+        ...(planProgressTool ? [planProgressTool] : []),
+        ...(artifactDeliveryTool ? [artifactDeliveryTool] : []),
+      ],
+      allowedBusinessToolNames,
+    ),
   );
   const availableToolNameList = tools
     .map(toolNameOf)

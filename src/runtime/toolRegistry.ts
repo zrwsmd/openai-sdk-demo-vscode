@@ -166,6 +166,36 @@ export class ToolRegistry {
       .map(([name]) => name);
   }
 
+  orderTools<T>(
+    tools: readonly T[],
+    getName: (item: T) => string | undefined = (item) => {
+      const name = (item as { name?: unknown }).name;
+      return typeof name === "string" ? name : undefined;
+    },
+  ): T[] {
+    const names = this.toolCatalog.orderToolNames(
+      tools
+        .map(getName)
+        .filter((name): name is string => typeof name === "string"),
+    );
+    const rank = new Map(names.map((name, index) => [name, index]));
+    return [...tools].sort((left, right) => {
+      const leftName = getName(left);
+      const rightName = getName(right);
+      const leftRank = leftName === undefined
+        ? Number.MAX_SAFE_INTEGER
+        : rank.get(leftName) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = rightName === undefined
+        ? Number.MAX_SAFE_INTEGER
+        : rank.get(rightName) ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      if (leftName === undefined || rightName === undefined) return 0;
+      if (leftName < rightName) return -1;
+      if (leftName > rightName) return 1;
+      return 0;
+    });
+  }
+
   createTools(options: {
     cfg: AgentConfig;
     userText?: string;
@@ -206,7 +236,7 @@ export class ToolRegistry {
       if (names.has(name)) throw new Error(`Tool already provided: ${name}`);
       names.add(name);
     }
-    return tools;
+    return this.orderTools(tools);
   }
 }
 

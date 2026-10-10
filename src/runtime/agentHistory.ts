@@ -115,13 +115,14 @@ export function renderAvailableToolsPrompt(
   toolNames: readonly string[],
   toolCatalog: ToolCatalog,
 ): string {
-  if (toolNames.length === 0) {
+  const orderedToolNames = toolCatalog.orderToolNames(toolNames);
+  if (orderedToolNames.length === 0) {
     return "\n\n当前没有可调用工具。不要尝试调用任何工具，只能用文字回答或说明阻塞原因。";
   }
   return (
     "\n\n当前可用工具及其用途（只能调用下面列出的工具；用途和风险说明仅用于选择，" +
     "实际权限仍由运行时审批、策略和工具回执决定）：\n" +
-    toolCatalog.renderToolCapabilityPrompt(toolNames) +
+    toolCatalog.renderToolCapabilityPrompt(orderedToolNames) +
     "\n只能调用上面列出的工具；不要调用未列出的工具名。"
   );
 }

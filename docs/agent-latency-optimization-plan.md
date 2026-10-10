@@ -192,6 +192,30 @@ Jev、Workflow 判定、Delivery contract、context compaction、工具筛选、
   `[0a]`、`[0aa]`、`[0ab]`、`[0ac]` 已通过，完整 Agent 内核回归通过。
 - `npm run test:batch` 全部通过。
 
+### 5.2 工具顺序稳定化
+
+状态：已完成第一版。
+
+实现：
+
+- 以 `ToolCatalog` 中的能力注册顺序作为已知工具的唯一排序依据，不按当前用户文本、
+  fallback 命中顺序或模型返回顺序改变工具数组。
+- `ToolRegistry.createTools()` 和 Agent 最终工具集合统一经过同一排序；运行时控制工具
+  以及没有能力元数据的旧工具按名称做确定性兜底排序。
+- Workflow 模型返回的显式 `allowedTools` 也先去重、规范化并按能力目录排序，避免同一
+  allowlist 因模型输出顺序不同而产生不同请求前缀。
+- ToolCatalog 的文本匹配在分数相同的时候按注册顺序稳定；多意图筛选、fallback 工具
+  集合和能力提示渲染都复用稳定顺序。
+- 这一步只改变工具数组和提示文本的排列，不改变工具筛选、allowlist、审批、运行时
+  guard 或 workflow 安全边界。
+
+验证：
+
+- `scripts/tool_catalog_test.mjs` 覆盖工具名去重排序、能力提示排列稳定、注册工具数组
+  排列和显式 allowlist 排列。
+- `npm run test:batch`
+- `npm run test:generate; node scripts/agent_kernel_test.mjs`
+
 ### 6. 规划轻量化
 
 目标：减少 Plan 规划对首响应的阻塞，同时保留复杂任务规划能力。
