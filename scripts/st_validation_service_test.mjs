@@ -4,11 +4,40 @@ import {
   createToolResult,
   createWorkflowRuntimeState,
   getStValidationRuntimeService,
+  identifyStDeclarations,
   hashStContent,
   StValidationRuntimeService,
   StWorkspaceDeliveryWorkflow,
   createStCodeDeliveryContract,
 } from './agent.testbundle.mjs';
+
+const declarations = identifyStDeclarations(`
+(* PROGRAM FakeInComment END_PROGRAM *)
+PROGRAM Main
+END_PROGRAM
+FUNCTION_BLOCK Motor
+END_FUNCTION_BLOCK
+FUNCTION Scale : REAL
+END_FUNCTION
+TYPE
+  AliasValue : DINT;
+  MotorState : STRUCT
+    Running : BOOL;
+  END_STRUCT;
+  AlarmCode : (None, High, Low);
+END_TYPE
+`);
+assert.deepEqual(
+  declarations.map(({ category, kind, name }) => ({ category, kind, name })),
+  [
+    { category: 'pou', kind: 'PROGRAM', name: 'MAIN' },
+    { category: 'pou', kind: 'FUNCTION_BLOCK', name: 'MOTOR' },
+    { category: 'pou', kind: 'FUNCTION', name: 'SCALE' },
+    { category: 'type', kind: 'TYPE_ALIAS', name: 'ALIASVALUE' },
+    { category: 'type', kind: 'STRUCT', name: 'MOTORSTATE' },
+    { category: 'type', kind: 'ENUM', name: 'ALARMCODE' },
+  ],
+);
 
 const code = 'PROGRAM Pump\nEND_PROGRAM';
 const codeHash = hashStContent(code);
@@ -24,6 +53,14 @@ assert.equal(service.hasValidatedContent(code), true);
 assert.equal(service.canWriteContent(code), true);
 assert.equal(service.lastValidatedContentHash, codeHash);
 assert.equal(service.canWriteContent(`${code}\n`), false);
+assert.deepEqual(service.getValidationCandidates()[0], {
+  hash: codeHash,
+  declarations: [{ category: 'pou', kind: 'PROGRAM', name: 'PUMP', line: 1 }],
+  status: 'passed',
+  errorCount: 0,
+  source: 'manual',
+  sequence: 1,
+});
 
 const restoredCode = 'PROGRAM Restored\nEND_PROGRAM';
 const restoredHash = hashStContent(restoredCode);
@@ -67,6 +104,12 @@ assert.equal(restored.hasValidatedContent(restoredCode), true);
 assert.equal(restored.hasValidatedContent(restoredWrite), true);
 assert.equal(restored.canWriteContent(restoredWrite), true);
 assert.equal(restored.lastValidatedContentHash, restoredWriteHash);
+assert(
+  restored.getValidationCandidates().every((candidate) =>
+    candidate.declarations.every((item) => item.category && item.kind && item.name),
+  ),
+  '恢复的 ST 候选应保留可扩展声明信息',
+);
 
 const unrelated = 'PROGRAM Probe\nEND_PROGRAM';
 assert.equal(restored.recordValidationAttempt(unrelated).accepted, false);

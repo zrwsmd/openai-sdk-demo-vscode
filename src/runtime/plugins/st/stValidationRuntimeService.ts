@@ -8,19 +8,47 @@ import { hashStContent } from "./stContentHash";
 
 export type StValidationInputMode = "inline_code" | "path_or_code";
 
+export type StDeclaration = {
+  category: string;
+  kind: string;
+  name: string;
+  line: number;
+};
+
+export type StUnit = StDeclaration;
+
 export type StValidatedDraft = {
   hash: string;
   content: string;
+  declarations: StDeclaration[];
 };
 
 export type StDraftIdentity = {
   programName: string;
 };
 
+export type StValidationCandidateSource =
+  | "validate_st_code"
+  | "pre_write_validation"
+  | "restore"
+  | "manual";
+
+export type StValidationCandidate = {
+  hash: string;
+  declarations: StDeclaration[];
+  status: "passed" | "failed";
+  errorCount: number;
+  source: StValidationCandidateSource;
+  targetLabel?: string;
+  sequence: number;
+};
+
 export type StValidationState = {
   hashes: Set<string>;
   lastSuccessful?: StValidatedDraft;
   draftIdentity?: StDraftIdentity;
+  candidates: StValidationCandidate[];
+  nextCandidateSequence: number;
 };
 
 export const ST_TOOL_STATE_SERVICE = "st.validationState";
@@ -29,7 +57,11 @@ export const ST_VALIDATION_RUNTIME_SERVICE = "st.validationRuntime";
 const ST_WORKSPACE_DELIVERY_STATE_KEY = "st_workspace_delivery.validation";
 
 export function createStValidationState(): StValidationState {
-  return { hashes: new Set<string>() };
+  return {
+    hashes: new Set<string>(),
+    candidates: [],
+    nextCandidateSequence: 1,
+  };
 }
 
 export function getStValidationState(
@@ -42,17 +74,166 @@ export function getStValidationState(
   );
 }
 
-function stripStComments(content: string): string {
-  return content
-    .replace(/\(\*[\s\S]*?\*\)/gu, " ")
-    .replace(/\/\/[^\r\n]*/gu, " ");
+function maskStNonCode(content: string): string {
+  const chars = content.split("");
+  let state: "code" | "line_comment" | "block_comment" | "single_string" | "double_string" = "code";
+  let blockDepth = 0;
+  const blank = (index: number): void => {
+    if (chars[index] !== "\n" && chars[index] !== "\r") chars[index] = " ";
+  };
+
+  for (let i = 0; i < chars.length; i += 1) {
+    const current = chars[i];
+    const next = chars[i + 1];
+    if (state === "line_comment") {
+      if (current === "\n" || current === "\r") state = "code";
+      else blank(i);
+      continue;
+    }
+    if (state === "block_comment") {
+      if (current === "(" && next === "*") {
+        blank(i);
+        blank(i + 1);
+        blockDepth += 1;
+        i += 1;
+      } else if (current === "*" && next === ")") {
+        blank(i);
+        blank(i + 1);
+        blockDepth -= 1;
+        i += 1;
+        if (blockDepth === 0) state = "code";
+      } else {
+        blank(i);
+      }
+      continue;
+    }
+    if (state === "single_string" || state === "double_string") {
+      const quote = state === "single_string" ? "'" : '"';
+      if (current === quote && next === quote) {
+        blank(i);
+        blank(i + 1);
+        i += 1;
+      } else if (current === quote) {
+        blank(i);
+        state = "code";
+      } else {
+        blank(i);
+      }
+      continue;
+    }
+    if (current === "/" && next === "/") {
+      blank(i);
+      blank(i + 1);
+      i += 1;
+      state = "line_comment";
+    } else if (current === "(" && next === "*") {
+      blank(i);
+      blank(i + 1);
+      i += 1;
+      blockDepth = 1;
+      state = "block_comment";
+    } else if (current === "'") {
+      blank(i);
+      state = "single_string";
+    } else if (current === '"') {
+      blank(i);
+      state = "double_string";
+    }
+  }
+  return chars.join("");
+}
+
+function declaration(
+  category: string,
+  kind: string,
+  name: string,
+  source: string,
+  offset: number,
+): StDeclaration {
+  return {
+    category,
+    kind,
+    name: name.toLocaleUpperCase(),
+    line: source.slice(0, offset).split(/\r?\n/u).length,
+  };
+}
+
+function identifyPouDeclarations(source: string): StDeclaration[] {
+  const declarations: StDeclaration[] = [];
+  const pattern =
+    /\b(FUNCTION_BLOCK|PROGRAM|FUNCTION)\s+([A-Za-z_][A-Za-z0-9_]*)\b/giu;
+  for (const match of source.matchAll(pattern)) {
+    const kind = match[1]?.toUpperCase();
+    const name = match[2]?.trim();
+    if (!kind || !name) continue;
+    declarations.push(
+      declaration("pou", kind, name, source, match.index ?? 0),
+    );
+  }
+  return declarations;
+}
+
+function classifyTypeDeclaration(definition: string): string {
+  if (/^\s*STRUCT\b/iu.test(definition)) return "STRUCT";
+  if (/^\s*UNION\b/iu.test(definition)) return "UNION";
+  if (/^\s*\(/u.test(definition)) return "ENUM";
+  return "TYPE_ALIAS";
+}
+
+function identifyTypeDeclarations(source: string): StDeclaration[] {
+  const declarations: StDeclaration[] = [];
+  const typeBlockPattern = /\bTYPE\b([\s\S]*?)\bEND_TYPE\b/giu;
+  for (const block of source.matchAll(typeBlockPattern)) {
+    const body = block[1] ?? "";
+    const bodyOffset = (block.index ?? 0) + block[0].indexOf(body);
+    const lines = body.split(/\r?\n/u);
+    let offset = 0;
+    let aggregateDepth = 0;
+    for (const line of lines) {
+      if (aggregateDepth === 0) {
+        const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*;?\s*$/u.exec(line);
+        if (match?.[1]) {
+          const kind = classifyTypeDeclaration(match[2] ?? "");
+          declarations.push(
+            declaration("type", kind, match[1], source, bodyOffset + offset),
+          );
+          if (kind === "STRUCT" || kind === "UNION") {
+            const opens = line.match(/\b(?:STRUCT|UNION)\b/giu)?.length ?? 0;
+            const closes = line.match(/\bEND_(?:STRUCT|UNION)\b/giu)?.length ?? 0;
+            aggregateDepth = Math.max(0, opens - closes);
+          }
+        }
+      } else {
+        const opens = line.match(/\b(?:STRUCT|UNION)\b/giu)?.length ?? 0;
+        const closes = line.match(/\bEND_(?:STRUCT|UNION)\b/giu)?.length ?? 0;
+        aggregateDepth = Math.max(0, aggregateDepth + opens - closes);
+      }
+      offset += line.length + 1;
+    }
+  }
+  return declarations;
+}
+
+const ST_DECLARATION_EXTRACTORS = [
+  identifyPouDeclarations,
+  identifyTypeDeclarations,
+] as const;
+
+export function identifyStDeclarations(content: string): StDeclaration[] {
+  const source = maskStNonCode(content);
+  return ST_DECLARATION_EXTRACTORS
+    .flatMap((extract) => extract(source))
+    .sort((left, right) => left.line - right.line);
+}
+
+export function identifyStUnits(content: string): StUnit[] {
+  return identifyStDeclarations(content);
 }
 
 export function identifyStDraft(content: string): StDraftIdentity | undefined {
-  const match = /\bPROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)\b/iu.exec(
-    stripStComments(content),
-  );
-  const programName = match?.[1]?.trim();
+  const programName = identifyStDeclarations(content).find(
+    (item) => item.category === "pou" && item.kind === "PROGRAM",
+  )?.name;
   return programName
     ? { programName: programName.toLocaleUpperCase() }
     : undefined;
@@ -72,6 +253,8 @@ export class StValidationRuntimeService {
     validationInputMode: StValidationInputMode = "inline_code",
   ) {
     this.validationInputMode = validationInputMode;
+    this.state.candidates ??= [];
+    this.state.nextCandidateSequence ??= this.state.candidates.length + 1;
   }
 
   get lastValidatedContentHash(): string | undefined {
@@ -118,28 +301,110 @@ export class StValidationRuntimeService {
   }
 
   recordSuccessfulValidation(content: string, hash: string): boolean {
+    return this.recordSuccessfulValidationWithOptions(content, hash);
+  }
+
+  recordSuccessfulValidationWithOptions(
+    content: string,
+    hash: string,
+    options: {
+      source?: StValidationCandidateSource;
+      targetLabel?: string;
+      recordCandidate?: boolean;
+    } = {},
+  ): boolean {
     const check = this.recordValidationAttempt(content);
     if (!check.accepted) return false;
     this.state.hashes.add(hash);
-    this.state.lastSuccessful = { hash, content };
+    this.state.lastSuccessful = {
+      hash,
+      content,
+      declarations: identifyStDeclarations(content),
+    };
+    if (options.recordCandidate !== false) {
+      this.recordValidationCandidate(content, {
+        hash,
+        status: "passed",
+        errorCount: 0,
+        source: options.source ?? "manual",
+        ...(options.targetLabel ? { targetLabel: options.targetLabel } : {}),
+      });
+    }
     return true;
+  }
+
+  recordValidationCandidate(
+    content: string,
+    result: {
+      hash?: string;
+      status: "passed" | "failed";
+      errorCount: number;
+      source: StValidationCandidateSource;
+      targetLabel?: string;
+    },
+  ): StValidationCandidate {
+    const candidate: StValidationCandidate = {
+      hash: result.hash ?? hashStContent(content),
+      declarations: identifyStDeclarations(content),
+      status: result.status,
+      errorCount: result.errorCount,
+      source: result.source,
+      ...(result.targetLabel ? { targetLabel: result.targetLabel } : {}),
+      sequence: this.state.nextCandidateSequence++,
+    };
+    this.state.candidates.push(candidate);
+    return candidate;
+  }
+
+  getValidationCandidates(): readonly StValidationCandidate[] {
+    return this.state.candidates;
   }
 
   restore(records: readonly WorkflowToolRecord[]): void {
     for (const record of records) {
       const data = resultData(record.result);
-      if (record.name === "validate_st_code" && record.result.ok) {
+      if (record.name === "validate_st_code") {
         const args = parseArgs(record.args);
         const code = typeof args.code === "string" && args.code.trim()
           ? args.code
           : undefined;
-        if (code && !this.recordValidationAttempt(code).accepted) continue;
-        if (data.errorCount !== 0) continue;
+        if (!code) continue;
+        const errorCount = typeof data.errorCount === "number"
+          ? data.errorCount
+          : record.result.ok ? 0 : 1;
+        const target = data.validationTarget;
+        const targetLabel = target && typeof target === "object" &&
+            !Array.isArray(target) &&
+            typeof (target as Record<string, unknown>).path === "string"
+          ? (target as Record<string, unknown>).path as string
+          : undefined;
+        if (!record.result.ok || errorCount !== 0) {
+          this.recordValidationCandidate(code, {
+            status: "failed",
+            errorCount,
+            source: "validate_st_code",
+            ...(targetLabel ? { targetLabel } : {}),
+          });
+          continue;
+        }
+        if (!this.recordValidationAttempt(code).accepted) {
+          this.recordValidationCandidate(code, {
+            status: "failed",
+            errorCount: 1,
+            source: "validate_st_code",
+            ...(targetLabel ? { targetLabel } : {}),
+          });
+          continue;
+        }
         const hash = typeof data.validatedContentHash === "string"
           ? data.validatedContentHash
-          : code ? hashStContent(code) : undefined;
-        if (!code || !hash) continue;
-        this.recordSuccessfulValidation(code, hash);
+          : hashStContent(code);
+        if (!hash) continue;
+        this.recordSuccessfulValidationWithOptions(code, hash, {
+          source: "validate_st_code",
+          ...(targetLabel ? { targetLabel } : {}),
+          recordCandidate: true,
+        });
         continue;
       }
       if (record.name === "write_file" && record.result.ok) {
@@ -148,7 +413,24 @@ export class StValidationRuntimeService {
         if (content && !this.recordValidationAttempt(content).accepted) continue;
         const hash = preWriteValidationHash(data);
         if (content && hash === hashStContent(content)) {
-          this.recordSuccessfulValidation(content, hash);
+          this.recordSuccessfulValidationWithOptions(content, hash, {
+            source: "pre_write_validation",
+            recordCandidate: true,
+          });
+        }
+      } else if (record.name === "write_file") {
+        const args = parseArgs(record.args);
+        const content = typeof args.content === "string" ? args.content : undefined;
+        const errorCount = typeof data.errorCount === "number"
+          ? data.errorCount
+          : undefined;
+        if (content && errorCount !== undefined && errorCount > 0) {
+          this.recordValidationCandidate(content, {
+            status: "failed",
+            errorCount,
+            source: "pre_write_validation",
+            ...(typeof args.path === "string" ? { targetLabel: args.path } : {}),
+          });
         }
       }
     }

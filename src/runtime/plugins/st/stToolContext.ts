@@ -9,6 +9,7 @@ import {
 } from "./stWorkspaceDeliveryWorkflow";
 import {
   ST_VALIDATION_RUNTIME_SERVICE,
+  createStValidationState,
   type StValidationRuntimeService,
 } from "./stValidationRuntimeService";
 import type { ToolBuildContext } from "../../tools/toolBuildContext";
@@ -36,7 +37,7 @@ export function createStToolBuildContext(
   const validationService = context.workflow?.services?.get(
     ST_VALIDATION_RUNTIME_SERVICE,
   ) as StValidationRuntimeService | undefined;
-  const stValidationState = state ?? { hashes: new Set<string>() };
+  const stValidationState = state ?? createStValidationState();
   const stAnalyzer =
     context.services.get(ST_ANALYZER_SERVICE) as StAnalyzer | undefined;
   const stToolOptions =

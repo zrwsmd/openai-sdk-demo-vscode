@@ -22,6 +22,12 @@ import {
 } from "../../../diagnosticCompression";
 import { agentLog } from "../../../modelGateway";
 import {
+  identifyStDeclarations,
+  type StDeclaration,
+  type StValidationCandidate,
+  type StValidationCandidateSource,
+} from "../stValidationRuntimeService";
+import {
   beforeEffectFailureResult,
   optionalBooleanParam,
   optionalStringParam,
@@ -30,6 +36,39 @@ import {
 } from "../../../tools/toolBuildContext";
 import type { StToolBuildContext } from "../stToolContext";
 import type { StDraftIdentityCheck } from "../stValidationRuntimeService";
+
+function formatStDeclarations(declarations: readonly StDeclaration[]): string {
+  return declarations.length
+    ? declarations
+        .map((item) => `${item.category}/${item.kind}:${item.name}@L${item.line}`)
+        .join(",")
+    : "(none)";
+}
+
+function recordStValidationCandidate(
+  context: StToolBuildContext,
+  content: string,
+  result: {
+    hash: string;
+    status: "passed" | "failed";
+    errorCount: number;
+    source: StValidationCandidateSource;
+    targetLabel: string;
+  },
+): StValidationCandidate {
+  const candidate = context.validationService?.recordValidationCandidate(content, result) ?? {
+    ...result,
+    declarations: identifyStDeclarations(content),
+    sequence: 0,
+  };
+  agentLog(
+    `[st-validation] candidate #${candidate.sequence} status=${candidate.status} ` +
+      `source=${candidate.source} hash=${candidate.hash.slice(0, 12)} ` +
+      `target=${candidate.targetLabel ?? result.targetLabel} ` +
+      `declarations=${formatStDeclarations(candidate.declarations)}`,
+  );
+  return candidate;
+}
 
 export interface StPreWriteValidationResult {
   ok: boolean;
@@ -46,6 +85,7 @@ export interface StPreWriteValidationResult {
   engine: unknown;
   elapsedMs: number;
   contextLoaded: number;
+  validationCandidate?: StValidationCandidate;
 }
 
 export type ValidateStContentBeforeWrite = (
@@ -239,6 +279,19 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           validationInput.target.text,
         );
         if (draftIdentityCheck && !draftIdentityCheck.accepted) {
+          const rejectedHash =
+            validationInput.contentHash || hashStContent(validationInput.target.text);
+          const validationCandidate = recordStValidationCandidate(
+            ctx,
+            validationInput.target.text,
+            {
+              hash: rejectedHash,
+              status: "failed",
+              errorCount: 1,
+              source: "validate_st_code",
+              targetLabel: validationInput.label,
+            },
+          );
           const mismatch = draftIdentityMismatch(
             validationInput.label,
             draftIdentityCheck,
@@ -276,6 +329,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                 expectedProgramName: draftIdentityCheck.expectedProgramName,
                 actualProgramName: draftIdentityCheck.actualProgramName,
               },
+              validationCandidate,
             },
           });
           diagnosticReporter?.({
@@ -313,6 +367,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                 expectedProgramName: draftIdentityCheck.expectedProgramName,
                 actualProgramName: draftIdentityCheck.actualProgramName,
               },
+              validationCandidate,
               summary,
             },
             diagnostics: [mismatch.protocolDiagnostic],
@@ -355,6 +410,17 @@ export function createValidateStTools(ctx: StToolBuildContext) {
             `上下文文件=${result.contextLoaded}`,
           ].join(" ");
           const validatedHash = hashStContent(validationInput.target.text);
+          const validationCandidate = recordStValidationCandidate(
+            ctx,
+            validationInput.target.text,
+            {
+              hash: validatedHash,
+              status: validationFailed ? "failed" : "passed",
+              errorCount: counts.error,
+              source: "validate_st_code",
+              targetLabel: validationInput.label,
+            },
+          );
           const repairPacket = validationFailed
             ? compressDiagnostics({
                 toolName: "validate_st_code",
@@ -376,9 +442,14 @@ export function createValidateStTools(ctx: StToolBuildContext) {
             validatedStContent.add(validatedHash);
             if (!p) {
               if (validationService) {
-                validationService.recordSuccessfulValidation(
+                validationService.recordSuccessfulValidationWithOptions(
                   validationInput.target.text,
                   validatedHash,
+                  {
+                    source: "validate_st_code",
+                    targetLabel: validationInput.label,
+                    recordCandidate: false,
+                  },
                 );
               }
             }
@@ -400,6 +471,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                 totalBytes: validationInput.totalBytes,
                 contentHash: validationInput.contentHash || validatedHash,
               },
+              validationCandidate,
               diagnostics,
               ...(repairPacket
                 ? {
@@ -433,6 +505,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                 totalBytes: validationInput.totalBytes,
                 contentHash: validationInput.contentHash || validatedHash,
               },
+              validationCandidate,
               diagnostics,
               ...(repairPacket ? { repairPacket } : {}),
             });
@@ -452,6 +525,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                 totalBytes: validationInput.totalBytes,
                 contentHash: validationInput.contentHash || validatedHash,
               },
+              validationCandidate,
               diagnostics: repairPacket ? repairPacket.diagnostics : diagnostics,
               ...(repairPacket
                 ? {
@@ -512,6 +586,13 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       validationInput.target.text,
     );
     if (draftIdentityCheck && !draftIdentityCheck.accepted) {
+      const candidate = recordStValidationCandidate(ctx, content, {
+        hash: hashStContent(content),
+        status: "failed",
+        errorCount: 1,
+        source: "pre_write_validation",
+        targetLabel,
+      });
       const mismatch = draftIdentityMismatch(targetLabel, draftIdentityCheck);
       const summary = [
         "引擎=runtime-draft-guard",
@@ -534,6 +615,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
         engine: { id: "runtime-draft-guard" },
         elapsedMs: 0,
         contextLoaded: validationInput.context.length,
+        validationCandidate: candidate,
       };
     }
     const result = await stAnalyzer.verify(
@@ -552,6 +634,13 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     }));
     const validationFailed = isStValidationFailure(result);
     const contentHash = hashStContent(content);
+    const validationCandidate = recordStValidationCandidate(ctx, content, {
+      hash: contentHash,
+      status: validationFailed ? "failed" : "passed",
+      errorCount: counts.error,
+      source: "pre_write_validation",
+      targetLabel,
+    });
     const summary = [
       `引擎=${result.engine.id}`,
       `error=${counts.error}`,
@@ -572,7 +661,15 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     if (!validationFailed) {
       validatedStContent.add(contentHash);
       if (validationService) {
-        validationService.recordSuccessfulValidation(content, contentHash);
+        validationService.recordSuccessfulValidationWithOptions(
+          content,
+          contentHash,
+          {
+            source: "pre_write_validation",
+            targetLabel,
+            recordCandidate: false,
+          },
+        );
       }
     }
     audit({
@@ -592,6 +689,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           totalBytes: Buffer.byteLength(content, "utf8"),
           contentHash,
         },
+        validationCandidate,
         diagnostics,
         ...(repairPacket
           ? {
@@ -635,6 +733,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       engine: result.engine,
       elapsedMs: result.elapsedMs,
       contextLoaded: result.contextLoaded,
+      validationCandidate,
     };
   };
 
