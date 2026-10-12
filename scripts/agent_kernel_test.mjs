@@ -762,6 +762,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
       requiredVerificationTools: ['validate_st_code'],
     }],
   });
+  const diagnosticsStart = diagLines.length;
   const r = await runTestTurn(
     'ST草稿修正回归',
     async (name, args) => {
@@ -777,6 +778,9 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const diagnosticReports = r.events.filter(
     (event) => event.type === 'run.progress' && event.payload.stage === 'diagnostics.report',
   );
+  const validationLog = diagLines
+    .slice(diagnosticsStart)
+    .find((line) => line.startsWith('[st-validation] failed'));
   console.log(
     '[3c3] ST 草稿修正:工具链 =',
     toolCalls.join(','),
@@ -784,6 +788,8 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     asked.map((item) => item.name).join(','),
     '| 诊断旁路 =',
     diagnosticReports.length,
+    '| 运行日志 =',
+    validationLog ?? '(无)',
   );
   if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file') {
     throw new Error('ST 草稿修正没有按 校验失败 -> 再校验 -> 写入 顺序执行');
@@ -793,9 +799,12 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     diagnosticReports.length !== 1 ||
     !Array.isArray(diagnosticReport?.diagnostics) ||
     !diagnosticReport.diagnostics.length ||
-    diagnosticReport.repairPacket?.kind !== 'diagnostic_repair_packet'
+    diagnosticReport.repairPacket?.kind !== 'diagnostic_repair_packet' ||
+    !validationLog ||
+    !validationLog.includes('error=1') ||
+    !validationLog.includes('缺少 END_PROGRAM')
   ) {
-    throw new Error('ST 草稿校验失败没有产生完整诊断旁路和压缩修复包');
+    throw new Error('ST 草稿校验失败没有产生完整诊断旁路、压缩修复包和运行日志');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('ST 草稿修正触发了错误的审批次数或审批工具');

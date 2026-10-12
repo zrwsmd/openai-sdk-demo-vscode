@@ -20,6 +20,7 @@ import {
   repairPacketToProtocolDiagnostics,
   type DiagnosticRepairPacket,
 } from "../../../diagnosticCompression";
+import { agentLog } from "../../../modelGateway";
 import {
   beforeEffectFailureResult,
   optionalBooleanParam,
@@ -51,6 +52,32 @@ export type ValidateStContentBeforeWrite = (
   targetLabel: string,
   signal?: AbortSignal,
 ) => Promise<StPreWriteValidationResult>;
+
+function formatValidationFailureLog(
+  targetLabel: string,
+  summary: string,
+  packet: DiagnosticRepairPacket,
+): string {
+  const diagnostics = packet.diagnostics
+    .map((diagnostic) => {
+      const location = [
+        diagnostic.path,
+        diagnostic.line !== undefined ? `L${diagnostic.line}` : undefined,
+        diagnostic.character !== undefined ? `C${diagnostic.character}` : undefined,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(":");
+      return `${diagnostic.severity}/${diagnostic.code}` +
+        `${location ? `@${location}` : ""}: ${diagnostic.message}`;
+    })
+    .join(" || ");
+  return (
+    `[st-validation] failed target=${targetLabel} ${summary} ` +
+    `total=${packet.totalDiagnostics} omitted=${packet.omittedCount} ` +
+    `duplicates=${packet.duplicateCount} truncated=${packet.truncated} ` +
+    `diagnostics=${diagnostics || "(none)"}`
+  );
+}
 
 export function createValidateStTools(ctx: StToolBuildContext) {
   const {
@@ -267,6 +294,13 @@ export function createValidateStTools(ctx: StToolBuildContext) {
             },
           });
           if (validationFailed) {
+            if (repairPacket) {
+              agentLog(formatValidationFailureLog(
+                validationInput.label,
+                summary,
+                repairPacket,
+              ));
+            }
             diagnosticReporter?.({
               toolName: "validate_st_code",
               phase: "st_validation",
