@@ -837,6 +837,14 @@ const server = http.createServer((req, res) => {
         { name: 'read_file', args: JSON.stringify({ path: 'pa.txt' }) },
         { name: 'read_file', args: JSON.stringify({ path: 'pb.txt' }) },
       ]);
+    } else if (userText.includes('重复读取回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'repeat.txt' }));
+    } else if (
+      userText.includes('重复读取回归') &&
+      last.role === 'tool' &&
+      assistantToolCallCount('read_file') === 1
+    ) {
+      endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'repeat.txt' }));
     } else if (userText.includes('通用闭环') && completionGateRepair && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'read_file', JSON.stringify({ path: 'fixed.txt' }));
     } else if (userText.includes('通用闭环') && last.role !== 'tool') {
@@ -892,6 +900,10 @@ const server = http.createServer((req, res) => {
       }));
     } else if (last.role === 'tool' && userText.includes('并行读取')) {
       const text = '已并行读取 pa.txt 和 pb.txt。';
+      if (req_body.response_format) await streamStructuredText(res, model, text);
+      else await streamText(res, model, text);
+    } else if (last.role === 'tool' && userText.includes('重复读取回归')) {
+      const text = '已读取 repeat.txt 文件内容。';
       if (req_body.response_format) await streamStructuredText(res, model, text);
       else await streamText(res, model, text);
     } else if (last.role === 'tool' && userText.includes('空总结读取')) {

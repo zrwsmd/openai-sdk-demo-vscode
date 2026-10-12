@@ -1443,6 +1443,41 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
+// [8c0] 模型收到成功只读回执后重复发起相同 read_file → 只允许第一次真正执行
+{
+  await fs.writeFile(path.join(dir, 'repeat.txt'), '重复读取内容', 'utf8');
+  const capabilityLogStart = diagLines.length;
+  const r = await runTestTurn(
+    '重复读取回归 repeat.txt',
+    noApproval,
+    {},
+    new JsonFileSession(path.join(dir, 'duplicate-read-session.json')),
+  );
+  const started = r.events.filter(
+    (event) => event.type === 'tool.started' && event.payload.toolName === 'read_file',
+  );
+  const completed = r.events.filter(
+    (event) => event.type === 'tool.completed' && event.payload.toolName === 'read_file',
+  );
+  const dedupeLog = diagLines
+    .slice(capabilityLogStart)
+    .find((line) => line.includes('[tool-dedupe]'));
+  console.log(
+    '[8c0] 重复只读调用收敛:started =',
+    started.length,
+    '| completed =',
+    completed.length,
+    '| dedupe =',
+    dedupeLog ?? '(无)',
+  );
+  if (started.length !== 1 || completed.length !== 1) {
+    throw new Error('重复 read_file 没有在工具执行和 UI 事件层收敛');
+  }
+  if (!dedupeLog || !r.output.includes('repeat.txt')) {
+    throw new Error('重复 read_file 收敛后没有留下诊断或最终答复');
+  }
+}
+
 // [8b2] 工具成功但模型把 SDK/artifact 内部错误当最终总结 → 后端改用工具结果兜底
 {
   await fs.writeFile(path.join(dir, 'lk.txt'), 'artifact兜底内容', 'utf8');

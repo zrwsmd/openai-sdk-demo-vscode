@@ -39,6 +39,7 @@ export * from '../src/runtime/completionGate';
 export * from '../src/runtime/deliveryContract';
 export * from '../src/runtime/pipeline/stagePlan';
 export * from '../src/runtime/pipeline/stageRuntime';
+export * from '../src/runtime/toolCallDeduper';
 export * from '../src/runtime/plugins/st/stWorkspaceDeliveryPlan';
 export * from '../src/runtime/diagnosticCompression';
 export * from '../src/runtime/decision/agentDecision';

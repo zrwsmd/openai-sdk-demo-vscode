@@ -79,6 +79,7 @@ import {
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
+import { ToolCallDeduper } from "./toolCallDeduper";
 import { AgentDecisionService } from "./decision/agentDecision";
 import {
   buildCompletionEvidenceSummaries,
@@ -353,10 +354,21 @@ export async function runAgent(
   const toolRegistry = options.toolRegistry ?? getDefaultToolRegistry();
   const registeredToolRisks = toolRegistry.riskMap();
   const registeredToolEvidence = toolRegistry.evidenceMap();
+  const toolCatalog = toolRegistry.getToolCatalog();
   const toolRisk = (name: string): ToolRisk =>
     name === "deliver_artifact" || name === "report_plan_progress"
       ? "plan"
       : registeredToolRisks[name] ?? "execute";
+  const toolCallDeduper = new ToolCallDeduper(
+    (name) => {
+      const capability = toolCatalog.get(name);
+      return {
+        risk: capability?.risk ?? toolRisk(name),
+        effect: capability?.effect,
+      };
+    },
+    agentLog,
+  );
   const workflowDescriptor = getWorkflowDescriptor(
     options.workflowId,
     options.deliveryContract,
@@ -400,20 +412,19 @@ export async function runAgent(
     return `运行时工作流“${workflowRuntime.title}”已经完成，禁止再次调用 ${toolName} 以避免重复副作用；请直接基于已完成的工具回执给出最终总结。`;
   };
   let historicalArgumentRejectionLogged = false;
-  const runtimeToolGuard: RuntimeToolCallGuard | undefined =
-    workflowRuntime || historicalToolArgumentGuard
-      ? (toolName, input) => {
-          const historicalReason = historicalToolArgumentGuard?.(toolName, input);
-          if (historicalReason) {
-            if (!historicalArgumentRejectionLogged) {
-              historicalArgumentRejectionLogged = true;
-              agentLog(`[context] ${historicalReason}`);
-            }
-            return historicalReason;
-          }
-          return completedWorkflowToolRejection(toolName);
-        }
-      : undefined;
+  const runtimeToolGuard: RuntimeToolCallGuard = (toolName, input) => {
+    const historicalReason = historicalToolArgumentGuard?.(toolName, input);
+    if (historicalReason) {
+      if (!historicalArgumentRejectionLogged) {
+        historicalArgumentRejectionLogged = true;
+        agentLog(`[context] ${historicalReason}`);
+      }
+      return historicalReason;
+    }
+    const workflowReason = completedWorkflowToolRejection(toolName);
+    if (workflowReason) return workflowReason;
+    return toolCallDeduper.guard(toolName, input);
+  };
   const pipelineStageRuntime = new PipelineStageRuntime(workflowRuntime?.pipelinePlan);
   // Keep the existing structured contract for Responses and Anthropic.
   // Plain OpenAI Chat Completions conversations can stream text directly.
@@ -521,7 +532,7 @@ export async function runAgent(
   const availableToolNames = new Set(availableToolNameList);
   const availableToolsPrompt = renderAvailableToolsPrompt(
     availableToolNameList,
-    toolRegistry.getToolCatalog(),
+    toolCatalog,
   );
   const stableExecutionInstructions = (
     activePlan
@@ -1502,6 +1513,14 @@ export async function runAgent(
     if (event.type === "tool.started") {
       const toolName = protocolPayloadString(payload, "toolName");
       if (toolName && completedWorkflowToolRejection(toolName)) return true;
+      if (toolCallDeduper.shouldSuppressStarted({
+        toolName,
+        args: protocolPayloadString(payload, "args") ??
+          protocolPayloadString(payload, "arguments") ??
+          "",
+        callId: protocolPayloadString(payload, "callId"),
+        itemId: protocolPayloadString(payload, "itemId"),
+      })) return true;
       if (pipelineStageRuntime.shouldSuppressStarted({
         toolName,
         args: protocolPayloadString(payload, "args") ??
@@ -1557,6 +1576,13 @@ export async function runAgent(
       const callId = protocolPayloadString(payload, "callId");
       const toolName = protocolPayloadString(payload, "toolName");
       if (toolName && completedWorkflowToolRejection(toolName)) return true;
+      if (toolCallDeduper.shouldSuppressCompleted({
+        toolName,
+        callId,
+        itemId: protocolPayloadString(payload, "itemId"),
+        ok: payload.ok === true,
+        result: payload.result as ToolResult | undefined,
+      })) return true;
       if (pipelineStageRuntime.shouldSuppressCompleted(callId)) return true;
       if (callId && suppressedEffectCallIds.has(callId)) return true;
       if (callId) {
