@@ -1,0 +1,26 @@
+{
+  "name": "vscode-command-bridge",
+  "version": "1.0.0",
+  "description": "Call another VS Code extension's command from your own extension through a single npm method.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "vscode",
+    "extension",
+    "command",
+    "bridge",
+    "executeCommand"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  },
+  "scripts": {
+    "test": "node test.js"
+  }
+}

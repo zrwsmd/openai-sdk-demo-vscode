@@ -10,6 +10,9 @@ import {
   createStAnalyzerConfigExtension,
   createStRuntimeServicesFactory,
 } from './analyzerHost';
+import { createDevuniCommandPort } from './devuniHost';
+import { DEVUNI_COMMAND_PORT_SERVICE } from '../runtime/plugins/devuni/devuniCommandPort';
+import { createRuntimeServiceContainer } from '../runtime/services';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
@@ -177,10 +180,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       planTask,
       classifyWorkflowDecision,
       classifyDeliveryContract,
-      createRuntimeServices: createStRuntimeServicesFactory(
-        this.context,
-        (line) => this.log.appendLine(line),
-      ),
+      createRuntimeServices: (config) => {
+        // 各领域自己装配自己那份宿主能力,这里只做合并,不让插件互相知道对方。
+        const stServices = createStRuntimeServicesFactory(
+          this.context,
+          (line) => this.log.appendLine(line),
+        )(config);
+        return createRuntimeServiceContainer([
+          ...stServices,
+          [DEVUNI_COMMAND_PORT_SERVICE, createDevuniCommandPort()] as const,
+        ]);
+      },
       audit,
     });
   }
