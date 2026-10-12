@@ -119,6 +119,7 @@ import {
 } from "./agentRuntimeTools";
 import {
   composeToolSet,
+  buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
   HISTORICAL_CONTEXT_MARKER_TEXT,
   loadHistoricalToolArgumentGuard,
@@ -167,6 +168,7 @@ export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
   composeToolSet,
   createHistoricalToolArgumentGuard,
+  buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
   isToolHistoryItem,
   loadHistoricalToolArgumentGuard,
@@ -1302,7 +1304,7 @@ export async function runAgent(
   const finalizeStructuredOutputFromRuntime = async (): Promise<IndustrialAgentOutput | undefined> => {
     const protocolArtifacts = toProtocolArtifacts(structuredOutput?.artifacts ?? []);
     const gate = runCompletionGate(output, protocolArtifacts);
-      const evidence = buildCompletionEvidenceSummaries({
+    const evidence = buildCompletionEvidenceSummaries({
       records: workflowToolRecords(),
       gate,
       artifacts: protocolArtifacts,
@@ -1312,11 +1314,21 @@ export async function runAgent(
       authoritativeMessage: authoritativeWorkflowMessage(),
       extractors: workflowRuntime?.evidenceExtractors,
     });
+    let historicalContext = "";
+    try {
+      historicalContext = buildHistoricalExplanationContext(
+        await session.getItems(),
+        userText,
+      );
+    } catch {
+      // A final answer can still be produced from the current-turn evidence.
+    }
     const finalized = await runFinalOutputFinalizer({
       model,
       tracingDisabled,
       userText,
       currentMessage: output,
+      historicalContext,
       gate,
       records: workflowToolRecords(),
       evidence,

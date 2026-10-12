@@ -21,6 +21,7 @@ import {
   PROMPT_CACHE_DYNAMIC_MARKER,
   projectNewTurnSessionHistory,
   createHistoricalToolArgumentGuard,
+  buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
   isToolHistoryItem,
   sanitizeAssistantMessageForPersistence,
@@ -1164,6 +1165,49 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   if (!rawItems.some(isToolHistoryItem) || !r.output.includes('PLC 编程助手')) {
     throw new Error('历史隔离错误地修改了持久化会话或新请求没有完成');
   }
+}
+
+// [3a1] 历史普通消息可以用于解释旧状态,但工具调用链不进入解释参考,
+//      当前用户消息也不能被重复当成历史事实。
+{
+  const history = [
+    { type: 'message', role: 'user', content: '生成 TrafficLight_Ctrl.st' },
+    {
+      type: 'function_call',
+      name: 'write_file',
+      callId: 'old-write',
+      arguments: JSON.stringify({ path: 'TrafficLight_Ctrl.st' }),
+    },
+    {
+      type: 'function_call_result',
+      name: 'write_file',
+      callId: 'old-write',
+      output: JSON.stringify({ ok: true }),
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: JSON.stringify({
+        message: '之前只修改了 TrafficLight_Ctrl.st 的程序内容，PROGRAM 与任务绑定没有变化。',
+        diagnostics: [],
+        artifacts: [],
+        data: null,
+      }),
+    },
+    { type: 'message', role: 'user', content: '为什么没有写入 plc-runtime.json？' },
+  ];
+  const historicalContext = buildHistoricalExplanationContext(
+    history,
+    '为什么没有写入 plc-runtime.json？',
+  );
+  if (
+    !historicalContext.includes('PROGRAM 与任务绑定没有变化') ||
+    historicalContext.includes('function_call') ||
+    historicalContext.includes('当前用户')
+  ) {
+    throw new Error('历史解释参考没有正确隔离普通消息、工具链和当前请求');
+  }
+  console.log('[3a1] 历史解释参考与当前执行证据分离:通过');
 }
 
 // [3a2] 工具名有效但参数沿用了旧任务时,统一 guardrail 应在工具实现前拦截,

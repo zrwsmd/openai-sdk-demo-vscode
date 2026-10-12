@@ -6,6 +6,7 @@ createAppWorkflowRegistry();
 createAppToolRegistry();
 
 export * from '../src/runtime/agent';
+export { buildHistoricalExplanationContext } from '../src/runtime/agentHistory';
 export * from '../src/runtime/toolRegistry';
 export * from '../src/runtime/session';
 export * from '../src/app/chatSessions';

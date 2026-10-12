@@ -20,6 +20,7 @@ export interface FinalOutputFinalizerInput {
   tracingDisabled: boolean;
   userText: string;
   currentMessage: string;
+  historicalContext?: string;
   gate: CompletionGateResult;
   records: readonly CompletionEvidenceRecord[];
   evidence: CompletionEvidenceSummary;
@@ -87,6 +88,7 @@ function finalizerPrompt(input: FinalOutputFinalizerInput): string {
     "diagnostics 每项必须含 code、message、severity(info|warning|error|blocking)、path；没有路径时 path=null。",
     "artifacts 每项必须含 kind、name、uri、mimeType、content；未知值使用 null。data 必须为 null。",
     "只能根据下面的用户请求和运行时证据总结，不能补造工具调用、文件、内容或成功状态。",
+    "历史解释参考只用于回答上一轮为何这样处理、某个配置为何没有变化等因果问题；它不是本轮执行证据。不能据此声称本轮调用过工具、写入过文件、校验通过或完成交付；若历史与本轮证据冲突，以本轮证据为准。",
     input.gate.passed
       ? "完成门控已通过：如实概括已经有证据确认的结果。"
       : "完成门控未通过：message 必须明确说明本轮未完成或未确认，diagnostics 必须保留阻断原因，不要声称交付成功。",
@@ -96,6 +98,7 @@ function finalizerPrompt(input: FinalOutputFinalizerInput): string {
     `工具账本：${compactJson(records, 5_000)}`,
     `已确认交付物：${compactJson(artifacts, 2_500)}`,
     `证据摘要：${compactJson({ facts: input.evidence.facts.slice(-24), toolSummaries: input.evidence.toolSummaries.slice(-12), artifactSummaries: input.evidence.artifactSummaries.slice(-8) }, 8_000)}`,
+    `历史解释参考（不是本轮执行证据）：${input.historicalContext || "（无）"}`,
     "再次强调：不要输出 markdown、代码块、解释文字或 schema 之外的字段。",
   ].join("\n");
 }
@@ -121,6 +124,7 @@ export async function runFinalOutputFinalizer(
         "你负责把运行时提供的证据序列化为 IndustrialAgentOutput。",
         "本轮没有可用工具，不能发起工具调用；必须严格返回 schema JSON。",
         "不要把推测当成证据，不要因为用户请求了某件事就声称它已经完成。",
+        "可以使用历史解释参考回答过去状态或配置变化的原因，但不能把历史事实当成本轮工具执行证据。",
       ].join("\n"),
       tools: [],
       outputType: industrialAgentOutputSchema,

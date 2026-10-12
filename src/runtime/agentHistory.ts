@@ -435,7 +435,75 @@ export const NEW_TURN_CONTEXT_PROMPT =
   "历史消息中的具体文件路径、文件名、符号名、变量值、命令参数、工具名称和待办动作，默认不属于本轮目标。" +
   "除非当前 user 消息明确表达继续、接着、基于上面、刚才、该文件、这个结果等指代，且历史中的指代对象可以唯一确定，否则不要把历史中的具体值复制到本轮工具参数，也不要因为历史动作再次调用工具。" +
   "当前 user 消息明确给出的路径、文件名、符号和参数优先；当前消息没有给出具体目标时，不要从历史猜测一个具体目标，需要时先澄清。" +
-  "历史工具回执可以作为参考事实，但不代表本轮已经执行；本轮需要动作时，必须根据当前目标重新决定工具调用。";
+  "历史工具回执可以作为参考事实，但不代表本轮已经执行；本轮需要动作时，必须根据当前目标重新决定工具调用。" +
+  "如果当前用户是在追问上一轮为什么这样处理、某个配置为什么没有变化或当前状态如何形成，可以引用历史对话中已经明确陈述的事实来解释原因；本轮没有工具调用不等于不能解释历史状态。" +
+  "回答这类历史原因时，应明确这是根据之前对话或已确认记录得出的解释，不能把历史记录冒充成本轮刚刚完成的工具执行、文件写入、校验通过或交付证据。";
+
+/**
+ * Build a small, model-readable copy of the ordinary conversation before the
+ * current user turn. It is intentionally separate from the completion
+ * evidence ledger: this context can explain why an earlier state exists, but
+ * it can never prove that the current turn performed an action.
+ */
+export function buildHistoricalExplanationContext(
+  historyItems: readonly AgentInputItem[],
+  currentUserText: string,
+  maxCharacters = 8_000,
+): string {
+  const currentUserIndex = [...historyItems]
+    .map((item, index) => ({ item, index }))
+    .reverse()
+    .find(({ item }) => {
+      const value = item as {
+        type?: string;
+        role?: string;
+        content?: unknown;
+      };
+      return value.type === "message" &&
+        value.role === "user" &&
+        typeof value.content === "string" &&
+        value.content === currentUserText;
+    })?.index;
+
+  const candidates = historyItems
+    .slice(0, currentUserIndex ?? historyItems.length)
+    .filter((item) => {
+      const value = item as { type?: string; role?: string };
+      return value.type === "message" &&
+        (value.role === "user" || value.role === "assistant");
+    })
+    .map((item) => {
+      const value = item as {
+        role?: string;
+        content?: unknown;
+      };
+      let text = sessionOutputText(value.content)?.trim() ?? "";
+      if (value.role === "assistant") {
+        const trimmed = text.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(trimmed) as {
+              message?: unknown;
+            };
+            if (typeof parsed.message === "string") {
+              text = parsed.message.trim();
+            }
+          } catch {
+            // Keep non-JSON assistant text as-is.
+          }
+        }
+      }
+      text = stripHistoricalContextMarker(text);
+      if (!text) return undefined;
+      return `${value.role === "user" ? "用户" : "助手"}：${text}`;
+    })
+    .filter((item): item is string => Boolean(item));
+
+  if (candidates.length === 0) return "";
+  const full = candidates.slice(-12).join("\n");
+  if (full.length <= maxCharacters) return full;
+  return `…${full.slice(-(Math.max(1, maxCharacters) - 1))}`;
+}
 
 /**
  * Project persistent history for a genuinely new user turn.
