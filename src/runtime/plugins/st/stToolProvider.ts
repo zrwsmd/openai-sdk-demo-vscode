@@ -103,12 +103,40 @@ function fileBeforeEffect(
     const path = typeof args.path === "string" ? args.path : "";
     const workspaceRoot = typeof args.workspaceRoot === "string" ? args.workspaceRoot : "";
     const content = typeof args.content === "string" ? args.content : undefined;
+    const draftIdentityCheck = content === undefined
+      ? undefined
+      : context.validationService?.checkDraftIdentity(content);
     const contentAlreadyValidated = content === undefined
       ? false
       : context.validationService?.canWriteContent(content) ??
         context.validatedStContent.has(hashStContent(content));
     if (!path.toLowerCase().endsWith(".st") || content === undefined) {
       return undefined;
+    }
+    if (draftIdentityCheck && !draftIdentityCheck.accepted) {
+      const expected = draftIdentityCheck.expectedProgramName ?? "(未确定)";
+      const actual = draftIdentityCheck.actualProgramName ?? "(未找到 PROGRAM)";
+      const message =
+        `当前 ST 写入内容的 PROGRAM=${actual} 与本轮已锁定的 PROGRAM=${expected} 不一致；` +
+        "已阻止写入，请继续修正原始交付草稿。";
+      return {
+        ok: false,
+        error: message,
+        failureData: {
+          suppliedContentHash: hashStContent(content),
+          draftIdentity: {
+            expectedProgramName: draftIdentityCheck.expectedProgramName,
+            actualProgramName: draftIdentityCheck.actualProgramName,
+          },
+        },
+        diagnostics: [{
+          code: "st_draft_identity_mismatch",
+          message,
+          severity: "error" as const,
+          path,
+        }],
+        risk: "plan",
+      };
     }
 
     const receiptData: Record<string, unknown> = {};

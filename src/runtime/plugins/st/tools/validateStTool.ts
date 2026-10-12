@@ -29,6 +29,7 @@ import {
   parseOptionalString,
 } from "../../../tools/toolBuildContext";
 import type { StToolBuildContext } from "../stToolContext";
+import type { StDraftIdentityCheck } from "../stValidationRuntimeService";
 
 export interface StPreWriteValidationResult {
   ok: boolean;
@@ -77,6 +78,40 @@ function formatValidationFailureLog(
     `duplicates=${packet.duplicateCount} truncated=${packet.truncated} ` +
     `diagnostics=${diagnostics || "(none)"}`
   );
+}
+
+function draftIdentityMismatch(
+  targetLabel: string,
+  check: StDraftIdentityCheck,
+): {
+  message: string;
+  diagnostic: StDiagnostic;
+  protocolDiagnostic: Diagnostic;
+} {
+  const expected = check.expectedProgramName ?? "(未确定)";
+  const actual = check.actualProgramName ?? "(未找到 PROGRAM)";
+  const message =
+    `当前 ST 草稿的 PROGRAM=${actual} 与本轮已锁定的 PROGRAM=${expected} 不一致；` +
+    "请继续修正原始交付草稿，不要生成 Probe、Demo 等无关临时程序。";
+  return {
+    message,
+    diagnostic: {
+      severity: "error",
+      code: "st_draft_identity_mismatch",
+      message,
+      path: targetLabel,
+      line: 1,
+      character: 1,
+      endLine: 1,
+      endCharacter: 1,
+    },
+    protocolDiagnostic: {
+      code: "st_draft_identity_mismatch",
+      message,
+      severity: "error",
+      path: targetLabel,
+    },
+  };
 }
 
 export function createValidateStTools(ctx: StToolBuildContext) {
@@ -200,6 +235,91 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           code,
           loadWorkspaceContext,
         );
+        const draftIdentityCheck = validationService?.recordValidationAttempt(
+          validationInput.target.text,
+        );
+        if (draftIdentityCheck && !draftIdentityCheck.accepted) {
+          const mismatch = draftIdentityMismatch(
+            validationInput.label,
+            draftIdentityCheck,
+          );
+          const summary = [
+            "引擎=runtime-draft-guard",
+            "error=1",
+            "warning=0",
+            `上下文文件=${validationInput.context.length}`,
+          ].join(" ");
+          agentLog(
+            `[st-validation] rejected target=${validationInput.label} ` +
+            `expectedProgram=${draftIdentityCheck.expectedProgramName ?? "(none)"} ` +
+            `actualProgram=${draftIdentityCheck.actualProgramName ?? "(none)"}`,
+          );
+          audit({
+            type: "tool_completed",
+            toolName: "validate_st_code",
+            risk: "plan",
+            ok: false,
+            summary,
+            metadata: {
+              errorCount: 1,
+              warningCount: 0,
+              infoCount: 0,
+              validationTarget: {
+                path: validationInput.label,
+                complete: validationInput.complete,
+                totalLines: validationInput.totalLines,
+                totalBytes: validationInput.totalBytes,
+                contentHash: validationInput.contentHash ||
+                  hashStContent(validationInput.target.text),
+              },
+              draftIdentity: {
+                expectedProgramName: draftIdentityCheck.expectedProgramName,
+                actualProgramName: draftIdentityCheck.actualProgramName,
+              },
+            },
+          });
+          diagnosticReporter?.({
+            toolName: "validate_st_code",
+            phase: "st_draft_identity",
+            summary,
+            counts: { error: 1, warning: 0, info: 0 },
+            validationTarget: {
+              path: validationInput.label,
+              complete: validationInput.complete,
+              totalLines: validationInput.totalLines,
+              totalBytes: validationInput.totalBytes,
+              contentHash: validationInput.contentHash ||
+                hashStContent(validationInput.target.text),
+            },
+            diagnostics: [mismatch.diagnostic],
+          });
+          return toolResult({
+            ok: false,
+            error: mismatch.message,
+            data: {
+              engine: "runtime-draft-guard",
+              errorCount: 1,
+              warningCount: 0,
+              infoCount: 0,
+              validationTarget: {
+                path: validationInput.label,
+                complete: validationInput.complete,
+                totalLines: validationInput.totalLines,
+                totalBytes: validationInput.totalBytes,
+                contentHash: validationInput.contentHash ||
+                  hashStContent(validationInput.target.text),
+              },
+              draftIdentity: {
+                expectedProgramName: draftIdentityCheck.expectedProgramName,
+                actualProgramName: draftIdentityCheck.actualProgramName,
+              },
+              summary,
+            },
+            diagnostics: [mismatch.protocolDiagnostic],
+            effect: "none",
+            risk: "plan",
+          });
+        }
         const validationCacheKey = inlineStValidation
           ? [
               "validate_st_code",
@@ -388,6 +508,34 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       content,
       stToolOptions.loadWorkspaceContext,
     );
+    const draftIdentityCheck = validationService?.recordValidationAttempt(
+      validationInput.target.text,
+    );
+    if (draftIdentityCheck && !draftIdentityCheck.accepted) {
+      const mismatch = draftIdentityMismatch(targetLabel, draftIdentityCheck);
+      const summary = [
+        "引擎=runtime-draft-guard",
+        "error=1",
+        "warning=0",
+        `上下文文件=${validationInput.context.length}`,
+      ].join(" ");
+      agentLog(
+        `[st-validation] rejected target=${targetLabel} ` +
+        `expectedProgram=${draftIdentityCheck.expectedProgramName ?? "(none)"} ` +
+        `actualProgram=${draftIdentityCheck.actualProgramName ?? "(none)"}`,
+      );
+      return {
+        ok: false,
+        contentHash: hashStContent(content),
+        counts: { error: 1, warning: 0, info: 0 },
+        diagnostics: [mismatch.diagnostic],
+        protocolDiagnostics: [mismatch.protocolDiagnostic],
+        summary,
+        engine: { id: "runtime-draft-guard" },
+        elapsedMs: 0,
+        contextLoaded: validationInput.context.length,
+      };
+    }
     const result = await stAnalyzer.verify(
       {
         workspaceRoot: workspace.primaryRoot,
