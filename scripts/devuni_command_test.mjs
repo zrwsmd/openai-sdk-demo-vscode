@@ -4,6 +4,8 @@ import path from 'node:path';
 import {
   DEVUNI_COMMANDS,
   DEVUNI_COMMAND_PORT_SERVICE,
+  WorkflowDecisionService,
+  WorkflowRegistry,
   ToolRegistry,
   createAppToolRegistry,
   createDevuniToolProvider,
@@ -43,13 +45,55 @@ assert(
 const appRegistry = createAppToolRegistry();
 const catalog = appRegistry.getToolCatalog();
 
-const forCreate = catalog.toolsForFallback('file_edit', '帮我在 E 盘创建一个工程');
+const fallbackService = new WorkflowDecisionService(
+  () => {},
+  undefined,
+  new WorkflowRegistry(),
+  catalog,
+);
+const fallbackConfig = {
+  baseUrl: '',
+  apiKey: 'test',
+  model: 'test',
+  exportDir: '',
+  workspaceRoot: '',
+  jev: { enabled: false },
+};
+const forCreateDecision = await fallbackService.decide(
+  fallbackConfig,
+  '帮我在 E 盘创建一个工程',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'file_edit',
+      confidence: 0.9,
+      reason: 'create project fallback visibility',
+    }),
+  },
+);
+const forCreate = forCreateDecision.allowedTools ?? [];
 assert(
   forCreate.includes('devuni_create_project'),
   `file_edit 候选里没有 devuni_create_project: ${forCreate.join('|')}`,
 );
 
-const forOptions = catalog.toolsForFallback('read_only', '支持哪些设备型号和工程语言');
+const forOptionsDecision = await fallbackService.decide(
+  fallbackConfig,
+  '支持哪些设备型号和工程语言',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'fallback',
+      mode: 'read_only',
+      confidence: 0.9,
+      reason: 'project options fallback visibility',
+    }),
+  },
+);
+const forOptions = forOptionsDecision.allowedTools ?? [];
 assert(
   forOptions.includes('devuni_project_options'),
   `read_only 候选里没有 devuni_project_options: ${forOptions.join('|')}`,

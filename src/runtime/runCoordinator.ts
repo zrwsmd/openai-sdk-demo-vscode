@@ -231,6 +231,7 @@ function hasSelectedRunContext(run: DurableRunRecord | undefined): boolean {
   return !!run && (
     !!run.workflowId ||
     !!run.deliveryContract ||
+    !!run.fallbackMode ||
     (run.toolAllowlist?.length ?? 0) > 0 ||
     !!run.plan ||
     !!run.teamTask
@@ -780,10 +781,12 @@ export class RunCoordinator {
               reason: workflowDecision.reason,
             });
           run.toolAllowlist = undefined;
+          run.fallbackMode = undefined;
         } else {
           run.workflowId = undefined;
           run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
+          run.fallbackMode = workflowDecision.mode;
         }
         run.decisionSignals = workflowDecision.signals;
         if (!this.isClearing(generation) && !this.stopRequested) {
@@ -1186,6 +1189,7 @@ export class RunCoordinator {
         previous.deliveryContract,
         previous.workflowId,
         previous.decisionSignals,
+        previous.fallbackMode,
       );
     const preserveSelectedContext =
       options.preserveSelectedContextForSupplement === true &&
@@ -1309,10 +1313,12 @@ export class RunCoordinator {
               reason: workflowDecision.reason,
             });
           run.toolAllowlist = undefined;
+          run.fallbackMode = undefined;
         } else {
           run.workflowId = undefined;
           run.deliveryContract = undefined;
           run.toolAllowlist = [...(workflowDecision.allowedTools ?? [])];
+          run.fallbackMode = workflowDecision.mode;
         }
         run.decisionSignals = workflowDecision.signals;
       } catch (error) {
@@ -1550,6 +1556,7 @@ export class RunCoordinator {
         previous.deliveryContract,
         previous.workflowId,
         previous.decisionSignals,
+        previous.fallbackMode,
       );
       if (this.isClearing(generation)) return;
       await this.audit('retry_started', run, { previousRunId: previous.id });
@@ -1769,6 +1776,7 @@ export class RunCoordinator {
             taskPlan: run.plan,
             teamTask: run.teamTask,
             workflowId: run.workflowId,
+            fallbackMode: run.fallbackMode,
             deliveryContract: run.deliveryContract,
             workflowRegistry: this.workflowRegistry,
             toolRegistry: this.toolRegistry,
@@ -2257,6 +2265,7 @@ export class RunCoordinator {
               preserveToolHistory: options.preserveToolHistory,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
+              fallbackMode: run.fallbackMode,
               workflowRegistry: this.workflowRegistry,
               toolRegistry: this.toolRegistry,
               signal: nodeController.signal,

@@ -85,7 +85,10 @@ import {
   buildCompletionEvidenceSummaries,
   compactCompletionDecisionText,
 } from "./decision/completionEvidence";
-import { resolveWorkflowBusinessToolPolicy } from "./workflow/types";
+import {
+  resolveWorkflowBusinessToolPolicy,
+  type WorkflowFallbackMode,
+} from "./workflow/types";
 import type { WorkflowRegistry } from "./workflow/registry";
 import {
   runFinalOutputFinalizer,
@@ -235,6 +238,8 @@ export interface AgentRunOptions {
   toolRegistry?: ToolRegistry;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
+  /** Triage mode selected for a workflow fallback; keeps prompt policy aligned with tools. */
+  fallbackMode?: WorkflowFallbackMode;
   /**
    * Supplemental instruction supplied while resuming a paused run. It refines
    * presentation or execution preferences without replacing the original
@@ -315,6 +320,23 @@ const GENERIC_PLAN_SYSTEM_PROMPT =
   "只在用户目标需要时调用相应工具，不要臆造额外领域步骤。" +
   "写文件、运行命令和设备写入必须经过现有审批、策略与审计约束；工具失败时如实处理。" +
   "最终答复必须基于真实工具回执和计划步骤结果，不得声称未完成的动作已经完成。";
+
+export function renderFallbackModeInstructions(mode: WorkflowFallbackMode): string {
+  switch (mode) {
+    case "general_chat":
+      return "\n\n本轮分诊档位：普通问答。以查看和回答为主；如果需要修改文件、执行命令或产生其他副作用，先向用户确认，再调用相应工具。";
+    case "read_only":
+      return "\n\n本轮分诊档位：只读。可以读取、查询、分析和制定计划；需要修改文件、执行命令或产生其他副作用时，先向用户确认，并遵守审批和工具回执约束。";
+    case "file_edit":
+      return "\n\n本轮分诊档位：文件编辑。可以读取和修改工作区文件；写文件、执行命令或其他副作用动作前，先向用户确认，并遵守审批和工具回执约束。";
+    case "command_query":
+      return "\n\n本轮分诊档位：命令查询。可以读取工作区、查询环境并执行受控命令；修改文件或产生其他副作用前，先向用户确认，并遵守审批和工具回执约束。";
+    case "needs_clarification":
+      return "\n\n本轮分诊档位：需要澄清。先确认交付目标、范围和关键参数；用户确认前不要修改文件、执行命令、创建工程或进行其他副作用操作。";
+    case "blocked_high_risk":
+      return "\n\n本轮分诊档位：高风险拦截。当前只允许读取、查询和制定计划；不要修改文件、执行命令、创建工程或进行其他副作用操作。";
+  }
+}
 
 // ---------- 模型构建(网关适配:chat_completions 协议) ----------
 
@@ -536,6 +558,12 @@ export async function runAgent(
     availableToolNameList,
     toolCatalog,
   );
+  const fallbackModePrompt =
+    !workflowRuntime &&
+    !workflowDescriptor &&
+    options.fallbackMode !== undefined
+      ? renderFallbackModeInstructions(options.fallbackMode)
+      : "";
   const stableExecutionInstructions = (
     activePlan
       ? BASE_AGENT_PROMPT +
@@ -558,7 +586,7 @@ export async function runAgent(
         : workflowRuntime
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
-  );
+  ) + fallbackModePrompt;
   const dynamicExecutionInstructions = activePlan
     ? "\n\n计划如下：\n" + renderTaskPlan(activePlan)
     : options.teamTask

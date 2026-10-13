@@ -12,6 +12,15 @@ import {
 
 const coreRegistry = new ToolRegistry([createCoreToolProvider()]);
 const coreCatalog = coreRegistry.getToolCatalog();
+const coreFallbackBusinessTools = coreCatalog.list()
+  .filter((capability) => capability.fallbackModes?.length !== 0)
+  .map((capability) => capability.name);
+const coreSafeFallbackBusinessTools = coreCatalog.list()
+  .filter((capability) =>
+    capability.fallbackModes?.length !== 0 &&
+    (capability.risk === 'read' || capability.risk === 'plan'),
+  )
+  .map((capability) => capability.name);
 
 assert(coreCatalog.has('read_file'));
 assert.equal(coreCatalog.get('read_file')?.providerId, 'core');
@@ -462,6 +471,7 @@ const fallbackDecision = await decisionService.decide(
 assert.equal(fallbackDecision.kind, 'fallback');
 assert.deepEqual(fallbackDecision.allowedTools, [
   'query_modbus_device',
+  'library_symbol',
 ]);
 
 const safeFallbackDecision = await decisionService.decide(
@@ -586,6 +596,7 @@ const localWorkflow = {
   title: 'Local precedence test',
   description: 'Verifies local workflow detection runs before safe Jev fallback.',
   runtimeManaged: false,
+  businessToolNames: ['read_file'],
   localMatch: () => ({
     matched: true,
     confidence: 0.93,
@@ -630,6 +641,8 @@ const localPrecedenceDecision = await new WorkflowDecisionService(
 assert.equal(localPrecedenceDecision.kind, 'workflow');
 assert.equal(localPrecedenceDecision.workflow.id, 'local_precedence');
 assert.equal(localPrecedenceDecision.source, 'local');
+assert.deepEqual(localPrecedenceDecision.workflow.businessToolNames, ['read_file']);
+assert.equal(localPrecedenceDecision.allowedTools, undefined);
 assert.equal(localWorkflowClassifierCalls, 0);
 
 let modelClassifierCallsForRejectedSafeJev = 0;
@@ -728,7 +741,7 @@ const jevCommandDecision = await new WorkflowDecisionService(
 assert.equal(jevCommandDecision.kind, 'fallback');
 assert.equal(jevCommandDecision.mode, 'command_query');
 assert.equal(jevCommandDecision.source, 'jev');
-assert.deepEqual(jevCommandDecision.allowedTools, ['run_command']);
+assert.deepEqual(jevCommandDecision.allowedTools, coreFallbackBusinessTools);
 assert.equal(modelClassifierCalledForJevCommand, false);
 
 const unsafeJevCommandDecision = await new WorkflowDecisionService(
@@ -769,7 +782,7 @@ const unsafeJevCommandDecision = await new WorkflowDecisionService(
 );
 assert.equal(unsafeJevCommandDecision.kind, 'fallback');
 assert.equal(unsafeJevCommandDecision.mode, 'file_edit');
-assert(!unsafeJevCommandDecision.allowedTools?.includes('run_command'));
+assert.deepEqual(unsafeJevCommandDecision.allowedTools, coreFallbackBusinessTools);
 
 const explicitAllowlistDecision = await decisionService.decide(
   {
@@ -793,7 +806,10 @@ const explicitAllowlistDecision = await decisionService.decide(
     }),
   },
 );
-assert.deepEqual(explicitAllowlistDecision.allowedTools, ['legacy_custom_tool']);
+assert.deepEqual(explicitAllowlistDecision.allowedTools, [
+  'query_modbus_device',
+  'library_symbol',
+]);
 
 const orderedAllowlistDecision = await new WorkflowDecisionService(
   () => {},
@@ -824,7 +840,86 @@ const orderedAllowlistDecision = await new WorkflowDecisionService(
 );
 assert.deepEqual(
   orderedAllowlistDecision.allowedTools,
-  ['read_file', 'write_file', 'edit_file', 'report_plan_progress'],
+  coreFallbackBusinessTools,
 );
+
+for (const mode of [
+  'general_chat',
+  'read_only',
+  'file_edit',
+  'command_query',
+  'needs_clarification',
+  'blocked_high_risk',
+]) {
+  const decision = await new WorkflowDecisionService(
+    () => {},
+    new AgentDecisionService(() => {}),
+    new WorkflowRegistry(),
+    coreCatalog,
+  ).decide(
+    {
+      baseUrl: '',
+      apiKey: 'test',
+      model: 'test',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { enabled: false },
+    },
+    `测试 fallback 模式 ${mode}`,
+    undefined,
+    [],
+    {
+      modelClassifier: async () => ({
+        kind: 'fallback',
+        mode,
+        confidence: 0.9,
+        reason: 'fallback visibility policy test',
+      }),
+    },
+  );
+  assert.equal(decision.kind, 'fallback');
+  if (mode === 'blocked_high_risk' || mode === 'needs_clarification') {
+    assert.deepEqual(decision.allowedTools, coreSafeFallbackBusinessTools);
+    assert(!decision.allowedTools.includes('write_file'));
+    assert(!decision.allowedTools.includes('run_command'));
+  } else {
+    assert.deepEqual(decision.allowedTools, coreFallbackBusinessTools);
+    assert(decision.allowedTools.includes('write_file'));
+    assert(decision.allowedTools.includes('edit_file'));
+    assert(decision.allowedTools.includes('run_command'));
+  }
+}
+
+for (const [mode, expected] of [
+  ['command_query', coreFallbackBusinessTools],
+  ['blocked_high_risk', coreSafeFallbackBusinessTools],
+]) {
+  const staticDecision = await new WorkflowDecisionService(
+    () => {},
+    new AgentDecisionService(() => {}),
+    new WorkflowRegistry(),
+  ).decide(
+    {
+      baseUrl: '',
+      apiKey: 'test',
+      model: 'test',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { enabled: false },
+    },
+    `测试无目录 fallback 模式 ${mode}`,
+    undefined,
+    [],
+    {
+      modelClassifier: async () => ({
+        kind: 'fallback',
+        mode,
+        confidence: 0.9,
+        reason: 'static fallback visibility policy test',
+      }),
+    },
+  );
+  assert.deepEqual(staticDecision.allowedTools, expected);
+}
 
 console.log('tool catalog tests passed');

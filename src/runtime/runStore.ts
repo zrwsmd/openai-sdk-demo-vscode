@@ -19,6 +19,7 @@ import { parseDeliveryContract, type DeliveryContract } from './deliveryContract
 import type { JevDecisionSettings } from './decision/agentDecision';
 import type {
   WorkflowDecisionSignals,
+  WorkflowFallbackMode,
   WorkflowId,
 } from './workflow/types';
 import type { ModelContextProfile } from './contextManager';
@@ -91,6 +92,8 @@ export interface DurableRunRecord {
   workflowId?: WorkflowId;
   /** Jev-derived routing/tool signals reused across safe preflight resumes. */
   decisionSignals?: WorkflowDecisionSignals;
+  /** Fallback mode selected by triage; persisted so resumed prompts keep the same rule. */
+  fallbackMode?: WorkflowFallbackMode;
   /** Optional runtime tool allowlist selected by workflow fallback routing. */
   toolAllowlist?: string[];
   approvals: ApprovalRequest[];
@@ -132,6 +135,19 @@ interface StoreDocument {
 
 const EMPTY_USAGE: TurnUsage = { inputTokens: 0, outputTokens: 0, requests: 0 };
 const MAX_HISTORY_EVENTS = 1_000;
+const WORKFLOW_FALLBACK_MODES: readonly WorkflowFallbackMode[] = [
+  'general_chat',
+  'read_only',
+  'file_edit',
+  'command_query',
+  'needs_clarification',
+  'blocked_high_risk',
+];
+
+function isWorkflowFallbackMode(value: unknown): value is WorkflowFallbackMode {
+  return typeof value === 'string' &&
+    WORKFLOW_FALLBACK_MODES.includes(value as WorkflowFallbackMode);
+}
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -186,6 +202,7 @@ export interface RunStore {
     deliveryContract?: DeliveryContract,
     workflowId?: WorkflowId,
     decisionSignals?: WorkflowDecisionSignals,
+    fallbackMode?: WorkflowFallbackMode,
   ): Promise<DurableRunRecord>;
   resume(runId: string): Promise<DurableRunRecord>;
   update(run: DurableRunRecord): Promise<void>;
@@ -437,6 +454,7 @@ export class JsonRunStore implements RunStore {
       (run.canContinue === true && run.status !== 'paused') ||
       (run.workflowId !== undefined && typeof run.workflowId !== 'string') ||
       (run.decisionSignals !== undefined && !isWorkflowDecisionSignals(run.decisionSignals)) ||
+      (run.fallbackMode !== undefined && !isWorkflowFallbackMode(run.fallbackMode)) ||
       (run.toolAllowlist !== undefined &&
         (!Array.isArray(run.toolAllowlist) || run.toolAllowlist.some((name) => typeof name !== 'string'))) ||
       !Array.isArray(run.approvals) ||
@@ -564,6 +582,7 @@ export class JsonRunStore implements RunStore {
     deliveryContract?: DeliveryContract,
     workflowId?: WorkflowId,
     decisionSignals?: WorkflowDecisionSignals,
+    fallbackMode?: WorkflowFallbackMode,
   ): Promise<DurableRunRecord> {
     const now = new Date().toISOString();
     const run: DurableRunRecord = {
@@ -581,6 +600,7 @@ export class JsonRunStore implements RunStore {
       deliveryContract,
       workflowId,
       decisionSignals,
+      fallbackMode,
       output: '',
       events: [],
       usage: { ...EMPTY_USAGE },

@@ -237,9 +237,10 @@ export class WorkflowDecisionService {
         ...(contract ? { contract } : {}),
       };
     }
-    const allowedTools = decision.allowedTools
-      ? this.orderToolNames(decision.allowedTools)
-      : this.allowedToolsForFallback(decision.mode, userText);
+    // Fallback tool visibility is a runtime policy, not a model-provided
+    // allowlist. Keep legacy classifier fields for compatibility, but do not
+    // let them reintroduce the old risk-filtered surface.
+    const allowedTools = this.allowedToolsForFallback(decision.mode, userText);
     this.log(
       `[workflow] model fallback ${decision.mode}(${decision.confidence.toFixed(2)}): ${decision.reason}` +
         (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
@@ -276,32 +277,22 @@ export class WorkflowDecisionService {
 
   private allowedToolsForFallback(
     mode: WorkflowFallbackMode,
-    userText?: string,
+    _userText?: string,
   ): readonly string[] | undefined {
     if (this.toolCatalog) {
-      return this.toolCatalog.toolsForFallback(mode, userText, {
-        scope: "workflow-fallback",
-      });
+      const fallbackVisible = this.toolCatalog
+        .list()
+        .filter((capability) => capability.fallbackModes?.length !== 0);
+      const selected = mode === "blocked_high_risk" || mode === "needs_clarification"
+        ? fallbackVisible
+          .filter((capability) => capability.risk === "read" || capability.risk === "plan")
+          .map((capability) => capability.name)
+        : fallbackVisible.map((capability) => capability.name);
+      return this.toolCatalog.orderToolNames(selected);
     }
     return allowedToolsForFallback(mode);
   }
 
-  private orderToolNames(names: readonly string[]): readonly string[] {
-    const unique = [
-      ...new Set(
-        names
-          .filter((name): name is string => typeof name === "string")
-          .map((name) => name.trim())
-          .filter(Boolean),
-      ),
-    ];
-    if (this.toolCatalog) return this.toolCatalog.orderToolNames(unique);
-    return unique.sort((left, right) => {
-      if (left < right) return -1;
-      if (left > right) return 1;
-      return 0;
-    });
-  }
 }
 
 function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {
@@ -455,10 +446,29 @@ function fallbackReason(mode: WorkflowFallbackMode, hint: TaskDecisionHint): str
   return "未命中已注册 workflow，降级为普通问答";
 }
 
-function allowedToolsForFallback(mode: WorkflowFallbackMode): readonly string[] | undefined {
-  if (mode === "read_only") return ["list_files", "read_file", "search_files"];
-  if (mode === "file_edit") {
-    return ["list_files", "read_file", "search_files", "write_file", "edit_file"];
-  }
-  return [];
+const STATIC_FALLBACK_BUSINESS_TOOLS = Object.freeze([
+  "get_io_table",
+  "read_plc_variables",
+  "list_files",
+  "read_file",
+  "search_files",
+  "write_file",
+  "edit_file",
+  "request_clarification",
+  "run_command",
+] as const);
+
+const STATIC_SAFE_FALLBACK_BUSINESS_TOOLS = Object.freeze([
+  "get_io_table",
+  "read_plc_variables",
+  "list_files",
+  "read_file",
+  "search_files",
+  "request_clarification",
+] as const);
+
+function allowedToolsForFallback(mode: WorkflowFallbackMode): readonly string[] {
+  return mode === "blocked_high_risk" || mode === "needs_clarification"
+    ? STATIC_SAFE_FALLBACK_BUSINESS_TOOLS
+    : STATIC_FALLBACK_BUSINESS_TOOLS;
 }

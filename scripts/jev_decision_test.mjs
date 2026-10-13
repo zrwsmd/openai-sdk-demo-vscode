@@ -377,6 +377,10 @@ globalThis.fetch = async () => response({
 });
 try {
   const inspectionLogs = [];
+  const defaultCatalog = getDefaultToolRegistry().getToolCatalog();
+  const expectedFallbackTools = defaultCatalog.list()
+    .filter((capability) => capability.fallbackModes?.length !== 0)
+    .map((capability) => capability.name);
   const workflowDecision = await new WorkflowDecisionService(
     (line) => inspectionLogs.push(line),
     undefined,
@@ -397,17 +401,18 @@ try {
     workflowDecision.kind !== 'fallback' ||
     workflowDecision.source !== 'jev' ||
     workflowDecision.mode !== 'read_only' ||
-    workflowDecision.allowedTools?.length !== 1 ||
-    workflowDecision.allowedTools[0] !== 'st_dependency_map'
+    JSON.stringify(workflowDecision.allowedTools) !== JSON.stringify(expectedFallbackTools) ||
+    !workflowDecision.allowedTools.includes('write_file')
   ) {
-    throw new Error('ST dependency analysis did not use generic read_only ToolCatalog fallback');
+    throw new Error('ST dependency analysis did not use the full generic read_only fallback surface');
   }
   if (
     !inspectionLogs.some((line) =>
-      /\[workflow\] Jev safe fallback read_only.*tools=st_dependency_map/u.test(line),
+      line.includes(`[workflow] Jev safe fallback read_only`) &&
+      line.includes(`tools=${expectedFallbackTools.join('|')}`),
     )
   ) {
-    throw new Error('ST dependency analysis Jev fallback log did not name the selected tool');
+    throw new Error('ST dependency analysis Jev fallback log did not name the full selected tool surface');
   }
 } finally {
   globalThis.fetch = originalFetch;

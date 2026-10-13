@@ -66,6 +66,8 @@ const config = {
 
 // Lifecycle records remain readable from a fresh store instance.
 const run = await store.begin('export', config, 3, 'operation-1');
+run.fallbackMode = 'file_edit';
+run.toolAllowlist = ['read_file', 'write_file', 'edit_file'];
 run.status = 'awaiting_approval';
 run.state = '{"sdk":"state"}';
 run.approvals = [{ id: 'call-1', name: 'write_file', args: '{}' }];
@@ -73,6 +75,12 @@ await store.update(run);
 const restored = await new JsonRunStore(file).getActive();
 if (restored?.state !== run.state || restored.approvals[0]?.id !== 'call-1') {
   throw new Error('durable approval checkpoint was not restored');
+}
+if (
+  restored.fallbackMode !== 'file_edit' ||
+  JSON.stringify(restored.toolAllowlist) !== JSON.stringify(['read_file', 'write_file', 'edit_file'])
+) {
+  throw new Error('fallback mode and tool allowlist were not persisted with the durable run');
 }
 if (
   restored.config.policyContext?.dryRun !== true ||

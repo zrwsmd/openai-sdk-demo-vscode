@@ -564,8 +564,10 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   let routeCalls = 0;
   let planCalls = 0;
   let executorCalls = 0;
+  let receivedFallbackMode;
   const test = await fixture(async (_cfg, _session, _userText, options) => {
     executorCalls += 1;
+    receivedFallbackMode = options.fallbackMode;
     if (options.taskPlan !== undefined || options.teamTask !== undefined) {
       throw new Error('workflow fallback executor should not receive plan/team task');
     }
@@ -587,19 +589,20 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   });
   await test.coordinator.start('普通问题', { ...config, orchestration: 'auto' }, 'key');
   const completed = await test.store.getLast();
-  const safeToolAllowlist = completed?.toolAllowlist ?? [];
+  const fallbackToolAllowlist = completed?.toolAllowlist ?? [];
   if (
     routeCalls !== 0 ||
     planCalls !== 0 ||
     executorCalls !== 1 ||
     completed?.status !== 'completed' ||
     !Array.isArray(completed.toolAllowlist) ||
-    safeToolAllowlist.length === 0 ||
-    safeToolAllowlist.includes('write_file') ||
-    safeToolAllowlist.includes('edit_file') ||
-    safeToolAllowlist.includes('run_command')
+    completed.fallbackMode !== 'general_chat' ||
+    receivedFallbackMode !== 'general_chat' ||
+    !fallbackToolAllowlist.includes('write_file') ||
+    !fallbackToolAllowlist.includes('edit_file') ||
+    !fallbackToolAllowlist.includes('run_command')
   ) {
-    throw new Error('workflow fallback did not suppress auto team/planner preparation or exposed unsafe tools');
+    throw new Error('workflow fallback did not suppress auto team/planner preparation or expose the full tool surface');
   }
 }
 
@@ -670,14 +673,16 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
 }
 
 // A high-confidence Jev command need must survive fallback selection and reach
-// the single-agent tool allowlist without exposing file-write tools.
+// the single-agent tool allowlist with the full business tool surface.
 {
   let receivedAllowlist;
+  let receivedFallbackMode;
   let deliveryClassifierCalls = 0;
   let routeCalls = 0;
   let planCalls = 0;
   const test = await fixture(async (_cfg, _session, _userText, options) => {
     receivedAllowlist = options.allowedToolNames;
+    receivedFallbackMode = options.fallbackMode;
     return {
       status: 'completed',
       output: 'environment versions complete',
@@ -720,14 +725,16 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   const completed = await test.store.getLast();
   if (
     !receivedAllowlist?.includes('run_command') ||
-    receivedAllowlist.includes('write_file') ||
-    receivedAllowlist.includes('edit_file') ||
+    !receivedAllowlist.includes('write_file') ||
+    !receivedAllowlist.includes('edit_file') ||
+    receivedFallbackMode !== 'command_query' ||
+    completed?.fallbackMode !== 'command_query' ||
     deliveryClassifierCalls !== 0 ||
     routeCalls !== 0 ||
     planCalls !== 0 ||
     completed?.status !== 'completed'
   ) {
-    throw new Error('high-confidence Jev command query did not produce a safe command-only allowlist');
+    throw new Error('high-confidence Jev command query did not produce the full fallback allowlist');
   }
 }
 

@@ -28,7 +28,22 @@ import {
   stripHistoricalContextMarker,
   composeToolSet,
   isRetryableAgentError,
+  renderFallbackModeInstructions,
 } from './agent.testbundle.mjs';
+
+for (const [mode, label] of [
+  ['general_chat', '普通问答'],
+  ['read_only', '只读'],
+  ['file_edit', '文件编辑'],
+  ['command_query', '命令查询'],
+  ['needs_clarification', '需要澄清'],
+  ['blocked_high_risk', '高风险拦截'],
+]) {
+  const instructions = renderFallbackModeInstructions(mode);
+  if (!instructions.includes(`本轮分诊档位：${label}`)) {
+    throw new Error(`fallback prompt did not describe mode ${mode}`);
+  }
+}
 
 // 捕获网关原始报文诊断(与插件里 "PLC Agent" 输出面板同源)
 const diagLines = [];
