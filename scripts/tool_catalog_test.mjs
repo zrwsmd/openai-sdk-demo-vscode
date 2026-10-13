@@ -230,6 +230,7 @@ assert.deepEqual(
 assert.equal(appCatalog.get('st_dependency_map')?.providerId, 'st');
 assert.equal(appCatalog.get('st_dependency_map')?.domain, 'structured_text');
 assert.equal(appCatalog.get('export_st_program')?.evidence?.includes('successful_export'), true);
+assert.equal(appCatalog.get('commit_st_delivery')?.evidence?.includes('delivery_commit'), true);
 assert.deepEqual(appRegistry.toolsForEvidence('successful_export'), ['export_st_program']);
 assert.deepEqual(
   appCatalog.find({ providerId: 'st', tags: ['analysis'] }).map((item) => item.name),

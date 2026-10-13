@@ -64,6 +64,7 @@ assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFL
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
   'validate_st_code',
   'write_file',
+  'commit_st_delivery',
 ]);
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES], [
   'st_dependency_map',
@@ -138,8 +139,18 @@ const appTools = createAppToolRegistry();
 const allTools = appTools.createTools({ cfg: toolConfig });
 const allToolNames = allTools.map((tool) => tool.name);
 assert(allToolNames.includes('validate_st_code'));
+assert(!allToolNames.includes('commit_st_delivery'));
+const stWorkflowTools = appTools.createTools({
+  cfg: toolConfig,
+  workflow: stDeliveryRuntime,
+});
+assert(
+  stWorkflowTools.map((tool) => tool.name).includes('commit_st_delivery'),
+  '正式交付 commit 只能在 ST workspace delivery workflow 中暴露',
+);
 assert(allToolNames.includes('st_dependency_map'));
 assert.equal(appTools.getRisk('validate_st_code'), 'plan');
+assert.equal(appTools.getRisk('commit_st_delivery'), 'plan');
 assert.equal(appTools.getRisk('export_st_program'), 'write');
 assert(appTools.toolsForEvidence('successful_export').includes('export_st_program'));
 assert.throws(

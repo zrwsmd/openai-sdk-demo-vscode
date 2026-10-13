@@ -338,7 +338,7 @@ export async function classifyDeliveryContract(
       "不要默认把程序说明、运行说明、变量说明或使用说明列为独立必需交付物；只有用户明确要求文档、说明书、报告或使用指南时才列出这类交付物。" +
       "当用户强调重点看代码、主要看生成代码或变量模拟即可时，通常只需要代码交付物，不要额外制造说明文档交付物。" +
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
-      "写入/保存/导出类任务可接受 successful_write 或 successful_export；其他工具型交付可接受 successful_tool。" +
+      "写入/保存/导出类任务可接受 successful_write、successful_export 或 workflow 专用 delivery_commit；其他工具型交付可接受 successful_tool。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
       (useNativeStructuredOutput
         ? "必须严格返回 schema,不要输出 markdown。"

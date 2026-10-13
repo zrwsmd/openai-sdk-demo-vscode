@@ -71,6 +71,25 @@ import {
   if (repairDecision?.toolName !== 'validate_st_code') {
     throw new Error('ST pipeline failed validation did not force validate_st_code repair');
   }
+  const commitDecision = runtime.nextToolAfterResult(
+    'write_file',
+    {
+      ok: true,
+      data: {
+        stPersistence: {
+          status: 'persisted',
+          contentHash: 'abc',
+        },
+      },
+      diagnostics: [],
+      effect: 'filesystem',
+      risk: 'write',
+    },
+    new Set(['commit_st_delivery']),
+  );
+  if (commitDecision?.toolName !== 'commit_st_delivery') {
+    throw new Error('ST pipeline persisted write did not force commit_st_delivery');
+  }
   const firstVisible = runtime.shouldSuppressStarted({
     toolName: 'validate_st_code',
     args: JSON.stringify({ code: 'PROGRAM Demo\nEND_PROGRAM' }),

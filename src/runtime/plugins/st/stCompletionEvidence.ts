@@ -153,7 +153,27 @@ const stPersistenceEvidenceExtractor: ToolEvidenceExtractor = {
   },
 };
 
+const stDeliveryCommitEvidenceExtractor: ToolEvidenceExtractor = {
+  id: "st.deliveryCommit",
+  toolNames: ["commit_st_delivery"],
+  extract: (record, context) => {
+    const { helpers } = context;
+    const data = helpers.data(record.result);
+    const commit = helpers.objectField(data, "deliveryCommit");
+    const facts: EvidenceFact[] = [
+      fact("st.deliveryCommit.accepted", record.result.ok === true && !!commit, "workflow", record.name),
+    ];
+    if (commit) {
+      addStringFact(facts, "st.deliveryCommit.id", helpers.stringField(commit, ["commitId"]), "workflow", record.name);
+      addStringFact(facts, "st.deliveryCommit.path", helpers.stringField(commit, ["path"]), "file", record.name);
+      addStringFact(facts, "st.deliveryCommit.hash", helpers.stringField(commit, ["contentHash"]), "domain", record.name);
+    }
+    return facts;
+  },
+};
+
 export const ST_TOOL_EVIDENCE_EXTRACTORS: readonly ToolEvidenceExtractor[] = [
   stValidationEvidenceExtractor,
   stPersistenceEvidenceExtractor,
+  stDeliveryCommitEvidenceExtractor,
 ];

@@ -277,6 +277,7 @@ function hasDeliveryEvidence(
 ): boolean {
   if (
     deliverable.workspacePersistence === 'required' &&
+    !deliverable.acceptableEvidence.includes('delivery_commit') &&
     !hasToolEvidence('successful_write', records, deliverable, input)
   ) {
     return false;
@@ -340,6 +341,22 @@ function hasToolEvidence(
       if (!extension) return true;
       const filePath = filePathFor(record);
       return !!filePath && filePath.toLowerCase().endsWith(extension);
+    }
+    if (evidence === 'delivery_commit') {
+      if (!input.toolEvidence?.[record.name]?.includes(evidence)) return false;
+      const data =
+        record.result.data &&
+        typeof record.result.data === 'object' &&
+        !Array.isArray(record.result.data)
+          ? record.result.data as Record<string, unknown>
+          : {};
+      const commit = data.deliveryCommit;
+      return !!commit &&
+        typeof commit === 'object' &&
+        !Array.isArray(commit) &&
+        typeof (commit as Record<string, unknown>).commitId === 'string' &&
+        typeof (commit as Record<string, unknown>).path === 'string' &&
+        typeof (commit as Record<string, unknown>).contentHash === 'string';
     }
     if (input.toolEvidence?.[record.name]?.includes(evidence)) return true;
     return false;

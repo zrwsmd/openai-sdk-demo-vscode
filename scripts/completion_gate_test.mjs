@@ -4,6 +4,7 @@ import {
   evaluateCompletionGate,
   createStValidationState,
   StWorkspaceDeliveryWorkflow,
+  hashStContent,
 } from './agent.testbundle.mjs';
 
 function assert(condition, message) {
@@ -302,11 +303,13 @@ const codeContract = normalizeWorkflowContract({
       title: 'ST 程序',
       description: '当前工作区中的 ST 程序',
       required: true,
-      acceptableEvidence: ['final_artifact'],
+      acceptableEvidence: ['delivery_commit'],
       workspaceFileExtension: '.st',
       requiredVerificationTools: ['validate_st_code'],
     }],
   });
+  const stCode = 'PROGRAM WaterPumpControl\nEND_PROGRAM';
+  const stHash = hashStContent(stCode);
   const stRecords = [
     {
       name: 'write_file',
@@ -334,25 +337,30 @@ const codeContract = normalizeWorkflowContract({
     },
     {
       name: 'validate_st_code',
-      args: JSON.stringify({ code: 'PROGRAM WaterPumpControl\nEND_PROGRAM' }),
+      args: JSON.stringify({ code: stCode }),
       order: 3,
       result: createToolResult({
         ok: true,
-        data: { errorCount: 0, validatedContentHash: 'validated-content-hash' },
+        data: { errorCount: 0, validatedContentHash: stHash },
         effect: 'none',
         risk: 'plan',
       }),
     },
     {
       name: 'write_file',
-      args: JSON.stringify({ path: 'WaterPumpControl.st', content: 'PROGRAM WaterPumpControl\nEND_PROGRAM' }),
+      args: JSON.stringify({ path: 'WaterPumpControl.st', content: stCode }),
       order: 4,
       result: createToolResult({
         ok: true,
         data: {
           file: 'WaterPumpControl.st',
           bytes: 7081,
-          contentHash: 'validated-content-hash',
+          contentHash: stHash,
+          stPersistence: {
+            status: 'persisted',
+            path: 'WaterPumpControl.st',
+            contentHash: stHash,
+          },
         },
         effect: 'filesystem',
         risk: 'write',
@@ -368,12 +376,53 @@ const codeContract = normalizeWorkflowContract({
     toolEvidence: {
       write_file: ['successful_write'],
       export_st_program: ['successful_export', 'successful_write'],
+      commit_st_delivery: ['delivery_commit'],
     },
     deliveryContract: stContract,
     toolResults: stRecords,
   });
-  console.log('[completion_gate:8] ST 旧失败被后续交付证据解决 =', gate.passed);
-  assert(gate.passed, 'ST 交付后续校验和写入成功后，不应被旧失败继续阻断');
+  const preCommitGate = evaluateCompletionGate({
+    userText: '生成一个 ST 程序',
+    finalMessage: '已生成、校验并保存 WaterPumpControl.st。',
+    workflowAdapter: stWorkflow.completionAdapter,
+    toolEvidence: {
+      commit_st_delivery: ['delivery_commit'],
+    },
+    deliveryContract: stContract,
+    toolResults: stRecords.slice(0, 4),
+  });
+  assert(!preCommitGate.passed, '只有校验和写入但没有正式 commit 时不能收尾');
+  const committedRecord = {
+    name: 'commit_st_delivery',
+    args: JSON.stringify({ path: 'WaterPumpControl.st', contentHash: stHash }),
+    order: 5,
+    result: createToolResult({
+      ok: true,
+      data: {
+        deliveryCommit: {
+          commitId: 'st-delivery-1-test',
+          path: 'WaterPumpControl.st',
+          contentHash: stHash,
+        },
+      },
+      effect: 'none',
+      risk: 'plan',
+    }),
+  };
+  stRecords.push(committedRecord);
+  stWorkflow.completionAdapter?.restore?.([committedRecord]);
+  const committedGate = evaluateCompletionGate({
+    userText: '生成一个 ST 程序',
+    finalMessage: '已正式交付 WaterPumpControl.st。',
+    workflowAdapter: stWorkflow.completionAdapter,
+    toolEvidence: {
+      commit_st_delivery: ['delivery_commit'],
+    },
+    deliveryContract: stContract,
+    toolResults: stRecords,
+  });
+  console.log('[completion_gate:8] ST 旧失败被正式交付 commit 解决 =', committedGate.passed);
+  assert(committedGate.passed, 'ST 交付必须由正式 commit 证据完成');
 }
 
 {

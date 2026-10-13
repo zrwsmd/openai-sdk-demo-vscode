@@ -10,8 +10,11 @@ import { createStGraphTools } from "./tools/dependencyTools";
 import { createStLibraryTools } from "./tools/libraryTools";
 import { createPlcRuntimeTools } from "./tools/plcRuntimeTools";
 import { createValidateStTools } from "./tools/validateStTool";
+import { createStDeliveryCommitTool } from "./tools/commitStDeliveryTool";
 import { createStToolBuildContext } from "./stToolContext";
 import { preparePlcRuntimeConfigSync } from "../../../plc/plcRuntimeConfigSync";
+import type { StPersistedWriteSource } from "./stValidationRuntimeService";
+import { isStWorkspaceDeliveryContract } from "./stDeliveryContract";
 
 const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
@@ -23,6 +26,17 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     risk: "plan",
     effect: "none",
     fallbackModes: ["read_only"],
+  },
+  {
+    name: "commit_st_delivery",
+    description: "确认已校验并成功写入的 ST 文件为本轮正式交付物。",
+    domain: "structured_text",
+    intents: ["确认 ST 正式交付", "提交 ST 交付", "完成 ST 交付"],
+    tags: ["structured_text", "delivery", "commit"],
+    risk: "plan",
+    effect: "none",
+    evidence: ["delivery_commit"],
+    fallbackModes: [],
   },
   {
     name: "export_st_program",
@@ -97,12 +111,18 @@ function fileBeforeEffect(
   context: ReturnType<typeof createStToolBuildContext>,
   validateStContentBeforeWrite: ReturnType<typeof createValidateStTools>["validateStContentBeforeWrite"],
 ): (request: BeforeEffectContext) => Promise<BeforeEffectResult | undefined> {
-  return async ({ input, signal }) => {
+  return async ({ input, signal, toolName }) => {
     if (!input || typeof input !== "object") return undefined;
     const args = input as Record<string, unknown>;
     const path = typeof args.path === "string" ? args.path : "";
     const workspaceRoot = typeof args.workspaceRoot === "string" ? args.workspaceRoot : "";
     const content = typeof args.content === "string" ? args.content : undefined;
+    const persistedWriteSource: StPersistedWriteSource =
+      toolName === "edit_file"
+        ? "edit_file"
+        : toolName === "export_st_program"
+          ? "export_st_program"
+          : "write_file";
     const draftIdentityCheck = content === undefined
       ? undefined
       : context.validationService?.checkDraftIdentity(content);
@@ -194,8 +214,40 @@ function fileBeforeEffect(
         clarification: context.cfg.clarification,
         signal,
       });
+      const commitPersistedWrite = () => {
+        if (!context.validationService) return undefined;
+        return context.validationService.recordSuccessfulWrite({
+          path,
+          workspaceRoot,
+          content,
+          contentHash: hashStContent(content),
+          source: persistedWriteSource,
+        });
+      };
       if (!syncPlan) {
-        return Object.keys(receiptData).length ? { ok: true, receiptData } : undefined;
+        return {
+          ok: true,
+          receiptData,
+          afterEffect: async () => {
+            const persistedWrite = commitPersistedWrite();
+            return {
+              ok: true,
+              receiptData: {
+                ...(persistedWrite
+                  ? {
+                      stPersistence: {
+                        status: "persisted",
+                        path,
+                        workspaceRoot,
+                        contentHash: hashStContent(content),
+                        source: persistedWriteSource,
+                      },
+                    }
+                  : {}),
+              },
+            };
+          },
+        };
       }
       return {
         ok: true,
@@ -215,6 +267,7 @@ function fileBeforeEffect(
         afterEffect: async () => {
           try {
             await syncPlan.commit();
+            const persistedWrite = commitPersistedWrite();
             return {
               ok: true,
               receiptData: {
@@ -228,6 +281,17 @@ function fileBeforeEffect(
                   source: syncPlan.source,
                   ...(syncPlan.periodMs === undefined ? {} : { periodMs: syncPlan.periodMs }),
                 },
+                ...(persistedWrite
+                  ? {
+                      stPersistence: {
+                        status: "persisted",
+                        path,
+                        workspaceRoot,
+                        contentHash: hashStContent(content),
+                        source: persistedWriteSource,
+                      },
+                    }
+                  : {}),
               },
             };
           } catch (error) {
@@ -268,6 +332,10 @@ export function createStToolProvider(): ToolProvider {
     createTools(context): readonly Tool[] {
       const stContext = createStToolBuildContext(context);
       const validationTools = createValidateStTools(stContext);
+      const deliveryCommitTool = createStDeliveryCommitTool(stContext);
+      const isWorkspaceDelivery =
+        context.workflow?.id === "st_workspace_delivery" ||
+        isStWorkspaceDeliveryContract(context.workflowContract);
       const graphTools = createStGraphTools(stContext);
       const libraryTools = createStLibraryTools(stContext);
       const plcRuntimeTools = createPlcRuntimeTools(stContext);
@@ -283,6 +351,7 @@ export function createStToolProvider(): ToolProvider {
       );
       return [
         validationTools.validateStCode,
+        ...(isWorkspaceDelivery ? [deliveryCommitTool] : []),
         validationTools.exportStProgram,
         graphTools.stDependencyMap,
         graphTools.stChangeImpact,

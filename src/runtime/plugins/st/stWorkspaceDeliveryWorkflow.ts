@@ -54,6 +54,7 @@ import { ST_TOOL_EVIDENCE_EXTRACTORS } from "./stCompletionEvidence";
 export const ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES = [
   "validate_st_code",
   "write_file",
+  "commit_st_delivery",
 ] as const;
 
 export const ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES = [
@@ -150,7 +151,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
 
   readonly businessToolNames = ST_WORKSPACE_DELIVERY_TOOL_NAMES;
   readonly parallelToolCalls = false;
-  readonly requiredActionTool = "write_file";
+  readonly requiredActionTool = "commit_st_delivery";
   readonly services: ReadonlyMap<string, unknown>;
   readonly evidenceExtractors = ST_TOOL_EVIDENCE_EXTRACTORS;
   readonly completionAdapter: WorkflowCompletionAdapter;
@@ -200,7 +201,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   instructions(): string {
     return (
       "\n本轮 .st 工作区交付由运行时按固定流水线执行：" +
-      "主交付链路仍然是 validate_st_code -> write_file。" +
+      "主交付链路是 validate_st_code -> write_file -> commit_st_delivery。" +
       "编写草稿前最多做少量必要查询；如不确定标准库功能块/函数/类型的接口，可调用 st_library_symbol。" +
       "只有当用户明确要求分析现有工作区关系、或 validate_st_code 诊断指向未知工作区符号时，才调用 st_dependency_map、st_change_impact、st_symbol_references。" +
       "这些查询工具只作为只读辅助证据，不能替代校验或写入阶段。" +
@@ -214,6 +215,8 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       "校验失败后的修正版必须继续围绕首轮草稿的 PROGRAM 名称工作；不要为了试验语法生成 Probe、Demo 等无关临时程序。" +
       "校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，" +
       "且 content 必须与刚通过校验的源码完全一致。" +
+      "write_file 成功后必须调用 commit_st_delivery，提交成功写入的 .st 路径和 contentHash，" +
+      "只有 commit_st_delivery 返回 deliveryCommit 才算本轮正式交付完成。" +
       "不要并行调用工具，也不要调用当前 workflow 未暴露的工具。"
     );
   }
@@ -225,7 +228,8 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   ): string | undefined {
     if (
       !availableToolNames.has("validate_st_code") ||
-      !availableToolNames.has("write_file")
+      !availableToolNames.has("write_file") ||
+      !availableToolNames.has("commit_st_delivery")
     ) {
       return undefined;
     }
@@ -234,6 +238,9 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
     }
     if (!hasValidatedStWrite(records, Number.NEGATIVE_INFINITY, this.validationService)) {
       return "write_file";
+    }
+    if (!hasStDeliveryCommit(records, this.validationService)) {
+      return "commit_st_delivery";
     }
     return undefined;
   }
@@ -274,9 +281,8 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       );
     }
     if (issue.toolName === "delivery_verification") {
-      return hasValidatedStWrite(
+      return hasStDeliveryCommit(
         context.records,
-        Number.NEGATIVE_INFINITY,
         this.validationService,
       );
     }
@@ -297,47 +303,11 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
 
   private finalMessage(records: WorkflowToolRecord[]): string | undefined {
     if (!isStCodeDeliveryContract(this.contract)) return undefined;
-    const validationHashes = successfulStValidationHashes(
-      records,
-      this.validationService,
-    );
-    if (!validationHashes.size) return undefined;
-
-    for (const record of [...records].reverse()) {
-      if (record.name !== "write_file" && record.name !== "export_st_program")
-        continue;
-      if (!record.result.ok) continue;
-      const args = parseArgs(record.args);
-      const data = resultData(record.result);
-      const file =
-        typeof data.file === "string"
-          ? data.file
-          : typeof args.path === "string"
-            ? args.path
-            : undefined;
-      const content =
-        record.name === "write_file"
-          ? typeof args.content === "string"
-            ? args.content
-            : undefined
-          : typeof args.code === "string"
-            ? args.code
-            : undefined;
-      if (content && !this.validationService.checkDraftIdentity(content).accepted) {
-        continue;
-      }
-      const recordedHash =
-        typeof data.contentHash === "string"
-          ? data.contentHash
-          : typeof content === "string"
-            ? hashStContent(content)
-            : undefined;
-      if (!file?.toLowerCase().endsWith(".st") || !recordedHash) continue;
-      if (!validationHashes.has(recordedHash)) continue;
-      const operation = record.name === "export_st_program" ? "导出" : "写入";
-      return `已完成：${operation} ${file}；内容与 validate_st_code 通过校验的完整代码一致（errorCount=0）。`;
+    const commit = this.validationService.getDeliveryCommits().at(-1);
+    if (!commit || !hasStDeliveryCommit(records, this.validationService)) {
+      return undefined;
     }
-    return undefined;
+    return `已完成正式交付：${commit.path}；已确认内容通过 ST 校验并成功写入（commit=${commit.commitId}）。`;
   }
 
   private restore(records: WorkflowToolRecord[]): void {
@@ -347,38 +317,47 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
   private collectActionArtifact(
     call: WorkflowToolRecord,
   ): Artifact | undefined {
-    if (call.name !== "write_file" || !call.result.ok) return undefined;
-    const args = parseArgs(call.args);
-    if (typeof args.path !== "string" || typeof args.content !== "string") {
-      return undefined;
+    if (call.name === "commit_st_delivery" && call.result.ok) {
+      const data = resultData(call.result);
+      const rawCommit = data.deliveryCommit;
+      if (
+        !rawCommit ||
+        typeof rawCommit !== "object" ||
+        Array.isArray(rawCommit)
+      ) {
+        return undefined;
+      }
+      const commit = rawCommit as Record<string, unknown>;
+      const file = typeof commit.path === "string" ? commit.path : undefined;
+      const contentHash =
+        typeof commit.contentHash === "string" ? commit.contentHash : undefined;
+      if (
+        !file ||
+        !contentHash ||
+        !file.toLowerCase().endsWith(".st") ||
+        !this.validationService.hasDeliveryCommit(file, contentHash)
+      ) {
+        return undefined;
+      }
+      const persisted = this.validationService
+        .getPersistedWrites()
+        .find((write) =>
+          write.contentHash === contentHash &&
+          write.path.toLowerCase() === file.toLowerCase(),
+        );
+      return {
+        kind: "file",
+        name: path.basename(file),
+        uri: file,
+        mimeType: "text/plain",
+        metadata: {
+          contentHash,
+          commitId: typeof commit.commitId === "string" ? commit.commitId : undefined,
+          declarations: persisted?.declarations ?? [],
+        },
+      };
     }
-    const data = resultData(call.result);
-    const writtenHash =
-      typeof data.contentHash === "string"
-        ? data.contentHash
-        : hashStContent(args.content);
-    const expected = this.state.lastSuccessful;
-    if (
-      !expected ||
-      !args.path.toLowerCase().endsWith(".st") ||
-      writtenHash !== expected.hash ||
-      hashStContent(args.content) !== expected.hash ||
-      !this.validationService.checkDraftIdentity(args.content).accepted
-    ) {
-      return undefined;
-    }
-    const file = typeof data.file === "string" ? data.file : args.path;
-    const bytes =
-      typeof data.bytes === "number"
-        ? data.bytes
-        : Buffer.byteLength(args.content, "utf8");
-    return {
-      kind: "file",
-      name: path.basename(file),
-      uri: file,
-      mimeType: "text/plain",
-      metadata: { bytes, contentHash: expected.hash },
-    };
+    return undefined;
   }
 }
 
@@ -582,6 +561,28 @@ function hasValidatedStWrite(
     }
   }
   return false;
+}
+
+function hasStDeliveryCommit(
+  records: WorkflowToolRecord[],
+  validationService?: StValidationRuntimeService,
+): boolean {
+  if (!validationService) return false;
+  return records.some((record) => {
+    if (record.name !== "commit_st_delivery" || !record.result.ok) return false;
+    const data = resultData(record.result);
+    const commit = data.deliveryCommit;
+    if (!commit || typeof commit !== "object" || Array.isArray(commit)) {
+      return false;
+    }
+    const value = commit as Record<string, unknown>;
+    const path = typeof value.path === "string" ? value.path : undefined;
+    const contentHash =
+      typeof value.contentHash === "string" ? value.contentHash : undefined;
+    return !!path &&
+      !!contentHash &&
+      validationService.hasDeliveryCommit(path, contentHash);
+  });
 }
 
 function successfulValidationHashForRecord(

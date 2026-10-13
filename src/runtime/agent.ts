@@ -1411,11 +1411,14 @@ export async function runAgent(
                 value === "final_artifact" ||
                 value === "successful_tool" ||
                 value === "successful_write" ||
-                value === "successful_export",
+                value === "successful_export" ||
+                value === "delivery_commit",
             )
           : [];
         const preferredEvidence: DeliveryEvidence[] =
-          deliverable.workspacePersistence === "required"
+          evidence.includes("delivery_commit")
+            ? ["delivery_commit", ...evidence]
+            : deliverable.workspacePersistence === "required"
             ? ["successful_write", ...evidence]
             : evidence;
         for (const requiredEvidence of preferredEvidence) {

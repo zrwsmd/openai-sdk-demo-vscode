@@ -43,12 +43,40 @@ export type StValidationCandidate = {
   sequence: number;
 };
 
+export type StPersistedWriteSource =
+  | "write_file"
+  | "edit_file"
+  | "export_st_program";
+
+export type StPersistedWrite = {
+  path: string;
+  workspaceRoot?: string;
+  contentHash: string;
+  declarations: StDeclaration[];
+  source: StPersistedWriteSource;
+  sequence: number;
+};
+
+export type StDeliveryCommit = {
+  commitId: string;
+  path: string;
+  workspaceRoot?: string;
+  contentHash: string;
+  declarations: StDeclaration[];
+  writeSequence: number;
+  sequence: number;
+};
+
 export type StValidationState = {
   hashes: Set<string>;
   lastSuccessful?: StValidatedDraft;
   draftIdentity?: StDraftIdentity;
   candidates: StValidationCandidate[];
   nextCandidateSequence: number;
+  persistedWrites: StPersistedWrite[];
+  deliveryCommits: StDeliveryCommit[];
+  nextWriteSequence: number;
+  nextDeliveryCommitSequence: number;
 };
 
 export const ST_TOOL_STATE_SERVICE = "st.validationState";
@@ -61,6 +89,10 @@ export function createStValidationState(): StValidationState {
     hashes: new Set<string>(),
     candidates: [],
     nextCandidateSequence: 1,
+    persistedWrites: [],
+    deliveryCommits: [],
+    nextWriteSequence: 1,
+    nextDeliveryCommitSequence: 1,
   };
 }
 
@@ -141,6 +173,27 @@ function maskStNonCode(content: string): string {
     }
   }
   return chars.join("");
+}
+
+function normalizeTargetPath(value: string): string {
+  return value
+    .trim()
+    .replace(/\\/gu, "/")
+    .replace(/^\.\/+/u, "")
+    .toLocaleLowerCase();
+}
+
+function sameTarget(
+  leftPath: string,
+  rightPath: string,
+  leftRoot?: string,
+  rightRoot?: string,
+): boolean {
+  if (normalizeTargetPath(leftPath) !== normalizeTargetPath(rightPath)) {
+    return false;
+  }
+  if (!leftRoot || !rightRoot) return true;
+  return normalizeTargetPath(leftRoot) === normalizeTargetPath(rightRoot);
 }
 
 function declaration(
@@ -255,6 +308,11 @@ export class StValidationRuntimeService {
     this.validationInputMode = validationInputMode;
     this.state.candidates ??= [];
     this.state.nextCandidateSequence ??= this.state.candidates.length + 1;
+    this.state.persistedWrites ??= [];
+    this.state.deliveryCommits ??= [];
+    this.state.nextWriteSequence ??= this.state.persistedWrites.length + 1;
+    this.state.nextDeliveryCommitSequence ??=
+      this.state.deliveryCommits.length + 1;
   }
 
   get lastValidatedContentHash(): string | undefined {
@@ -360,6 +418,125 @@ export class StValidationRuntimeService {
     return this.state.candidates;
   }
 
+  /**
+   * Record a real filesystem persistence event. This is deliberately separate
+   * from validation: a successful validation is only a candidate, while this
+   * record proves that the same bytes reached a concrete .st target.
+   */
+  recordSuccessfulWrite(options: {
+    path: string;
+    workspaceRoot?: string;
+    content: string;
+    contentHash: string;
+    source: StPersistedWriteSource;
+  }): StPersistedWrite | undefined {
+    const contentHash = options.contentHash.trim();
+    if (
+      !options.path.trim() ||
+      !options.path.toLocaleLowerCase().endsWith(".st") ||
+      !contentHash ||
+      hashStContent(options.content) !== contentHash ||
+      !this.hasValidatedContent(options.content) ||
+      !this.checkDraftIdentity(options.content).accepted
+    ) {
+      return undefined;
+    }
+    const existing = this.state.persistedWrites
+      .slice()
+      .reverse()
+      .find((write) =>
+        write.contentHash === contentHash &&
+        sameTarget(
+          write.path,
+          options.path,
+          write.workspaceRoot,
+          options.workspaceRoot,
+        ),
+      );
+    if (existing) return existing;
+    const persisted: StPersistedWrite = {
+      path: options.path,
+      ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+      contentHash,
+      declarations: identifyStDeclarations(options.content),
+      source: options.source,
+      sequence: this.state.nextWriteSequence++,
+    };
+    this.state.persistedWrites.push(persisted);
+    return persisted;
+  }
+
+  getPersistedWrites(): readonly StPersistedWrite[] {
+    return this.state.persistedWrites;
+  }
+
+  recordDeliveryCommit(options: {
+    path: string;
+    workspaceRoot?: string;
+    contentHash: string;
+  }): StDeliveryCommit | undefined {
+    const contentHash = options.contentHash.trim();
+    const persisted = this.state.persistedWrites
+      .slice()
+      .reverse()
+      .find((write) =>
+        write.contentHash === contentHash &&
+        sameTarget(
+          write.path,
+          options.path,
+          write.workspaceRoot,
+          options.workspaceRoot,
+        ),
+      );
+    // A commit acknowledges the current delivery candidate, not an older
+    // write that happens to remain in the same run's ledger.
+    if (!persisted || persisted !== this.state.persistedWrites.at(-1)) {
+      return undefined;
+    }
+    const existing = this.state.deliveryCommits
+      .slice()
+      .reverse()
+      .find((commit) =>
+        commit.contentHash === contentHash &&
+        sameTarget(
+          commit.path,
+          options.path,
+          commit.workspaceRoot,
+          options.workspaceRoot,
+        ),
+      );
+    if (existing) return existing;
+    const sequence = this.state.nextDeliveryCommitSequence++;
+    const commit: StDeliveryCommit = {
+      commitId: `st-delivery-${sequence}-${contentHash.slice(0, 12)}`,
+      path: persisted.path,
+      ...(persisted.workspaceRoot
+        ? { workspaceRoot: persisted.workspaceRoot }
+        : {}),
+      contentHash,
+      declarations: persisted.declarations,
+      writeSequence: persisted.sequence,
+      sequence,
+    };
+    this.state.deliveryCommits.push(commit);
+    return commit;
+  }
+
+  getDeliveryCommits(): readonly StDeliveryCommit[] {
+    return this.state.deliveryCommits;
+  }
+
+  hasDeliveryCommit(
+    path: string,
+    contentHash: string,
+    workspaceRoot?: string,
+  ): boolean {
+    return this.state.deliveryCommits.some((commit) =>
+      commit.contentHash === contentHash.trim() &&
+      sameTarget(commit.path, path, commit.workspaceRoot, workspaceRoot),
+    );
+  }
+
   restore(records: readonly WorkflowToolRecord[]): void {
     for (const record of records) {
       const data = resultData(record.result);
@@ -407,16 +584,44 @@ export class StValidationRuntimeService {
         });
         continue;
       }
-      if (record.name === "write_file" && record.result.ok) {
+      if (
+        (record.name === "write_file" ||
+          record.name === "edit_file" ||
+          record.name === "export_st_program") &&
+        record.result.ok
+      ) {
         const args = parseArgs(record.args);
-        const content = typeof args.content === "string" ? args.content : undefined;
+        const content = record.name === "export_st_program"
+          ? typeof args.code === "string" ? args.code : undefined
+          : typeof args.content === "string" ? args.content : undefined;
         if (content && !this.recordValidationAttempt(content).accepted) continue;
-        const hash = preWriteValidationHash(data);
-        if (content && hash === hashStContent(content)) {
-          this.recordSuccessfulValidationWithOptions(content, hash, {
+        const hash = typeof data.contentHash === "string"
+          ? data.contentHash
+          : preWriteValidationHash(data);
+        const preWriteHash = preWriteValidationHash(data);
+        const validationHash = hash ?? preWriteHash;
+        if (
+          content &&
+          validationHash &&
+          preWriteHash === hashStContent(content)
+        ) {
+          this.recordSuccessfulValidationWithOptions(content, validationHash, {
             source: "pre_write_validation",
             recordCandidate: true,
           });
+        }
+        if (content && validationHash) {
+          const path = typeof args.path === "string"
+            ? args.path
+            : typeof data.file === "string" ? data.file : undefined;
+          if (path) {
+            this.recordSuccessfulWrite({
+              path,
+              content,
+              contentHash: validationHash,
+              source: record.name,
+            });
+          }
         }
       } else if (record.name === "write_file") {
         const args = parseArgs(record.args);
@@ -431,6 +636,23 @@ export class StValidationRuntimeService {
             source: "pre_write_validation",
             ...(typeof args.path === "string" ? { targetLabel: args.path } : {}),
           });
+        }
+      }
+      if (record.name === "commit_st_delivery" && record.result.ok) {
+        const commitData = data.deliveryCommit;
+        const commit =
+          commitData && typeof commitData === "object" && !Array.isArray(commitData)
+            ? commitData as Record<string, unknown>
+            : {};
+        const args = parseArgs(record.args);
+        const path = typeof commit.path === "string"
+          ? commit.path
+          : typeof args.path === "string" ? args.path : undefined;
+        const contentHash = typeof commit.contentHash === "string"
+          ? commit.contentHash
+          : typeof args.contentHash === "string" ? args.contentHash : undefined;
+        if (path && contentHash) {
+          this.recordDeliveryCommit({ path, contentHash });
         }
       }
     }

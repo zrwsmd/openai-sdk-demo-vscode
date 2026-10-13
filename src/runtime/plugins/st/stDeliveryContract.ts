@@ -21,7 +21,7 @@ export function createStCodeDeliveryContract(options: {
       description: "完整 IEC 61131-3 ST 控制程序源码",
       required: true,
       acceptableEvidence: workspacePersistence === "required"
-        ? ["successful_write"]
+        ? ["delivery_commit"]
         : ["final_artifact"],
       workspacePersistence,
       workspaceFileExtension: ".st",

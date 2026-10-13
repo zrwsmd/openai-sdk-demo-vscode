@@ -157,4 +157,112 @@ assert.equal(
   undefined,
 );
 
+const persistedTarget = deliveryService.recordSuccessfulWrite({
+  path: 'out/PressureFilterScale.st',
+  content: targetCode,
+  contentHash: hashStContent(targetCode),
+  source: 'write_file',
+});
+assert(persistedTarget, '通过校验的正式 ST 写入应进入持久化账本');
+const deliveryCommit = deliveryService.recordDeliveryCommit({
+  path: 'out/PressureFilterScale.st',
+  contentHash: hashStContent(targetCode),
+});
+assert(deliveryCommit, '正式交付应基于实际写入记录创建 commit');
+const committedRecords = [
+  {
+    name: 'validate_st_code',
+    args: JSON.stringify({ code: targetCode }),
+    result: createToolResult({
+      ok: true,
+      data: { errorCount: 0, validatedContentHash: hashStContent(targetCode) },
+      effect: 'none',
+      risk: 'plan',
+    }),
+  },
+  {
+    name: 'write_file',
+    args: JSON.stringify({
+      path: 'out/PressureFilterScale.st',
+      content: targetCode,
+    }),
+    result: createToolResult({
+      ok: true,
+      data: {
+        file: 'out/PressureFilterScale.st',
+        contentHash: hashStContent(targetCode),
+        stPersistence: {
+          status: 'persisted',
+          path: 'out/PressureFilterScale.st',
+          contentHash: hashStContent(targetCode),
+        },
+      },
+      effect: 'filesystem',
+      risk: 'write',
+    }),
+  },
+  {
+    name: 'commit_st_delivery',
+    args: JSON.stringify({
+      path: 'out/PressureFilterScale.st',
+      contentHash: hashStContent(targetCode),
+    }),
+    result: createToolResult({
+      ok: true,
+      data: { deliveryCommit },
+      effect: 'none',
+      risk: 'plan',
+    }),
+  },
+];
+assert.match(
+  deliveryWorkflow.completionAdapter.finalMessage?.(committedRecords) ?? '',
+  /正式交付/u,
+);
+assert(
+  deliveryWorkflow.completionAdapter.collectActionArtifact?.(committedRecords[2]),
+  '正式交付 commit 应成为 workflow artifact',
+);
+
+const staleCommitService = new StValidationRuntimeService(createStValidationState());
+const firstDeliveryCode = 'PROGRAM SharedDelivery\nx := 1;\nEND_PROGRAM';
+const firstDeliveryHash = hashStContent(firstDeliveryCode);
+staleCommitService.recordSuccessfulValidation(firstDeliveryCode, firstDeliveryHash);
+assert(
+  staleCommitService.recordSuccessfulWrite({
+    path: 'out/first.st',
+    content: firstDeliveryCode,
+    contentHash: firstDeliveryHash,
+    source: 'write_file',
+  }),
+  '第一份有效写入应进入持久化账本',
+);
+const secondDeliveryCode = 'PROGRAM SharedDelivery\nx := 2;\nEND_PROGRAM';
+const secondDeliveryHash = hashStContent(secondDeliveryCode);
+staleCommitService.recordSuccessfulValidation(secondDeliveryCode, secondDeliveryHash);
+assert(
+  staleCommitService.recordSuccessfulWrite({
+    path: 'out/second.st',
+    content: secondDeliveryCode,
+    contentHash: secondDeliveryHash,
+    source: 'write_file',
+  }),
+  '第二份有效写入应进入持久化账本',
+);
+assert.equal(
+  staleCommitService.recordDeliveryCommit({
+    path: 'out/first.st',
+    contentHash: firstDeliveryHash,
+  }),
+  undefined,
+  '正式 commit 不能回指本轮更早的旧写入',
+);
+assert(
+  staleCommitService.recordDeliveryCommit({
+    path: 'out/second.st',
+    contentHash: secondDeliveryHash,
+  }),
+  '正式 commit 应只接受最新有效写入',
+);
+
 console.log('st validation runtime service tests passed');

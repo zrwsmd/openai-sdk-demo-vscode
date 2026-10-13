@@ -735,8 +735,15 @@ export class ToolCatalog {
     const normalizedUserText = normalizedCacheText(userText);
 
     const query = capabilityQueryForFallback(mode);
+    const explicitlyHiddenFromFallback = new Set(
+      this.list()
+        .filter((capability) => capability.fallbackModes?.length === 0)
+        .map((capability) => capability.name),
+    );
     const baseTools = query
-      ? this.toolsForQuery(query)
+      ? this.toolsForQuery(query).filter(
+          (name) => !explicitlyHiddenFromFallback.has(name),
+        )
       : this.list()
       .filter((capability) => capability.fallbackModes?.includes(mode))
       .map((capability) => capability.name);

@@ -6,6 +6,7 @@
 // 每路回答末尾附带 usage-only chunk(与真实网关的 stream_options.include_usage 行为一致)
 // 用法: node mock_gateway.mjs [port]
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 
 const REPLY = '你好!我是 PLC 编程助手(插件内核验证),请告诉我你的控制任务。';
 const rejectCombined = process.env.MOCK_REJECT_COMBINED === '1';
@@ -27,6 +28,7 @@ const BAD_ST_CODE = [
   '  END_VAR',
   '  Motor_Star := TRUE;',
 ].join('\n');
+const ST_CODE_HASH = createHash('sha1').update(ST_CODE, 'utf8').digest('hex');
 
 let seq = 0;
 function usageChunk(model, prompt, completion) {
@@ -340,6 +342,9 @@ const server = http.createServer((req, res) => {
     const forcedToolChoice = typeof req_body.tool_choice === 'string'
       ? req_body.tool_choice
       : req_body.tool_choice?.function?.name;
+    const hasCommitTool = (req_body.tools || []).some((item) =>
+      item?.function?.name === 'commit_st_delivery' || item?.name === 'commit_st_delivery',
+    );
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     const unknownToolRecovery = userText.includes('未知工具恢复回归');
     const historicalArgumentRecovery = userText.includes('历史参数恢复回归');
@@ -472,6 +477,16 @@ const server = http.createServer((req, res) => {
         name: 'PumpControl.st',
         mimeType: 'text/plain',
         content: ST_CODE,
+      }));
+    } else if (
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'write_file' &&
+      hasCommitTool &&
+      !hasAssistantToolCall('commit_st_delivery')
+    ) {
+      endWithNamedToolCall(res, model, 'commit_st_delivery', JSON.stringify({
+        path: 'PumpControl.st',
+        contentHash: ST_CODE_HASH,
       }));
     } else if (
       userText.includes('ST草稿修正回归') &&

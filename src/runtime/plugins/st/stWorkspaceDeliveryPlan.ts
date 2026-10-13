@@ -25,6 +25,15 @@ export const ST_WORKSPACE_DELIVERY_STAGES: WorkflowStage[] = [
     successEvidence: "write_file 返回的 contentHash 与校验哈希一致",
     onFailure: "retry",
   },
+  {
+    order: 3,
+    id: "commit_delivery",
+    toolName: "commit_st_delivery",
+    title: "确认正式交付",
+    description: "确认已经校验并成功写入的同一份 ST 文件是本轮正式交付物",
+    successEvidence: "commit_st_delivery 返回 deliveryCommit",
+    onFailure: "retry",
+  },
 ];
 
 export const ST_WORKSPACE_DELIVERY_PIPELINE_PLAN: PipelineStagePlan = {
@@ -41,6 +50,12 @@ export const ST_WORKSPACE_DELIVERY_PIPELINE_PLAN: PipelineStagePlan = {
       toToolName: "validate_st_code",
       reason: "validate_st_code 未通过，下一轮强制继续修正并重新校验完整草稿",
       canTransition: isFailedStValidation,
+    },
+    {
+      fromToolName: "write_file",
+      toToolName: "commit_st_delivery",
+      reason: "write_file 已成功落盘，下一轮强制确认正式交付",
+      canTransition: isSuccessfulStWrite,
     },
   ],
   duplicateToolFingerprints: [{
@@ -60,6 +75,20 @@ function isSuccessfulStValidation(result: ToolResult): boolean {
 
 function isFailedStValidation(result: ToolResult): boolean {
   return !isSuccessfulStValidation(result);
+}
+
+function isSuccessfulStWrite(result: ToolResult): boolean {
+  if (!result.ok) return false;
+  const data = result.data && typeof result.data === "object"
+    ? result.data as Record<string, unknown>
+    : {};
+  const persistence = data.stPersistence;
+  return persistence !== undefined &&
+    typeof persistence === "object" &&
+    persistence !== null &&
+    !Array.isArray(persistence) &&
+    (persistence as Record<string, unknown>).status === "persisted" &&
+    typeof (persistence as Record<string, unknown>).contentHash === "string";
 }
 
 function stValidationFingerprint(

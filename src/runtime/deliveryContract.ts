@@ -15,6 +15,7 @@ export const deliveryEvidenceSchema = z.enum([
   'successful_tool',
   'successful_write',
   'successful_export',
+  'delivery_commit',
 ]);
 
 export const workspacePersistenceSchema = z.enum([
@@ -59,7 +60,10 @@ function normalizeDeliverable(item: DeliveryItem) {
     item.workspacePersistence ??
     (item.kind === 'code' ? 'required' : 'optional');
   const acceptableEvidence = new Set(item.acceptableEvidence);
-  if (workspacePersistence === 'required') {
+  if (
+    workspacePersistence === 'required' &&
+    !acceptableEvidence.has('delivery_commit')
+  ) {
     acceptableEvidence.add('successful_write');
   }
   const extension = item.workspaceFileExtension?.trim();
