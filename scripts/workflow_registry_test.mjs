@@ -51,8 +51,15 @@ assert.equal(appRegistry.get('st_workspace_delivery'), ST_WORKSPACE_DELIVERY_WOR
 assert.equal(appRegistry.get('st_inspection'), undefined);
 assert.deepEqual(
   appRegistry.list().map((workflow) => workflow.id),
-  ['st_workspace_delivery'],
+  ['st_workspace_delivery', 'devuni_project'],
+  '注册顺序即优先级:代码交付必须排在工程事务前面',
 );
+assert.equal(
+  appRegistry.get('devuni_project')?.runtimeManaged,
+  true,
+  'devuni 工程事务工作流必须由运行时接管,避免再走通用计划/团队那套',
+);
+assert.equal(appRegistry.getByRoute('devuni_project'), appRegistry.get('devuni_project'));
 assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
   'validate_st_code',

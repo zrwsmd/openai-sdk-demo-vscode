@@ -57,6 +57,7 @@ export * from '../src/runtime/plugins/st/stToolProvider';
 export * from '../src/runtime/plugins/devuni/devuniCommandPort';
 export * from '../src/runtime/plugins/devuni/devuniCommands';
 export * from '../src/runtime/plugins/devuni/devuniToolProvider';
+export * from '../src/runtime/plugins/devuni/devuniProjectWorkflow';
 export * from '../src/runtime/contentHash';
 export * from '../src/runtime/plugins/st/stDeliveryContract';
 export * from '../src/runtime/plugins/st/stWorkspaceDeliveryWorkflow';

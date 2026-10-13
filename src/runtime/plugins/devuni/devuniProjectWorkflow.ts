@@ -1,0 +1,102 @@
+/**
+ * devuni 工程事务工作流。
+ *
+ * 它认领的是一"类"请求,不是一个动作:凡是发生在"工程/项目"这个层面的事
+ * (新建、打开、关闭、改名……)都归它。现在真正挂上去的工具只有查询和创建
+ * 两个;等同事那边把关闭、改名等接口放出来,只要往 DEVUNI_COMMANDS 里加一条,
+ * 工具名单会自动跟上,这个文件一个字都不用改。
+ *
+ * 为什么需要它:这类请求以前没有任何工作流认领,会掉进模型分诊,被塞进
+ * 只读 / 普通问答 / 需要澄清之类的档位。那几个档位有硬性的风险过滤(只放
+ * read 和 plan),而创建工程这个工具的风险是 write,连候选都进不去;即使
+ * 侥幸落进"普通文件修改"档,还会被文本收窄再削一遍。用本地正则直接认领,
+ * 工具名单原样发,这两道筛选都不会跑。
+ */
+import { CLARIFICATION_TOOL_NAME } from "../../clarification";
+import type {
+  WorkflowDecisionContext,
+  WorkflowDescriptor,
+  WorkflowLocalMatch,
+  WorkflowRuntime,
+} from "../../workflow/types";
+import { DEVUNI_COMMANDS } from "./devuniCommands";
+
+export const DEVUNI_PROJECT_WORKFLOW_ID = "devuni_project";
+
+/**
+ * 这一轮发给模型的工具:命令表里所有 devuni 工具,外加反问工具。
+ *
+ * 反问工具必须在内,否则工程名或父目录缺失时,模型连"你工程叫什么"都问不出来。
+ * 名单跟着命令表自动长,加接口不用改这里。
+ */
+export const DEVUNI_PROJECT_TOOL_NAMES: readonly string[] = [
+  ...DEVUNI_COMMANDS.map((command) => command.toolName),
+  CLARIFICATION_TOOL_NAME,
+];
+
+/**
+ * 认领规则:动作词 + 工程名词,且不含代码交付类的标志词。
+ *
+ * "建"必须紧跟着"个 / 一个 / 工程 / 项目"才算动作,否则"建议""组建"这类词
+ * 会被误当成建工程。
+ */
+const DEVUNI_PROJECT_ACTION =
+  /(?:新建|创建|建立|搭建|生成|打开|开启|关闭|关掉|关了|删除|删掉|移除|重命名|改名|改个名|建(?=个|一个|工程|项目))/u;
+const DEVUNI_PROJECT_NOUN = /(?:工程|项目)/u;
+/**
+ * 一旦出现这几个词,说明这趟活是写代码、不是管工程,应当让给代码交付那条线。
+ * 单独的 "ST" 不算——"新建一个 ST 工程"仍然是工程事务。
+ */
+const CODE_DELIVERY_MARKER = /(?:程序|代码|源码|结构化文本|IEC\s*61131)/u;
+
+const NO_MATCH_REASON = "本地规则未识别为 devuni 工程事务请求";
+const MATCH_REASON = "本地规则识别为 devuni 工程事务请求";
+
+function localMatch(context: WorkflowDecisionContext): WorkflowLocalMatch {
+  const text = context.userText.trim();
+  if (!text || CODE_DELIVERY_MARKER.test(text)) {
+    return { matched: false, confidence: 0, reason: NO_MATCH_REASON };
+  }
+  const matched =
+    DEVUNI_PROJECT_ACTION.test(text) && DEVUNI_PROJECT_NOUN.test(text);
+  if (!matched) {
+    return { matched: false, confidence: 0, reason: NO_MATCH_REASON };
+  }
+  return { matched: true, confidence: 0.9, reason: MATCH_REASON };
+}
+
+export class DevuniProjectWorkflow implements WorkflowRuntime {
+  readonly id = DEVUNI_PROJECT_WORKFLOW_ID;
+  readonly title = DEVUNI_PROJECT_WORKFLOW.title;
+  readonly businessToolNames = DEVUNI_PROJECT_TOOL_NAMES;
+  readonly parallelToolCalls = true;
+
+  initialTool(): string | undefined {
+    return undefined;
+  }
+
+  instructions(): string {
+    return (
+      "\n本请求由 devuni 工程事务工作流接管。当前可用工具列表是唯一可调用工具集合," +
+      "不要调用列表之外的工具,也不要用旧流程假设补工具。" +
+      "创建工程前,如果工程名或父目录不明确,先用 " +
+      CLARIFICATION_TOOL_NAME +
+      " 向用户确认,不要臆造路径;" +
+      "设备型号、语言、工程类型不确定时,先用 devuni_project_options 查询可选项。" +
+      "devuni_create_project 是写操作,必须等用户在界面批准后才会真正执行;" +
+      "完成后如实报告磁盘上生成的工程文件路径,不要声称未发生的动作已经完成。"
+    );
+  }
+}
+
+export const DEVUNI_PROJECT_WORKFLOW: WorkflowDescriptor = {
+  id: DEVUNI_PROJECT_WORKFLOW_ID,
+  title: "devuni 工程事务",
+  description:
+    "处理 devUni IDE 插件里的工程级事务:新建工程,以及查询可用的设备型号、语言和工程类型。不涉及代码交付。",
+  runtimeManaged: true,
+  workflowRoute: DEVUNI_PROJECT_WORKFLOW_ID,
+  businessToolNames: DEVUNI_PROJECT_TOOL_NAMES,
+  localMatch,
+  createRuntime: () => new DevuniProjectWorkflow(),
+};
