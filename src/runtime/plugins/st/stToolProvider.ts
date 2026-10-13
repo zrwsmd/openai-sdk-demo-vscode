@@ -13,7 +13,10 @@ import { createValidateStTools } from "./tools/validateStTool";
 import { createStDeliveryCommitTool } from "./tools/commitStDeliveryTool";
 import { createStToolBuildContext } from "./stToolContext";
 import { preparePlcRuntimeConfigSync } from "../../../plc/plcRuntimeConfigSync";
-import type { StPersistedWriteSource } from "./stValidationRuntimeService";
+import {
+  describeStDeclaration,
+  type StPersistedWriteSource,
+} from "./stValidationRuntimeService";
 import { isStWorkspaceDeliveryContract } from "./stDeliveryContract";
 
 const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
@@ -134,10 +137,10 @@ function fileBeforeEffect(
       return undefined;
     }
     if (draftIdentityCheck && !draftIdentityCheck.accepted) {
-      const expected = draftIdentityCheck.expectedProgramName ?? "(未确定)";
-      const actual = draftIdentityCheck.actualProgramName ?? "(未找到 PROGRAM)";
+      const expected = describeStDeclaration(draftIdentityCheck.expectedDeclaration);
+      const actual = describeStDeclaration(draftIdentityCheck.actualDeclaration);
       const message =
-        `当前 ST 写入内容的 PROGRAM=${actual} 与本轮已锁定的 PROGRAM=${expected} 不一致；` +
+        `当前 ST 写入内容的目标声明=${actual} 与本轮已锁定的目标声明=${expected} 不一致；` +
         "已阻止写入，请继续修正原始交付草稿。";
       return {
         ok: false,
@@ -145,8 +148,8 @@ function fileBeforeEffect(
         failureData: {
           suppliedContentHash: hashStContent(content),
           draftIdentity: {
-            expectedProgramName: draftIdentityCheck.expectedProgramName,
-            actualProgramName: draftIdentityCheck.actualProgramName,
+            expectedDeclaration: draftIdentityCheck.expectedDeclaration,
+            actualDeclaration: draftIdentityCheck.actualDeclaration,
           },
         },
         diagnostics: [{

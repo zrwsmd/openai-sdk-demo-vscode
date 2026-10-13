@@ -3,8 +3,10 @@ import {
   createStValidationState,
   createToolResult,
   createWorkflowRuntimeState,
+  describeStDeclaration,
   getStValidationRuntimeService,
   identifyStDeclarations,
+  identifyStDraft,
   hashStContent,
   StValidationRuntimeService,
   StWorkspaceDeliveryWorkflow,
@@ -115,6 +117,78 @@ const unrelated = 'PROGRAM Probe\nEND_PROGRAM';
 assert.equal(restored.recordValidationAttempt(unrelated).accepted, false);
 assert.equal(restored.recordSuccessfulValidation(unrelated, hashStContent(unrelated)), false);
 assert.equal(restored.hasValidatedContent(unrelated), false);
+
+const genericDeclarationCases = [
+  {
+    label: 'FUNCTION_BLOCK',
+    first: 'FUNCTION_BLOCK MotorControl\nEND_FUNCTION_BLOCK',
+    same: 'FUNCTION_BLOCK MotorControl\nVAR\n  enabled : BOOL;\nEND_VAR\nEND_FUNCTION_BLOCK',
+    other: 'FUNCTION_BLOCK ProbeBlock\nEND_FUNCTION_BLOCK',
+    identity: { category: 'pou', kind: 'FUNCTION_BLOCK', name: 'MOTORCONTROL' },
+  },
+  {
+    label: 'FUNCTION',
+    first: 'FUNCTION Scale : REAL\nEND_FUNCTION',
+    same: 'FUNCTION Scale : REAL\nVAR_INPUT\n  value : REAL;\nEND_VAR\nEND_FUNCTION',
+    other: 'FUNCTION ProbeFunction : REAL\nEND_FUNCTION',
+    identity: { category: 'pou', kind: 'FUNCTION', name: 'SCALE' },
+  },
+  {
+    label: 'TYPE alias',
+    first: 'TYPE\n  PressureValue : REAL;\nEND_TYPE',
+    same: 'TYPE\n  PressureValue : REAL;\n  PressureLimit : REAL;\nEND_TYPE',
+    other: 'TYPE\n  ProbeValue : REAL;\nEND_TYPE',
+    identity: { category: 'type', kind: 'TYPE_ALIAS', name: 'PRESSUREVALUE' },
+  },
+];
+for (const item of genericDeclarationCases) {
+  const genericService = new StValidationRuntimeService(createStValidationState());
+  const firstIdentity = identifyStDraft(item.first);
+  assert.deepEqual(
+    firstIdentity?.declaration,
+    item.identity,
+    `${item.label} 应生成通用声明身份`,
+  );
+  assert.equal(
+    describeStDeclaration(firstIdentity?.declaration),
+    `${item.identity.kind === 'TYPE_ALIAS' ? 'TYPE ' : ''}${item.identity.kind} ${item.identity.name}`,
+  );
+  assert.equal(
+    genericService.recordValidationAttempt(item.first).accepted,
+    true,
+    `${item.label} 首次声明应建立锁定`,
+  );
+  assert.equal(
+    genericService.recordValidationAttempt(item.same).accepted,
+    true,
+    `${item.label} 同身份修正版应允许继续`,
+  );
+  assert.equal(
+    genericService.recordValidationAttempt(item.other).accepted,
+    false,
+    `${item.label} 不同声明不应冒充当前交付目标`,
+  );
+}
+
+const legacyIdentityState = createStValidationState();
+legacyIdentityState.draftIdentity = { programName: 'LegacyProgram' };
+const legacyIdentityService = new StValidationRuntimeService(legacyIdentityState);
+assert.deepEqual(
+  legacyIdentityService.state.draftIdentity,
+  {
+    declaration: {
+      category: 'pou',
+      kind: 'PROGRAM',
+      name: 'LEGACYPROGRAM',
+    },
+  },
+  '旧 PROGRAM 身份账本应升级为通用声明身份',
+);
+assert.equal(
+  legacyIdentityService.checkDraftIdentity('PROGRAM LegacyProgram\nEND_PROGRAM').accepted,
+  true,
+  '升级后的旧 PROGRAM 身份仍应保持原有锁定语义',
+);
 
 const deliveryService = new StValidationRuntimeService(createStValidationState());
 const targetCode = 'PROGRAM PressureFilterScale\nEND_PROGRAM';

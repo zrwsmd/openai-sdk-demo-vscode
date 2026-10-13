@@ -15,6 +15,11 @@ export type StDeclaration = {
   line: number;
 };
 
+export type StDeclarationIdentity = Pick<
+  StDeclaration,
+  "category" | "kind" | "name"
+>;
+
 export type StUnit = StDeclaration;
 
 export type StValidatedDraft = {
@@ -24,7 +29,7 @@ export type StValidatedDraft = {
 };
 
 export type StDraftIdentity = {
-  programName: string;
+  declaration: StDeclarationIdentity;
 };
 
 export type StValidationCandidateSource =
@@ -214,7 +219,7 @@ function declaration(
 function identifyPouDeclarations(source: string): StDeclaration[] {
   const declarations: StDeclaration[] = [];
   const pattern =
-    /\b(FUNCTION_BLOCK|PROGRAM|FUNCTION)\s+([A-Za-z_][A-Za-z0-9_]*)\b/giu;
+    /\b(FUNCTION_BLOCK|PROGRAM|FUNCTION)\s+(?:(?:RETAIN|NON_RETAIN)\s+)?([A-Za-z_][A-Za-z0-9_]*)\b/giu;
   for (const match of source.matchAll(pattern)) {
     const kind = match[1]?.toUpperCase();
     const name = match[2]?.trim();
@@ -279,24 +284,81 @@ export function identifyStDeclarations(content: string): StDeclaration[] {
     .sort((left, right) => left.line - right.line);
 }
 
+export function describeStDeclaration(
+  declaration: StDeclarationIdentity | undefined,
+): string {
+  if (!declaration) return "(未识别声明)";
+  if (declaration.category === "pou") {
+    return `${declaration.kind} ${declaration.name}`;
+  }
+  if (declaration.category === "type") {
+    return `TYPE ${declaration.kind} ${declaration.name}`;
+  }
+  return `${declaration.category}/${declaration.kind} ${declaration.name}`;
+}
+
 export function identifyStUnits(content: string): StUnit[] {
   return identifyStDeclarations(content);
 }
 
 export function identifyStDraft(content: string): StDraftIdentity | undefined {
-  const programName = identifyStDeclarations(content).find(
-    (item) => item.category === "pou" && item.kind === "PROGRAM",
-  )?.name;
-  return programName
-    ? { programName: programName.toLocaleUpperCase() }
-    : undefined;
+  const firstDeclaration = identifyStDeclarations(content)[0];
+  if (!firstDeclaration) return undefined;
+  return {
+    declaration: {
+      category: firstDeclaration.category,
+      kind: firstDeclaration.kind,
+      name: firstDeclaration.name.toLocaleUpperCase(),
+    },
+  };
 }
 
 export type StDraftIdentityCheck = {
   accepted: boolean;
-  expectedProgramName?: string;
-  actualProgramName?: string;
+  expectedDeclaration?: StDeclarationIdentity;
+  actualDeclaration?: StDeclarationIdentity;
 };
+
+function normalizeDraftIdentity(value: unknown): StDraftIdentity | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  const declaration =
+    raw.declaration && typeof raw.declaration === "object" &&
+    !Array.isArray(raw.declaration)
+      ? raw.declaration as Record<string, unknown>
+      : undefined;
+  if (
+    declaration &&
+    typeof declaration.category === "string" &&
+    typeof declaration.kind === "string" &&
+    typeof declaration.name === "string" &&
+    declaration.category.trim() &&
+    declaration.kind.trim() &&
+    declaration.name.trim()
+  ) {
+    return {
+      declaration: {
+        category: declaration.category.trim().toLocaleLowerCase(),
+        kind: declaration.kind.trim().toUpperCase(),
+        name: declaration.name.trim().toUpperCase(),
+      },
+    };
+  }
+  // Runs created before the generic declaration identity existed may still
+  // carry the old PROGRAM-only shape. Upgrade it without weakening the lock.
+  if (typeof raw.programName === "string" && raw.programName.trim()) {
+    return {
+      declaration: {
+        category: "pou",
+        kind: "PROGRAM",
+        name: raw.programName.trim().toUpperCase(),
+      },
+    };
+  }
+  return undefined;
+}
 
 export class StValidationRuntimeService {
   readonly validationInputMode: StValidationInputMode;
@@ -306,6 +368,8 @@ export class StValidationRuntimeService {
     validationInputMode: StValidationInputMode = "inline_code",
   ) {
     this.validationInputMode = validationInputMode;
+    const draftIdentity = normalizeDraftIdentity(this.state.draftIdentity);
+    if (draftIdentity) this.state.draftIdentity = draftIdentity;
     this.state.candidates ??= [];
     this.state.nextCandidateSequence ??= this.state.candidates.length + 1;
     this.state.persistedWrites ??= [];
@@ -329,29 +393,32 @@ export class StValidationRuntimeService {
 
   checkDraftIdentity(content: string): StDraftIdentityCheck {
     const actual = identifyStDraft(content);
-    const expected = this.state.draftIdentity?.programName;
+    const expected = this.state.draftIdentity?.declaration;
     if (!expected || !actual) {
       return {
         accepted: !expected || !!actual,
-        ...(expected ? { expectedProgramName: expected } : {}),
-        ...(actual ? { actualProgramName: actual.programName } : {}),
+        ...(expected ? { expectedDeclaration: expected } : {}),
+        ...(actual ? { actualDeclaration: actual.declaration } : {}),
       };
     }
     return {
-      accepted: expected === actual.programName,
-      expectedProgramName: expected,
-      actualProgramName: actual.programName,
+      accepted:
+        expected.category === actual.declaration.category &&
+        expected.kind === actual.declaration.kind &&
+        expected.name === actual.declaration.name,
+      expectedDeclaration: expected,
+      actualDeclaration: actual.declaration,
     };
   }
 
   recordValidationAttempt(content: string): StDraftIdentityCheck {
     const actual = identifyStDraft(content);
-    const expected = this.state.draftIdentity?.programName;
+    const expected = this.state.draftIdentity?.declaration;
     if (!expected) {
       if (actual) this.state.draftIdentity = actual;
       return {
         accepted: !expected || !!actual,
-        ...(actual ? { actualProgramName: actual.programName } : {}),
+        ...(actual ? { actualDeclaration: actual.declaration } : {}),
       };
     }
     const check = this.checkDraftIdentity(content);

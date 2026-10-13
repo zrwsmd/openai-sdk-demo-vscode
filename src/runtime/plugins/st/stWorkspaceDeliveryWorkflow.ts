@@ -21,10 +21,12 @@ export {
   getStValidationState,
   ST_TOOL_STATE_SERVICE,
   ST_VALIDATION_RUNTIME_SERVICE,
+  describeStDeclaration,
   identifyStDraft,
   identifyStDeclarations,
   identifyStUnits,
   type StDraftIdentity,
+  type StDeclarationIdentity,
   type StDeclaration,
   type StUnit,
   type StValidationCandidate,
@@ -212,7 +214,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       "形成完整草稿后，调用 validate_st_code 的 code 参数校验完整内存草稿；" +
       "code 必须是完整 ST 源码，不要传文件路径、工具错误回执、JSON 包装或摘要。" +
       "校验失败时只根据诊断修改草稿并再次校验；errorCount=0 之前禁止写文件。" +
-      "校验失败后的修正版必须继续围绕首轮草稿的 PROGRAM 名称工作；不要为了试验语法生成 Probe、Demo 等无关临时程序。" +
+      "校验失败后的修正版必须继续围绕首轮草稿的目标声明(category/kind/name)工作；不要为了试验语法生成 Probe、Demo 等无关临时声明。" +
       "校验成功后运行时锁定这份源码，下一步只能单独调用 write_file，" +
       "且 content 必须与刚通过校验的源码完全一致。" +
       "write_file 成功后必须调用 commit_st_delivery，提交成功写入的 .st 路径和 contentHash，" +

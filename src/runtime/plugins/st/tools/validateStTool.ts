@@ -22,6 +22,7 @@ import {
 } from "../../../diagnosticCompression";
 import { agentLog } from "../../../modelGateway";
 import {
+  describeStDeclaration,
   identifyStDeclarations,
   type StDeclaration,
   type StValidationCandidate,
@@ -128,11 +129,11 @@ function draftIdentityMismatch(
   diagnostic: StDiagnostic;
   protocolDiagnostic: Diagnostic;
 } {
-  const expected = check.expectedProgramName ?? "(未确定)";
-  const actual = check.actualProgramName ?? "(未找到 PROGRAM)";
+  const expected = describeStDeclaration(check.expectedDeclaration);
+  const actual = describeStDeclaration(check.actualDeclaration);
   const message =
-    `当前 ST 草稿的 PROGRAM=${actual} 与本轮已锁定的 PROGRAM=${expected} 不一致；` +
-    "请继续修正原始交付草稿，不要生成 Probe、Demo 等无关临时程序。";
+    `当前 ST 草稿的目标声明=${actual} 与本轮已锁定的目标声明=${expected} 不一致；` +
+    "请继续修正原始交付草稿，不要生成 Probe、Demo 等无关临时声明。";
   return {
     message,
     diagnostic: {
@@ -237,13 +238,13 @@ export function createValidateStTools(ctx: StToolBuildContext) {
 
   const validateStCodeParameters = inlineStValidation
     ? z.object({
-        code: z.string().min(1).describe("当前完整 ST 草稿；必须包含完整 PROGRAM ... END_PROGRAM"),
+        code: z.string().min(1).describe("当前完整 ST 草稿；必须包含完整的 POU 或 TYPE 声明"),
         loadWorkspaceContext: optionalBooleanParam.describe(
           '是否把工作区其它 .st 一起解析；优先传 true/false，兼容 "True"/"False" 字符串',
         ),
       })
     : z.object({
-        code: optionalStringParam.describe("完整 ST 源码(PROGRAM ... END_PROGRAM);不使用时可省略或传 null"),
+        code: optionalStringParam.describe("完整 ST 源码(POU 或 TYPE 声明);不使用时可省略或传 null"),
         path: optionalStringParam.describe("工作区内的 .st 文件路径,优先于 code;不使用时可省略或传 null"),
         loadWorkspaceContext: optionalBooleanParam.describe(
           '是否把工作区其它 .st 一起解析(跨文件 GVL/FB 引用需要);优先传 true/false,兼容 "True"/"False" 字符串',
@@ -254,7 +255,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     name: "validate_st_code",
     description: inlineStValidation
       ? "校验内存中的完整 IEC 61131-3 ST 草稿。当前处于固定交付流水线的草稿阶段，只能传 code；不要传 path，也不要在校验成功前调用 write_file、export_st_program 或 run_command。errorCount=0 才算通过，warning 只作提示。" +
-        "校验成功后运行时会锁定这份源码，下一步只能把完全相同的源码交给 write_file。"
+        "校验成功后运行时会锁定这份源码的声明身份，下一步只能把完全相同的源码交给 write_file。"
       :
       "用 ST 语言服务器(st-analyze)校验 IEC 61131-3 ST 代码,返回带行列号的诊断。" +
       "优先用 path 校验工作区里的真实 .st 文件,只有裸代码才用 code。" +
@@ -304,8 +305,8 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           ].join(" ");
           agentLog(
             `[st-validation] rejected target=${validationInput.label} ` +
-            `expectedProgram=${draftIdentityCheck.expectedProgramName ?? "(none)"} ` +
-            `actualProgram=${draftIdentityCheck.actualProgramName ?? "(none)"}`,
+            `expectedDeclaration=${describeStDeclaration(draftIdentityCheck.expectedDeclaration)} ` +
+            `actualDeclaration=${describeStDeclaration(draftIdentityCheck.actualDeclaration)}`,
           );
           audit({
             type: "tool_completed",
@@ -326,8 +327,8 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                   hashStContent(validationInput.target.text),
               },
               draftIdentity: {
-                expectedProgramName: draftIdentityCheck.expectedProgramName,
-                actualProgramName: draftIdentityCheck.actualProgramName,
+                expectedDeclaration: draftIdentityCheck.expectedDeclaration,
+                actualDeclaration: draftIdentityCheck.actualDeclaration,
               },
               validationCandidate,
             },
@@ -364,8 +365,8 @@ export function createValidateStTools(ctx: StToolBuildContext) {
                   hashStContent(validationInput.target.text),
               },
               draftIdentity: {
-                expectedProgramName: draftIdentityCheck.expectedProgramName,
-                actualProgramName: draftIdentityCheck.actualProgramName,
+                expectedDeclaration: draftIdentityCheck.expectedDeclaration,
+                actualDeclaration: draftIdentityCheck.actualDeclaration,
               },
               validationCandidate,
               summary,
@@ -602,8 +603,8 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       ].join(" ");
       agentLog(
         `[st-validation] rejected target=${targetLabel} ` +
-        `expectedProgram=${draftIdentityCheck.expectedProgramName ?? "(none)"} ` +
-        `actualProgram=${draftIdentityCheck.actualProgramName ?? "(none)"}`,
+        `expectedDeclaration=${describeStDeclaration(draftIdentityCheck.expectedDeclaration)} ` +
+        `actualDeclaration=${describeStDeclaration(draftIdentityCheck.actualDeclaration)}`,
       );
       return {
         ok: false,
@@ -742,14 +743,14 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     description:
       '把一段完整的 IEC 61131-3 ST 程序导出为 .st 文件保存到本地(用户要求"导出/保存/落地文件"时使用)。',
     parameters: z.object({
-      code: z.string().describe("完整 ST 源码(PROGRAM ... END_PROGRAM)"),
+      code: z.string().describe("完整 ST 源码(POU 或 TYPE 声明)"),
     }),
     needsApproval: true,
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
     execute: async ({ code }, _context, details) => {
-      const m = /PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(code);
-      const name = m?.[1] ?? `program_${Date.now()}`;
+      const declaration = identifyStDeclarations(code)[0];
+      const name = declaration?.name ?? `st_${Date.now()}`;
       const file = path.join(cfg.exportDir, `${name}.st`);
       if (
         requiresStValidation &&
