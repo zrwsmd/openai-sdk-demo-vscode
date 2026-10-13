@@ -1,5 +1,6 @@
 import type { Tool } from "@openai/agents";
 import { hashStContent } from "./stContentHash";
+import { agentLog } from "../../modelGateway";
 import type {
   BeforeEffectContext,
   BeforeEffectResult,
@@ -142,6 +143,11 @@ function fileBeforeEffect(
       const message =
         `当前 ST 写入内容的目标声明=${actual} 与本轮已锁定的目标声明=${expected} 不一致；` +
         "已阻止写入，请继续修正原始交付草稿。";
+      agentLog(
+        `[st-validation] rejected target=${path} tool=${toolName} ` +
+        `expectedDeclaration=${expected} ` +
+        `actualDeclaration=${actual}`,
+      );
       return {
         ok: false,
         error: message,
@@ -158,7 +164,7 @@ function fileBeforeEffect(
           severity: "error" as const,
           path,
         }],
-        risk: "plan",
+        risk: "write",
       };
     }
 

@@ -10,11 +10,14 @@ import {
   createStCodeDeliveryContract,
   createStToolProvider,
   createStValidationState,
+  setAgentLogger,
 } from './agent.testbundle.mjs';
 
 async function withSession(run) {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'st-identity-ws-'));
   const exportDir = await fs.mkdtemp(path.join(os.tmpdir(), 'st-identity-export-'));
+  const logs = [];
+  setAgentLogger((line) => logs.push(line));
   try {
     const contract = createStCodeDeliveryContract({
       workspacePersistence: 'required',
@@ -49,16 +52,38 @@ async function withSession(run) {
         () => true,
         () => false,
       );
-    await run({ invoke, service, workspaceRoot, fileExists });
+    await run({ invoke, service, workspaceRoot, fileExists, logs });
   } finally {
+    setAgentLogger(() => {});
     await fs.rm(workspaceRoot, { recursive: true, force: true });
     await fs.rm(exportDir, { recursive: true, force: true });
   }
 }
 
-function assertIdentityMismatch(result, expected, actual, label) {
+function describeDeclaration(declaration) {
+  if (declaration.category === 'type') {
+    return `TYPE ${declaration.kind} ${declaration.name}`;
+  }
+  return `${declaration.kind} ${declaration.name}`;
+}
+
+function assertRejectedLog(logs, { target, tool, expected, actual, label }) {
+  const expectedText = describeDeclaration(expected);
+  const actualText = describeDeclaration(actual);
+  const found = logs.find((line) =>
+    line.includes('[st-validation] rejected') &&
+    line.includes(`target=${target}`) &&
+    line.includes(`expectedDeclaration=${expectedText}`) &&
+    line.includes(`actualDeclaration=${actualText}`) &&
+    (tool ? line.includes(`tool=${tool}`) : !line.includes('tool=')),
+  );
+  assert(found, `${label} 应写入 rejected 日志`);
+}
+
+function assertIdentityMismatch(result, expected, actual, label, risk) {
   assert.equal(result.ok, false, `${label} 应被拦截`);
   assert.equal(result.effect, 'none', `${label} 不得产生副作用`);
+  assert.equal(result.risk, risk, `${label} risk 应为 ${risk}`);
   const diagnostic = (result.diagnostics ?? []).find(
     (item) => item.code === 'st_draft_identity_mismatch',
   );
@@ -109,7 +134,7 @@ const genericCases = [
 ];
 
 for (const item of genericCases) {
-  await withSession(async ({ invoke, service, fileExists }) => {
+  await withSession(async ({ invoke, service, fileExists, logs }) => {
     const firstValidate = await invoke('validate_st_code', { code: item.first });
     assert.deepEqual(
       service.state.draftIdentity?.declaration,
@@ -128,7 +153,14 @@ for (const item of genericCases) {
       item.expected,
       item.actual,
       `${item.label} validate_st_code`,
+      'plan',
     );
+    assertRejectedLog(logs, {
+      target: '<inline st code>',
+      expected: item.expected,
+      actual: item.actual,
+      label: `${item.label} validate_st_code`,
+    });
 
     const writeResult = await invoke('write_file', {
       path: item.otherPath,
@@ -139,7 +171,15 @@ for (const item of genericCases) {
       item.expected,
       item.actual,
       `${item.label} write_file`,
+      'write',
     );
+    assertRejectedLog(logs, {
+      target: item.otherPath,
+      tool: 'write_file',
+      expected: item.expected,
+      actual: item.actual,
+      label: `${item.label} write_file`,
+    });
     assert.equal(
       await fileExists(item.otherPath),
       false,
@@ -148,24 +188,29 @@ for (const item of genericCases) {
   });
 }
 
-await withSession(async ({ invoke, service, fileExists }) => {
+await withSession(async ({ invoke, service, fileExists, logs }) => {
   const probe = 'PROGRAM Probe5\nEND_PROGRAM\n';
   const official = 'PROGRAM PressureFilterScale\nEND_PROGRAM\n';
+  const expected = { category: 'pou', kind: 'PROGRAM', name: 'PROBE5' };
+  const actual = { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' };
   const firstValidate = await invoke('validate_st_code', { code: probe });
   assert.equal(firstValidate.ok, true, 'PROGRAM 探针草稿应能通过 fallback 校验');
-  assert.deepEqual(service.state.draftIdentity?.declaration, {
-    category: 'pou',
-    kind: 'PROGRAM',
-    name: 'PROBE5',
-  });
+  assert.deepEqual(service.state.draftIdentity?.declaration, expected);
 
   const officialValidate = await invoke('validate_st_code', { code: official });
   assertIdentityMismatch(
     officialValidate,
-    { category: 'pou', kind: 'PROGRAM', name: 'PROBE5' },
-    { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' },
+    expected,
+    actual,
     '首个提交是 Probe 后的 validate_st_code',
+    'plan',
   );
+  assertRejectedLog(logs, {
+    target: '<inline st code>',
+    expected,
+    actual,
+    label: '首个提交是 Probe 后的 validate_st_code',
+  });
 
   const officialWrite = await invoke('write_file', {
     path: 'PressureFilterScale.st',
@@ -173,34 +218,41 @@ await withSession(async ({ invoke, service, fileExists }) => {
   });
   assertIdentityMismatch(
     officialWrite,
-    { category: 'pou', kind: 'PROGRAM', name: 'PROBE5' },
-    { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' },
+    expected,
+    actual,
     '首个提交是 Probe 后的 write_file',
+    'write',
   );
+  assertRejectedLog(logs, {
+    target: 'PressureFilterScale.st',
+    tool: 'write_file',
+    expected,
+    actual,
+    label: '首个提交是 Probe 后的 write_file',
+  });
   assert.equal(await fileExists('PressureFilterScale.st'), false);
 });
 
-await withSession(async ({ invoke, service, fileExists }) => {
+await withSession(async ({ invoke, service, fileExists, logs }) => {
   const probe = 'PROGRAM Probe1\nEND_PROGRAM\n';
   const official = 'PROGRAM PressureFilterScale\nEND_PROGRAM\n';
+  const expected = { category: 'pou', kind: 'PROGRAM', name: 'PROBE1' };
+  const actual = { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' };
   const probeWrite = await invoke('write_file', {
     path: 'Probe1.st',
     content: probe,
   });
-  assert.equal(probeWrite.ok, true, '无预校验时首个 PROGRAM 写入可以先锁定身份');
-  assert.deepEqual(service.state.draftIdentity?.declaration, {
-    category: 'pou',
-    kind: 'PROGRAM',
-    name: 'PROBE1',
-  });
+  assert.equal(probeWrite.ok, true, '无预校验时���个 PROGRAM 写入可以先锁定身份');
+  assert.deepEqual(service.state.draftIdentity?.declaration, expected);
   assert.equal(await fileExists('Probe1.st'), true);
 
   const officialValidate = await invoke('validate_st_code', { code: official });
   assertIdentityMismatch(
     officialValidate,
-    { category: 'pou', kind: 'PROGRAM', name: 'PROBE1' },
-    { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' },
+    expected,
+    actual,
     'write_file 先提交 Probe 后的 validate_st_code',
+    'plan',
   );
 
   const officialWrite = await invoke('write_file', {
@@ -209,10 +261,18 @@ await withSession(async ({ invoke, service, fileExists }) => {
   });
   assertIdentityMismatch(
     officialWrite,
-    { category: 'pou', kind: 'PROGRAM', name: 'PROBE1' },
-    { category: 'pou', kind: 'PROGRAM', name: 'PRESSUREFILTERSCALE' },
+    expected,
+    actual,
     'write_file 先提交 Probe 后的正式写入',
+    'write',
   );
+  assertRejectedLog(logs, {
+    target: 'PressureFilterScale.st',
+    tool: 'write_file',
+    expected,
+    actual,
+    label: 'write_file 先提交 Probe 后的正式写入',
+  });
   assert.equal(await fileExists('PressureFilterScale.st'), false);
 });
 
