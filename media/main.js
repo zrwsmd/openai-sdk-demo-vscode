@@ -1175,6 +1175,23 @@ function checkFailureHeadline(name, parsed) {
   return '检查未通过';
 }
 
+function isHistoricalArgumentGuardText(value) {
+  if (typeof value !== 'string') return false;
+  return /疑似沿用了历史对话中的资源参数|已阻止工具\s+.+\s+执行/.test(value);
+}
+
+function isHistoricalArgumentGuardResult(summary, result, parsed) {
+  const candidates = [
+    summary,
+    typeof result === 'string' ? result : '',
+    parsed?.error,
+    ...(Array.isArray(parsed?.diagnostics)
+      ? parsed.diagnostics.map((diagnostic) => diagnostic?.message)
+      : []),
+  ];
+  return candidates.some(isHistoricalArgumentGuardText);
+}
+
 function formatToolResult(name, summary, result, run, durationMs) {
   const parsed = result && typeof result === 'object'
     ? result
@@ -1183,6 +1200,15 @@ function formatToolResult(name, summary, result, run, durationMs) {
   const duration = durationLabel(durationMs);
   const metaParts = [name, duration].filter(Boolean);
   const meta = metaParts.join(' · ');
+  if (isHistoricalArgumentGuardResult(summary, result, parsed)) {
+    return {
+      status: 'skipped',
+      headline: '已跳过本次操作',
+      summary: '当前问题没有明确要求继续使用上一轮资源，本次未执行相关操作。',
+      meta: '系统提示',
+      detail: '',
+    };
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const text = typeof summary === 'string' ? summary.trim() : '';
     const inputError = formatToolInputError(name, text, meta, run?.args);
@@ -1313,15 +1339,16 @@ function formatToolResult(name, summary, result, run, durationMs) {
 }
 
 function addToolResult(name, ok, summary, result, run, durationMs) {
+  const formatted = formatToolResult(name, summary, result, run, durationMs);
+  const status = formatted.status || (ok ? 'success' : 'failure');
   const note = document.createElement('div');
-  note.className = `tool-result ${ok ? 'success' : 'failure'}`;
+  note.className = `tool-result ${status}`;
   const icon = document.createElement('span');
   icon.className = 'tool-result-icon';
-  icon.textContent = ok ? '✓' : '!';
+  icon.textContent = status === 'success' ? '✓' : status === 'skipped' ? 'i' : '!';
   const body = document.createElement('div');
   body.className = 'tool-result-body';
-  const formatted = formatToolResult(name, summary, result, run, durationMs);
-  if (!ok && !formatted.suppressFailurePrefix) formatted.headline = formatted.headline.startsWith('执行失败')
+  if (status === 'failure' && !formatted.suppressFailurePrefix) formatted.headline = formatted.headline.startsWith('执行失败')
     ? formatted.headline
     : `执行失败：${formatted.headline}`;
   const title = document.createElement('div');

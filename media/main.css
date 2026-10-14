@@ -584,6 +584,7 @@ body { display: flex; flex-direction: column; }
 }
 .tool-result.success { border-color: var(--vscode-testing-iconPassed, #4caf7d); border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #4caf7d) 55%, var(--border)); }
 .tool-result.failure { border-color: var(--vscode-errorForeground, #f66); }
+.tool-result.skipped { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .tool-result-icon {
   display: grid;
   place-items: center;
@@ -597,6 +598,11 @@ body { display: flex; flex-direction: column; }
   font-weight: 700;
 }
 .tool-result.failure .tool-result-icon { background: var(--vscode-errorForeground, #f66); }
+.tool-result.skipped .tool-result-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--box));
+  border: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+}
 .tool-result-body { min-width: 0; flex: 1; }
 .tool-result-title { color: var(--fg); line-height: 1.4; word-break: break-word; }
 .tool-result-summary { color: var(--fg); opacity: 0.88; font-size: 12px; line-height: 1.45; margin-top: 4px; word-break: break-word; }
