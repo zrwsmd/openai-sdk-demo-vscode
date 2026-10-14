@@ -167,6 +167,11 @@ export function createStGraphTools(context: StToolBuildContext) {
                   ? { truncated: true }
                   : {}),
                 ...(unresolvedHere.length ? { unresolvedReferences: unresolvedHere } : {}),
+                note:
+                  'dependsOn = 本文件引用了谁,dependents = 谁引用了本文件;kind 为 reference(符号引用)' +
+                  '或 global(经 VAR_EXTERNAL 引入的全局变量),可能同时出现。' +
+                  'unresolvedReferences 只统计本文件里找不到声明的引用,不代表这些名字一定不存在,' +
+                  '也没有行列号;本工具不检查代码本身对错,语法/类型错误要用 validate_st_code 查。',
               },
               'plan',
             );
@@ -194,6 +199,14 @@ export function createStGraphTools(context: StToolBuildContext) {
                 count: item.count,
               })),
               externalLibraryReferences: graph.externalCount,
+              note:
+                'unresolved 只统计语言服务找不到声明的引用(原因:拼写错误、漏声明、引用了引擎未收录的' +
+                '外部库符号),不代表这些名字一定不存在,条目里也只有文件名和符号名、没有行列号。' +
+                '本工具不检查代码本身是否正确 —— 语法错误与类型错误都不在回执里,所以 ' +
+                'unresolvedCount=0 也不代表工作区无错;错误种类和具体行列只有 validate_st_code ' +
+                '给得出(一次校验一个 .st)。改动前先确认目标文件当前是否已有错,可以避免把旧错算到' +
+                '这次改动头上。externalLibraryReferences 是已解析到标准库(不在本次分析池内)的引用数;' +
+                'dependencies 只列出有出边的文件。',
             },
             'plan',
           );
