@@ -4,3 +4,10 @@ src/
 **/*.map
 .gitignore
 tsconfig.json
+
+vendor/vscode-command-bridge/
+
+scripts/
+docs/
+.vscode/
+.kilo/
