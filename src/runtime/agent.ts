@@ -113,7 +113,7 @@ import {
   getResumableAgentState,
   isAgentCancellationError,
   isRetryableAgentError,
-  WorkflowTurnBudgetExceededError,
+  TurnBudgetExceededError,
 } from "./agentErrors";
 import { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 import {
@@ -167,6 +167,7 @@ export {
   AgentActionVerificationError,
   getResumableAgentState,
   isRetryableAgentError,
+  TurnBudgetExceededError,
   WorkflowTurnBudgetExceededError,
 } from "./agentErrors";
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
@@ -248,6 +249,12 @@ export interface AgentRunOptions {
    * task, workflow, or delivery contract.
    */
   resumeInstruction?: string;
+  /**
+   * Extends the current model-turn segment after an explicit continuation
+   * from a persisted budget boundary. Ordinary requests receive another
+   * MAX_TURNS segment; workflows use their configured hard-limit segment.
+   */
+  continueTurnBudget?: boolean;
   /** Persists validated step transitions outside the SDK session. */
   onPlanProgress?: (progress: TaskPlanProgress) => Promise<void> | void;
   /** Stable event envelope shared by the host, UI, tracing and future MCP tools. */
@@ -350,9 +357,9 @@ export function renderFallbackModeInstructions(mode: WorkflowFallbackMode): stri
 /** Protocol usage alias shared by runtime and run store. */
 export type TurnUsage = UsageSummary;
 
-/** Ordinary requests keep this conservative hard turn limit. */
+/** Ordinary requests use this conservative automatic model-turn segment budget. */
 export const MAX_TURNS = 10;
-/** Workflow-specific policies may extend a run only up to their own hard limit. */
+/** Workflow-specific policies may extend the initial segment up to their own hard limit. */
 const MAX_COMPLETION_GATE_RETRIES = 3;
 
 export async function runAgent(
@@ -415,7 +422,10 @@ export async function runAgent(
     workflowVisibilityContext,
   );
   const workflowTurnBudget = workflowRuntime?.turnBudget;
-  let modelTurnLimit = workflowTurnBudget?.softLimit ?? MAX_TURNS;
+  let modelTurnLimit = options.continueTurnBudget && workflowTurnBudget
+    ? workflowTurnBudget.hardLimit
+    : workflowTurnBudget?.softLimit ?? MAX_TURNS;
+  const continuationTurnWindow = workflowTurnBudget?.hardLimit ?? MAX_TURNS;
   const workflowProgressToolNames = new Set(
     (workflowRuntime?.stages ?? [])
       .map((stage) => stage.toolName)
@@ -663,9 +673,13 @@ export async function runAgent(
     };
     const runtimeInstructions = [
       options.resumeInstruction?.trim()
-        ? "本轮是从暂停断点继续。以下是用户对同一任务的补充指令，" +
-          "只能作为表达方式、约束或执行偏好的增量；不得用它替换原始用户目标、workflow 或交付契约：\n" +
+        ? "本轮是从暂停断点继续。请先判断下面的用户补充是继续、补充或追问上一任务，还是一个明显独立的新问题。" +
+          "如果它仍然针对上一任务，就继续原任务；如果它是独立新问题，不要因为旧任务尚未完成就擅自执行旧任务剩余动作，应优先按新问题回答。" +
+          "无论哪种情况，都不能把补充内容误当成新的 workflow 或交付契约，也不能复用与当前问题无关的旧工具参数：\n" +
           options.resumeInstruction.trim()
+        : "",
+      options.continueTurnBudget
+        ? "本轮是用户明确触发的预算续跑。已有执行状态已经保存；请基于当前用户补充和历史回执判断是否继续原任务，只有在确实需要时才继续调用工具。"
         : "",
       runtimeCompletionRepairInstruction
         ? "运行时完成验收未通过。你必须继续处理,不能直接结束:\n" +
@@ -1912,7 +1926,9 @@ export async function runAgent(
     usage.requests = state.usage.requests;
     usage.inputTokens = state.usage.inputTokens;
     usage.outputTokens = state.usage.outputTokens;
-    if (
+    if (options.continueTurnBudget) {
+      modelTurnLimit = state._currentTurn + continuationTurnWindow;
+    } else if (
       workflowTurnBudget &&
       state._currentTurn >= workflowTurnBudget.softLimit
     ) {
@@ -1994,6 +2010,9 @@ export async function runAgent(
         error instanceof MaxTurnsExceededError ||
         (error instanceof Error && error.name === "MaxTurnsExceededError");
       if (maxTurnsError && workflowTurnBudget) {
+        const effectiveWorkflowHardLimit = options.continueTurnBudget
+          ? modelTurnLimit
+          : workflowTurnBudget.hardLimit;
         refreshWorkflowCompletion();
         if (workflowCompleted) {
           structuredOutput = synthesizeStructuredOutputFromEvidence();
@@ -2002,26 +2021,27 @@ export async function runAgent(
           } else {
             throw error;
           }
-        } else if (modelTurnLimit < workflowTurnBudget.hardLimit) {
+        } else if (modelTurnLimit < effectiveWorkflowHardLimit) {
           const decision = workflowTurnBudget.evaluateAtSoftLimit({
             currentTurn,
             currentLimit: modelTurnLimit,
             softLimit: workflowTurnBudget.softLimit,
-            hardLimit: workflowTurnBudget.hardLimit,
+            hardLimit: effectiveWorkflowHardLimit,
             completed: workflowCompleted,
             records: workflowToolRecords(),
             progressToolNames: workflowProgressToolNames,
           });
           if (decision.action === "continue") {
-            modelTurnLimit = workflowTurnBudget.hardLimit;
+            modelTurnLimit = effectiveWorkflowHardLimit;
             agentLog(
               `[workflow] soft turn limit ${workflowTurnBudget.softLimit} reached; ` +
-              `continue up to ${workflowTurnBudget.hardLimit}: ${decision.reason}`,
+              `continue up to ${effectiveWorkflowHardLimit}: ${decision.reason}`,
             );
             continue;
           }
-          const budgetError = new WorkflowTurnBudgetExceededError(
-            decision.reason,
+          const budgetError = new TurnBudgetExceededError(
+            `${decision.reason} 当前进度已保存；输入“继续”或补充与当前任务相关的说明后，` +
+            "将从断点恢复下一段预算；如果要开始新问题，请明确说明。",
           );
           try {
             attachResumableAgentState(budgetError, state.toString());
@@ -2031,12 +2051,31 @@ export async function runAgent(
           }
           throw budgetError;
         } else {
-          throw new WorkflowTurnBudgetExceededError(
-            `已达到该工作流的硬上限 ${workflowTurnBudget.hardLimit} 次模型往返，` +
-            "本轮已停止，避免无限消耗；请拆分需求或重新开始。",
-            false,
+          const budgetError = new TurnBudgetExceededError(
+            `本轮已暂停并保存当前进度：该任务的本段模型往返预算已用完（${effectiveWorkflowHardLimit} 次）。` +
+            "输入“继续”或补充与当前任务相关的说明后，将从断点恢复下一段预算；如果要开始新问题，请明确说明。",
           );
+          try {
+            attachResumableAgentState(budgetError, state.toString());
+          } catch {
+            // The coordinator will fall back to a safe restart if serialization
+            // is unavailable.
+          }
+          throw budgetError;
         }
+      }
+      if (maxTurnsError) {
+        const budgetError = new TurnBudgetExceededError(
+          `本轮已暂停并保存当前进度：当前自动模型往返预算已用完（${modelTurnLimit} 次）。` +
+          "输入“继续”或补充与当前任务相关的说明后，模型会结合已有上下文判断是否继续；如果要开始新问题，请明确说明。",
+        );
+        try {
+          attachResumableAgentState(budgetError, state.toString());
+        } catch {
+          // The coordinator will fall back to a safe restart if serialization
+          // is unavailable.
+        }
+        throw budgetError;
       }
       let serializedState: string | undefined;
       try {

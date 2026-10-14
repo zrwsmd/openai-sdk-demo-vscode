@@ -8,6 +8,7 @@ import {
   createTeamTask,
   normalizeWorkflowContract,
   AgentActionVerificationError,
+  TurnBudgetExceededError,
 } from './agent.testbundle.mjs';
 
 // Coordinator lifecycle tests must stay offline. Jev has its own regression
@@ -398,6 +399,57 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     reviewTeamTask: async () => ({ approved: true, summary: 'approved', findings: [], requiredChanges: [] }),
     verifyTeamTask,
   };
+}
+
+// Ordinary requests use the same resumable budget boundary as workflow runs.
+// The second attempt must receive the serialized SDK state and an explicit
+// continuation-budget flag instead of being reported as a terminal failure.
+{
+  let calls = 0;
+  const seen = [];
+  const test = await fixture(async (_cfg, _session, _userText, options) => {
+    seen.push({
+      initialState: options.initialState,
+      continueTurnBudget: options.continueTurnBudget,
+    });
+    calls += 1;
+    if (calls === 1) {
+      const error = new TurnBudgetExceededError('普通预算已用完');
+      Object.defineProperty(error, 'agentRunState', {
+        value: '{"sdk":"ordinary-budget"}',
+        configurable: true,
+      });
+      throw error;
+    }
+    return {
+      status: 'completed',
+      output: '普通任务已继续完成',
+      usage,
+      result: completedAgentResult('普通任务已继续完成'),
+    };
+  });
+  await test.coordinator.start('执行一个需要多轮处理的普通任务', config, 'key');
+  const paused = await test.store.getLast();
+  if (
+    paused?.status !== 'paused' ||
+    paused.canContinue !== true ||
+    paused.turnBudgetPaused !== true ||
+    paused.state !== '{"sdk":"ordinary-budget"}' ||
+    !test.events.some((event) => event.type === 'paused' && event.reason === 'turn_budget')
+  ) {
+    throw new Error('ordinary turn budget was not persisted as a resumable pause');
+  }
+  await test.coordinator.continue('key', '继续');
+  const completed = await test.store.getLast();
+  if (
+    completed?.status !== 'completed' ||
+    seen.length !== 2 ||
+    seen[1].initialState !== '{"sdk":"ordinary-budget"}' ||
+    seen[1].continueTurnBudget !== true
+  ) {
+    throw new Error('ordinary budget continuation did not restore the next segment');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
 }
 
 // Delivery contracts are classified before execution, persisted with the run,

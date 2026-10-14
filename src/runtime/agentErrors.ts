@@ -10,13 +10,26 @@ export class AgentActionVerificationError extends Error {
   }
 }
 
-export class WorkflowTurnBudgetExceededError extends Error {
+/**
+ * A model-turn budget is a resumable execution boundary, not a terminal
+ * failure. Workflow-specific callers may still use the legacy subclass below,
+ * but the coordinator treats every budget boundary the same way.
+ */
+export class TurnBudgetExceededError extends Error {
   readonly canContinue: boolean;
 
   constructor(message: string, canContinue = true) {
     super(message);
-    this.name = "WorkflowTurnBudgetExceededError";
+    this.name = "TurnBudgetExceededError";
     this.canContinue = canContinue;
+  }
+}
+
+/** @deprecated Use TurnBudgetExceededError for generic and workflow runs. */
+export class WorkflowTurnBudgetExceededError extends TurnBudgetExceededError {
+  constructor(message: string, canContinue = true) {
+    super(message, canContinue);
+    this.name = "WorkflowTurnBudgetExceededError";
   }
 }
 
@@ -48,7 +61,7 @@ export function getResumableAgentState(error: unknown): string | undefined {
 
 /** Transient provider failures may continue from RunState or a safe boundary. */
 export function isRetryableAgentError(error: unknown): boolean {
-  if (error instanceof WorkflowTurnBudgetExceededError) return error.canContinue;
+  if (error instanceof TurnBudgetExceededError) return error.canContinue;
   if (
     error instanceof MaxTurnsExceededError ||
     error instanceof EmptyGatewayResponseError ||

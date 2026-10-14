@@ -80,6 +80,11 @@ export interface DurableRunRecord {
   state?: string;
   /** True only when the SDK state can resume this exact run. */
   canContinue: boolean;
+  /**
+   * The last pause was caused by the model-turn budget. This is separate from
+   * canContinue so ordinary retryable failures keep their existing semantics.
+   */
+  turnBudgetPaused?: boolean;
   /** Coordinator-level checkpoint used when the SDK has not started a turn. */
   resumeStage?: DurableRunResumeStage;
   /** Generic linear plan produced before execution, when the task needs one. */
@@ -450,6 +455,7 @@ export class JsonRunStore implements RunStore {
       (run.state !== undefined && typeof run.state !== 'string') ||
       (run.resumeStage !== undefined && !['workflow', 'delivery', 'routing', 'planning', 'execution'].includes(run.resumeStage)) ||
       (run.canContinue !== undefined && typeof run.canContinue !== 'boolean') ||
+      (run.turnBudgetPaused !== undefined && typeof run.turnBudgetPaused !== 'boolean') ||
       (run.status === 'paused' && run.canContinue !== true) ||
       (run.canContinue === true && run.status !== 'paused') ||
       (run.workflowId !== undefined && typeof run.workflowId !== 'string') ||
@@ -595,6 +601,7 @@ export class JsonRunStore implements RunStore {
       sessionItemCountBefore,
       approvals: [],
       canContinue: false,
+      turnBudgetPaused: false,
       plan,
       teamTask,
       deliveryContract,
@@ -633,6 +640,7 @@ export class JsonRunStore implements RunStore {
         ...previous,
         status: 'running',
         canContinue: false,
+        turnBudgetPaused: false,
         approvals: [],
         approvalDecisions: undefined,
         result: undefined,

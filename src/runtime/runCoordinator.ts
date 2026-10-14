@@ -10,8 +10,7 @@ import {
   verifyTeamTask,
   MaxTurnsExceededError,
   AgentActionVerificationError,
-  MAX_TURNS,
-  WorkflowTurnBudgetExceededError,
+  TurnBudgetExceededError,
   type AgentRunOptions,
   type AgentRunResult,
   type TurnUsage,
@@ -1166,6 +1165,7 @@ export class RunCoordinator {
     }
     if (this.isClearing(generation)) return;
     const hasSdkState = typeof previous.state === 'string' && previous.state.length > 0;
+    const continueTurnBudget = previous.turnBudgetPaused === true;
     // Only a current paused record is eligible for SDK RunState.resume.
     // Legacy retryable `failed` records may contain a stale serialized
     // state, but their session boundary is the only safe continuation.
@@ -1242,10 +1242,12 @@ export class RunCoordinator {
         ? {
           initialState: run.state,
           resumeInstruction: resumeInstructionFromDisplayText(displayText),
+          continueTurnBudget,
         }
         : {
           preserveToolHistory: true,
           resumeInstruction: resumeInstructionFromDisplayText(displayText),
+          continueTurnBudget,
         },
     );
   }
@@ -1626,7 +1628,7 @@ export class RunCoordinator {
   private async execute(
     run: DurableRunRecord,
     apiKey: string,
-    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction'> = {},
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction' | 'continueTurnBudget'> = {},
   ): Promise<void> {
     if (this.busy) return;
     this.busy = true;
@@ -1751,8 +1753,8 @@ export class RunCoordinator {
       }
       const executeSingleAgent = (
         agentOptions: Pick<
-          AgentRunOptions,
-          'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction'
+        AgentRunOptions,
+          'initialState' | 'decisions' | 'preserveToolHistory' | 'resumeInstruction' | 'continueTurnBudget'
         >,
       ): Promise<AgentRunResult> =>
         this.executeAgent(
@@ -2015,6 +2017,8 @@ export class RunCoordinator {
     } catch (error) {
       const cancelled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
       const manuallyPaused = cancelled && this.pauseRequested;
+      const budgetPaused =
+        error instanceof TurnBudgetExceededError && error.canContinue;
       const retryableFailure = !cancelled && isRetryableAgentError(error);
       const errorState = manuallyPaused || retryableFailure
         ? getResumableAgentState(error)
@@ -2031,6 +2035,7 @@ export class RunCoordinator {
       run.state = hasSdkState ? errorState : undefined;
       run.approvals = [];
       run.error = cancelled ? undefined : this.formatError(error);
+      run.turnBudgetPaused = budgetPaused;
       run.result = cancelled
         ? createAgentResult({ status: 'cancelled', reason: 'aborted', usage: run.usage })
         : createAgentResult({
@@ -2065,6 +2070,21 @@ export class RunCoordinator {
           type: 'run.cancelled',
           payload: { reason: 'aborted' },
         }));
+      } else if (budgetPaused) {
+        const strategy = hasSdkState ? 'sdk_state' : 'safe_restart';
+        await this.audit('run_paused', run, {
+          strategy,
+          reason: 'turn_budget',
+        });
+        this.writeLog(`[run:${run.id}] 模型预算已用完，已保存恢复点 | 恢复策略=${strategy}`);
+        this.emit({
+          type: 'paused',
+          message: run.error,
+          canContinue: true,
+          canRetry: true,
+          resumeStrategy: strategy,
+          reason: 'turn_budget',
+        });
       } else if (retryableFailure) {
         const strategy = hasSdkState ? 'sdk_state' : 'safe_restart';
         await this.audit('run_failed', run, {
@@ -2111,7 +2131,7 @@ export class RunCoordinator {
     apiKey: string,
     signal: AbortSignal,
     generation: number,
-    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory'>,
+    options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'continueTurnBudget'>,
   ): Promise<AgentRunResult> {
     if (!run.teamTask?.executionGraph) throw new Error('Team 执行图不存在');
     let graph = run.teamTask.executionGraph;
@@ -2264,6 +2284,7 @@ export class RunCoordinator {
             {
               initialState: node.state,
               preserveToolHistory: options.preserveToolHistory,
+              continueTurnBudget: options.continueTurnBudget,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
               teamTask: run.teamTask,
               fallbackMode: run.fallbackMode,
@@ -2715,13 +2736,11 @@ export class RunCoordinator {
   }
 
   private formatError(error: unknown): string {
-    if (error instanceof WorkflowTurnBudgetExceededError) {
-      return error.canContinue
-        ? `本轮已暂停：${error.message}`
-        : `本轮已停止：${error.message}`;
+    if (error instanceof TurnBudgetExceededError) {
+      return error.message;
     }
     if (error instanceof MaxTurnsExceededError) {
-      return `本轮模型往返超过 ${MAX_TURNS} 次上限，已自动停止。请重试或把需求拆细。`;
+      return '本轮模型交互达到自动预算，已停止当前执行；可以重试，或从已保存的断点继续。';
     }
     if (
       error instanceof AgentOutputValidationError ||

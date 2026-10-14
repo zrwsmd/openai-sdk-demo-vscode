@@ -2818,10 +2818,14 @@ window.addEventListener('message', (event) => {
         if (!agentText) detachAgentBubbleFromTimeline();
       }
       agentBubble = null;
+      const budgetPauseMessage = typeof msg.message === 'string' && msg.message.trim()
+        ? msg.message.trim()
+        : '';
       showPauseNotice(
-        msg.resumeStrategy === 'safe_restart'
-          ? '本轮停止较早；输入“继续”会从最近安全位置恢复，也可以重试本轮'
-          : '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮',
+        budgetPauseMessage ||
+          (msg.resumeStrategy === 'safe_restart'
+            ? '本轮停止较早；输入“继续”会从最近安全位置恢复，也可以重试本轮'
+            : '本轮已暂停，可以输入“继续”从断点恢复，或重试本轮'),
       );
       canRetry = msg.canRetry === true;
       canContinue = msg.canContinue === true;

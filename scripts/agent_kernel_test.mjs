@@ -11,7 +11,8 @@ import {
   setAgentLogger,
   JsonFileSession,
   extractChatMessages,
-  MaxTurnsExceededError,
+  TurnBudgetExceededError,
+  getResumableAgentState,
   MAX_TURNS,
   makeLoggingFetch,
   normalizeWorkflowContract,
@@ -1462,7 +1463,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
-// [8] 死循环 → maxTurns 截停(放最后:会往会话里灌 10 轮工具往返)
+// [8] 死循环 → 普通预算边界可恢复(放最后:会往会话里灌 10 轮工具往返)
 {
   let thrown = null;
   try {
@@ -1470,8 +1471,42 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   } catch (e) {
     thrown = e;
   }
-  console.log('[7] 死循环: 抛出 =', thrown?.constructor?.name, '| instanceof =', thrown instanceof MaxTurnsExceededError);
-  if (!(thrown instanceof MaxTurnsExceededError)) throw new Error('场景7 未触发 MaxTurnsExceededError');
+  console.log('[7] 死循环: 抛出 =', thrown?.constructor?.name, '| 可恢复状态 =', Boolean(getResumableAgentState(thrown)));
+  if (!(thrown instanceof TurnBudgetExceededError) || !getResumableAgentState(thrown)) {
+    throw new Error('场景7 未保存可恢复的普通预算断点');
+  }
+  const continuationStart = diagLines.length;
+  let continuationResult;
+  let continuationError;
+  try {
+    continuationResult = await runAgent(cfg, session, '写一个循环测试程序', {
+      initialState: getResumableAgentState(thrown),
+      continueTurnBudget: true,
+      protocol: {
+        runId: 'kernel-budget-continuation',
+        operationId: 'kernel-budget-continuation',
+        eventFactory: new AgentEventFactory(
+          'kernel-budget-continuation',
+          'kernel-budget-continuation',
+        ),
+        onEvent: () => {},
+      },
+    });
+  } catch (error) {
+    continuationError = error;
+  }
+  const continuationRequests = diagLines
+    .slice(continuationStart)
+    .filter((line) => line.includes('[req]') && line.includes('mock-model'))
+    .length;
+  if (
+    continuationRequests === 0 ||
+    (continuationError !== undefined && !(continuationError instanceof TurnBudgetExceededError)) ||
+    (continuationResult !== undefined && !['completed', 'cancelled'].includes(continuationResult.status))
+  ) {
+    throw new Error(`普通预算续跑没有进入下一段: ${JSON.stringify({ continuationRequests, continuationError: continuationError?.name, status: continuationResult?.status })}`);
+  }
+  console.log('[7b] 普通预算续跑:请求数 =', continuationRequests, '| 结果 =', continuationResult?.status ?? continuationError?.name);
 }
 
 // [9] 新会话:clearSession 后文件清空
