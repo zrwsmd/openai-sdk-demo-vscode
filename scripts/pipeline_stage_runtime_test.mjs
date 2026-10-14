@@ -51,10 +51,10 @@ import {
       effect: 'none',
       risk: 'plan',
     },
-    new Set(['write_file']),
+    new Set(['commit_st_delivery']),
   );
-  if (decision?.toolName !== 'write_file') {
-    throw new Error('ST pipeline transition did not choose write_file');
+  if (decision?.toolName !== 'commit_st_delivery') {
+    throw new Error('ST pipeline transition did not choose commit_st_delivery');
   }
   const repairDecision = runtime.nextToolAfterResult(
     'validate_st_code',
@@ -72,23 +72,23 @@ import {
     throw new Error('ST pipeline failed validation did not force validate_st_code repair');
   }
   const commitDecision = runtime.nextToolAfterResult(
-    'write_file',
+    'commit_st_delivery',
     {
       ok: true,
       data: {
-        stPersistence: {
-          status: 'persisted',
+        deliveryAuthorization: {
+          path: 'PumpControl.st',
           contentHash: 'abc',
         },
       },
       diagnostics: [],
-      effect: 'filesystem',
-      risk: 'write',
+      effect: 'none',
+      risk: 'plan',
     },
-    new Set(['commit_st_delivery']),
+    new Set(['write_file']),
   );
-  if (commitDecision?.toolName !== 'commit_st_delivery') {
-    throw new Error('ST pipeline persisted write did not force commit_st_delivery');
+  if (commitDecision?.toolName !== 'write_file') {
+    throw new Error('ST pipeline authorization did not force write_file');
   }
   const firstVisible = runtime.shouldSuppressStarted({
     toolName: 'validate_st_code',

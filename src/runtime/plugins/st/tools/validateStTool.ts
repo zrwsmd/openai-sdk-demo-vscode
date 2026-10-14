@@ -22,7 +22,6 @@ import {
 } from "../../../diagnosticCompression";
 import { agentLog } from "../../../modelGateway";
 import {
-  describeStDeclaration,
   identifyStDeclarations,
   type StDeclaration,
   type StValidationCandidate,
@@ -36,7 +35,6 @@ import {
   parseOptionalString,
 } from "../../../tools/toolBuildContext";
 import type { StToolBuildContext } from "../stToolContext";
-import type { StDraftIdentityCheck } from "../stValidationRuntimeService";
 
 function formatStDeclarations(declarations: readonly StDeclaration[]): string {
   return declarations.length
@@ -119,40 +117,6 @@ function formatValidationFailureLog(
     `duplicates=${packet.duplicateCount} truncated=${packet.truncated} ` +
     `diagnostics=${diagnostics || "(none)"}`
   );
-}
-
-function draftIdentityMismatch(
-  targetLabel: string,
-  check: StDraftIdentityCheck,
-): {
-  message: string;
-  diagnostic: StDiagnostic;
-  protocolDiagnostic: Diagnostic;
-} {
-  const expected = describeStDeclaration(check.expectedDeclaration);
-  const actual = describeStDeclaration(check.actualDeclaration);
-  const message =
-    `当前 ST 草稿的目标声明=${actual} 与本轮已锁定的目标声明=${expected} 不一致；` +
-    "请继续修正原始交付草稿，不要生成 Probe、Demo 等无关临时声明。";
-  return {
-    message,
-    diagnostic: {
-      severity: "error",
-      code: "st_draft_identity_mismatch",
-      message,
-      path: targetLabel,
-      line: 1,
-      character: 1,
-      endLine: 1,
-      endCharacter: 1,
-    },
-    protocolDiagnostic: {
-      code: "st_draft_identity_mismatch",
-      message,
-      severity: "error",
-      path: targetLabel,
-    },
-  };
 }
 
 export function createValidateStTools(ctx: StToolBuildContext) {
@@ -255,7 +219,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     name: "validate_st_code",
     description: inlineStValidation
       ? "校验内存中的完整 IEC 61131-3 ST 草稿。当前处于固定交付流水线的草稿阶段，只能传 code；不要传 path，也不要在校验成功前调用 write_file、export_st_program 或 run_command。errorCount=0 才算通过，warning 只作提示。" +
-        "校验成功后运行时会锁定这份源码的声明身份，下一步只能把完全相同的源码交给 write_file。"
+        "校验只记录候选内容和哈希，不会因为临时草稿或探针声明锁定正式交付目标。"
       :
       "用 ST 语言服务器(st-analyze)校验 IEC 61131-3 ST 代码,返回带行列号的诊断。" +
       "优先用 path 校验工作区里的真实 .st 文件,只有裸代码才用 code。" +
@@ -276,106 +240,6 @@ export function createValidateStTools(ctx: StToolBuildContext) {
           code,
           loadWorkspaceContext,
         );
-        const draftIdentityCheck = validationService?.recordValidationAttempt(
-          validationInput.target.text,
-        );
-        if (draftIdentityCheck && !draftIdentityCheck.accepted) {
-          const rejectedHash =
-            validationInput.contentHash || hashStContent(validationInput.target.text);
-          const validationCandidate = recordStValidationCandidate(
-            ctx,
-            validationInput.target.text,
-            {
-              hash: rejectedHash,
-              status: "failed",
-              errorCount: 1,
-              source: "validate_st_code",
-              targetLabel: validationInput.label,
-            },
-          );
-          const mismatch = draftIdentityMismatch(
-            validationInput.label,
-            draftIdentityCheck,
-          );
-          const summary = [
-            "引擎=runtime-draft-guard",
-            "error=1",
-            "warning=0",
-            `上下文文件=${validationInput.context.length}`,
-          ].join(" ");
-          agentLog(
-            `[st-validation] rejected target=${validationInput.label} ` +
-            `expectedDeclaration=${describeStDeclaration(draftIdentityCheck.expectedDeclaration)} ` +
-            `actualDeclaration=${describeStDeclaration(draftIdentityCheck.actualDeclaration)}`,
-          );
-          audit({
-            type: "tool_completed",
-            toolName: "validate_st_code",
-            risk: "plan",
-            ok: false,
-            summary,
-            metadata: {
-              errorCount: 1,
-              warningCount: 0,
-              infoCount: 0,
-              validationTarget: {
-                path: validationInput.label,
-                complete: validationInput.complete,
-                totalLines: validationInput.totalLines,
-                totalBytes: validationInput.totalBytes,
-                contentHash: validationInput.contentHash ||
-                  hashStContent(validationInput.target.text),
-              },
-              draftIdentity: {
-                expectedDeclaration: draftIdentityCheck.expectedDeclaration,
-                actualDeclaration: draftIdentityCheck.actualDeclaration,
-              },
-              validationCandidate,
-            },
-          });
-          diagnosticReporter?.({
-            toolName: "validate_st_code",
-            phase: "st_draft_identity",
-            summary,
-            counts: { error: 1, warning: 0, info: 0 },
-            validationTarget: {
-              path: validationInput.label,
-              complete: validationInput.complete,
-              totalLines: validationInput.totalLines,
-              totalBytes: validationInput.totalBytes,
-              contentHash: validationInput.contentHash ||
-                hashStContent(validationInput.target.text),
-            },
-            diagnostics: [mismatch.diagnostic],
-          });
-          return toolResult({
-            ok: false,
-            error: mismatch.message,
-            data: {
-              engine: "runtime-draft-guard",
-              errorCount: 1,
-              warningCount: 0,
-              infoCount: 0,
-              validationTarget: {
-                path: validationInput.label,
-                complete: validationInput.complete,
-                totalLines: validationInput.totalLines,
-                totalBytes: validationInput.totalBytes,
-                contentHash: validationInput.contentHash ||
-                  hashStContent(validationInput.target.text),
-              },
-              draftIdentity: {
-                expectedDeclaration: draftIdentityCheck.expectedDeclaration,
-                actualDeclaration: draftIdentityCheck.actualDeclaration,
-              },
-              validationCandidate,
-              summary,
-            },
-            diagnostics: [mismatch.protocolDiagnostic],
-            effect: "none",
-            risk: "plan",
-          });
-        }
         const validationCacheKey = inlineStValidation
           ? [
               "validate_st_code",
@@ -583,42 +447,6 @@ export function createValidateStTools(ctx: StToolBuildContext) {
       content,
       stToolOptions.loadWorkspaceContext,
     );
-    const draftIdentityCheck = validationService?.recordValidationAttempt(
-      validationInput.target.text,
-    );
-    if (draftIdentityCheck && !draftIdentityCheck.accepted) {
-      const candidate = recordStValidationCandidate(ctx, content, {
-        hash: hashStContent(content),
-        status: "failed",
-        errorCount: 1,
-        source: "pre_write_validation",
-        targetLabel,
-      });
-      const mismatch = draftIdentityMismatch(targetLabel, draftIdentityCheck);
-      const summary = [
-        "引擎=runtime-draft-guard",
-        "error=1",
-        "warning=0",
-        `上下文文件=${validationInput.context.length}`,
-      ].join(" ");
-      agentLog(
-        `[st-validation] rejected target=${targetLabel} ` +
-        `expectedDeclaration=${describeStDeclaration(draftIdentityCheck.expectedDeclaration)} ` +
-        `actualDeclaration=${describeStDeclaration(draftIdentityCheck.actualDeclaration)}`,
-      );
-      return {
-        ok: false,
-        contentHash: hashStContent(content),
-        counts: { error: 1, warning: 0, info: 0 },
-        diagnostics: [mismatch.diagnostic],
-        protocolDiagnostics: [mismatch.protocolDiagnostic],
-        summary,
-        engine: { id: "runtime-draft-guard" },
-        elapsedMs: 0,
-        contextLoaded: validationInput.context.length,
-        validationCandidate: candidate,
-      };
-    }
     const result = await stAnalyzer.verify(
       {
         workspaceRoot: workspace.primaryRoot,

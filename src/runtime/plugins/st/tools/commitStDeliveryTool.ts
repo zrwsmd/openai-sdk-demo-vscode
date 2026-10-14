@@ -20,12 +20,12 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
   return tool({
     name: "commit_st_delivery",
     description:
-      "确认一个已经通过 ST 校验并成功写入工作区的 .st 文件为本轮正式交付物。" +
-      "只接受刚刚 write_file/edit_file/export_st_program 成功回执中的路径和 contentHash；" +
-      "不会再次写文件，也不能替代校验或写入。",
+      "提交最终选定的 .st 交付候选，参数必须来自最近一次 validate_st_code 成功回执。" +
+      "这个工具本身不写文件：写入前调用时会登记路径和 contentHash，运行时只允许随后写入完全匹配的内容；" +
+      "写入成功后运行时自动生成正式 deliveryCommit。若旧流程在写入后再次调用本工具，会返回已有正式 commit。",
     parameters: z.object({
-      path: z.string().min(1).describe("成功写入回执中的 .st 文件路径"),
-      contentHash: z.string().min(1).describe("成功写入回执中的 contentHash"),
+      path: z.string().min(1).describe("最终要写入的 .st 文件路径"),
+      contentHash: z.string().min(1).describe("最近一次 validate_st_code 成功回执中的 contentHash"),
     }).strict(),
     inputGuardrails: guardrails.input,
     outputGuardrails: guardrails.output,
@@ -44,17 +44,50 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
             workspaceRoot: target.root,
             contentHash,
           });
-          if (!commit) {
-            return failed(
-              "正式交付 commit 被拒绝：必须先成功校验并实际写入同一份 .st 内容，" +
-                "且 path 与 contentHash 必须来自成功写入回执。",
+          if (commit) {
+            return contract(
+              {
+                deliveryCommit: commit,
+                summary: `已确认正式交付 ${commit.path}。`,
+              },
               "plan",
+              "none",
+            );
+          }
+          const authorization = validationService.authorizeDelivery({
+            path: target.relativePath,
+            workspaceRoot: target.root,
+            contentHash,
+          });
+          if (!authorization) {
+            return failed(
+              "正式交付候选被拒绝：path 和 contentHash 必须来自最近一次成功的 validate_st_code，" +
+              "且内容必须先通过校验。",
+              "plan",
+            );
+          }
+          // Keep old callers working: if a previous implementation already
+          // persisted the target, the same explicit commit can finalize it
+          // after authorization without requiring another write.
+          const persistedCommit = validationService.recordDeliveryCommit({
+            path: target.relativePath,
+            workspaceRoot: target.root,
+            contentHash,
+          });
+          if (persistedCommit) {
+            return contract(
+              {
+                deliveryCommit: persistedCommit,
+                summary: `已确认正式交付 ${persistedCommit.path}。`,
+              },
+              "plan",
+              "none",
             );
           }
           return contract(
             {
-              deliveryCommit: commit,
-              summary: `已确认正式交付 ${commit.path}。`,
+              deliveryAuthorization: authorization,
+              summary: `已登记最终交付候选 ${authorization.path}；下一步只允许写入同一份 contentHash。`,
             },
             "plan",
             "none",

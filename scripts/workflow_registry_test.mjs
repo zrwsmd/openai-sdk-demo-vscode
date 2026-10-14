@@ -63,8 +63,8 @@ assert.equal(appRegistry.getByRoute('devuni_project'), appRegistry.get('devuni_p
 assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
   'validate_st_code',
-  'write_file',
   'commit_st_delivery',
+  'write_file',
 ]);
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES], [
   'st_dependency_map',

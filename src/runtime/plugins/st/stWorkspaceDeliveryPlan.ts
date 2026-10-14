@@ -18,20 +18,20 @@ export const ST_WORKSPACE_DELIVERY_STAGES: WorkflowStage[] = [
   },
   {
     order: 2,
-    id: "persist_final_st",
-    toolName: "write_file",
-    title: "写入 ST 文件",
-    description: "把通过校验的同一份 ST 源码写入工作区",
-    successEvidence: "write_file 返回的 contentHash 与校验哈希一致",
+    id: "commit_delivery",
+    toolName: "commit_st_delivery",
+    title: "选择正式交付候选",
+    description: "提交最终 ST 路径和内容哈希，授权后续只写入这一份候选",
+    successEvidence: "commit_st_delivery 返回 deliveryAuthorization",
     onFailure: "retry",
   },
   {
     order: 3,
-    id: "commit_delivery",
-    toolName: "commit_st_delivery",
-    title: "确认正式交付",
-    description: "确认已经校验并成功写入的同一份 ST 文件是本轮正式交付物",
-    successEvidence: "commit_st_delivery 返回 deliveryCommit",
+    id: "persist_final_st",
+    toolName: "write_file",
+    title: "写入并完成 ST 交付",
+    description: "把已授权且通过校验的同一份 ST 源码写入工作区",
+    successEvidence: "write_file 返回 stPersistence 和 deliveryCommit",
     onFailure: "retry",
   },
 ];
@@ -41,8 +41,8 @@ export const ST_WORKSPACE_DELIVERY_PIPELINE_PLAN: PipelineStagePlan = {
   resultTransitions: [
     {
       fromToolName: "validate_st_code",
-      toToolName: "write_file",
-      reason: "validate_st_code 通过，下一轮强制工具: write_file",
+      toToolName: "commit_st_delivery",
+      reason: "validate_st_code 通过，下一轮先提交最终候选: commit_st_delivery",
       canTransition: isSuccessfulStValidation,
     },
     {
@@ -52,10 +52,10 @@ export const ST_WORKSPACE_DELIVERY_PIPELINE_PLAN: PipelineStagePlan = {
       canTransition: isFailedStValidation,
     },
     {
-      fromToolName: "write_file",
-      toToolName: "commit_st_delivery",
-      reason: "write_file 已成功落盘，下一轮强制确认正式交付",
-      canTransition: isSuccessfulStWrite,
+      fromToolName: "commit_st_delivery",
+      toToolName: "write_file",
+      reason: "commit_st_delivery 已登记最终候选，下一轮只允许写入匹配内容: write_file",
+      canTransition: isSuccessfulStAuthorization,
     },
   ],
   duplicateToolFingerprints: [{
@@ -77,18 +77,18 @@ function isFailedStValidation(result: ToolResult): boolean {
   return !isSuccessfulStValidation(result);
 }
 
-function isSuccessfulStWrite(result: ToolResult): boolean {
+function isSuccessfulStAuthorization(result: ToolResult): boolean {
   if (!result.ok) return false;
   const data = result.data && typeof result.data === "object"
     ? result.data as Record<string, unknown>
     : {};
-  const persistence = data.stPersistence;
-  return persistence !== undefined &&
-    typeof persistence === "object" &&
-    persistence !== null &&
-    !Array.isArray(persistence) &&
-    (persistence as Record<string, unknown>).status === "persisted" &&
-    typeof (persistence as Record<string, unknown>).contentHash === "string";
+  const authorization = data.deliveryAuthorization;
+  return authorization !== undefined &&
+    typeof authorization === "object" &&
+    authorization !== null &&
+    !Array.isArray(authorization) &&
+    typeof (authorization as Record<string, unknown>).path === "string" &&
+    typeof (authorization as Record<string, unknown>).contentHash === "string";
 }
 
 function stValidationFingerprint(

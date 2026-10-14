@@ -581,8 +581,8 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3c] 默认 ST 落盘:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
-    throw new Error('ST 默认落盘没有按校验、写入、正式交付提交顺序执行');
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
+    throw new Error('ST 默认落盘没有按校验、候选授权、写入顺序执行');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('ST 默认落盘的审批工具不正确');
@@ -623,7 +623,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3c2] ST 摘要误判纠正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
     throw new Error('ST 摘要误判场景没有收敛到校验、写入、正式交付提交流水线');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
@@ -667,7 +667,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3c2a] ST 标准库辅助:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
-  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,commit_st_delivery,write_file') {
     throw new Error('ST Delivery 没有按查询、校验、写入、正式交付提交顺序执行');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
@@ -705,7 +705,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3c2a2] ST 辅助后修正:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
-  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'st_library_symbol,validate_st_code,validate_st_code,commit_st_delivery,write_file') {
     throw new Error('ST 辅助查询后校验失败没有按修复、写入、正式交付提交闭环');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
@@ -713,8 +713,8 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   }
 }
 
-// [3c2b] 模型在显式校验失败后直接写入一份修正后的 ST 内容时,
-// write_file 必须在落盘前内部重新校验这份写入内容,通过后才写。
+// [3c2b] 显式校验失败后不能直接落盘:必须先重新校验修正版,
+// 再授权并写入同一份已通过校验的 ST 内容。
 {
   const asked = [];
   const contract = normalizeWorkflowContract({
@@ -746,14 +746,17 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     (event) => event.type === 'tool.completed' && event.payload.toolName === 'write_file',
   );
   console.log('[3c2b] ST 预写校验:工具链 =', toolCalls.join(','), '| 审批 =', asked.map((item) => item.name).join(','));
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
-    throw new Error('ST 预写校验场景没有保持先尝试校验、写入再正式交付提交');
+  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,commit_st_delivery,write_file') {
+    throw new Error('ST 预写校验场景没有阻止失败草稿直接写入并进入正式交付链路');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('ST 预写校验场景的审批工具不正确');
   }
-  if (completedWrite?.payload?.ok !== true || !completedWrite.payload.result?.data?.preWriteValidation) {
-    throw new Error('write_file 没有对不一致写入内容执行内部预写校验');
+  if (
+    completedWrite?.payload?.ok !== true ||
+    !completedWrite.payload.result?.data?.deliveryCommit
+  ) {
+    throw new Error('修正版没有先获得正式交付授权并生成 deliveryCommit');
   }
   const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
   if (saved !== DEFAULT_SAVE_ST_CODE || !r.output.includes('PumpControl.st')) {
@@ -807,7 +810,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     '| 运行日志 =',
     validationLog ?? '(无)',
   );
-  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,commit_st_delivery,write_file') {
     throw new Error('ST 草稿修正没有按 校验失败 -> 再校验 -> 写入 -> 正式交付提交 顺序执行');
   }
   const diagnosticReport = diagnosticReports[0]?.payload?.report;
@@ -872,7 +875,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   if (approvalRequests.length !== 1 || asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('重复 write_file 没有折叠成单个审批');
   }
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
     throw new Error('重复 write_file 被批准后不应执行多次写入，且应完成正式交付提交');
   }
   const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
@@ -922,7 +925,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   if (approvalRequests.length !== 1 || asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('交付完成后的重复 write_file 不应再次暴露给用户审批');
   }
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
     throw new Error('交付完成后的重复 workflow 工具调用不应再显示或执行');
   }
   const saved = await fs.readFile(path.join(dir, 'PumpControl.st'), 'utf8');
@@ -968,11 +971,11 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     '| 审批 =',
     asked.map((item) => item.name).join(','),
   );
-  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,validate_st_code,commit_st_delivery,write_file') {
     throw new Error('重复 validate_st_code 没有折叠成单个可见成功校验并推进正式交付提交');
   }
-  if (!freshLogs.some((line) => line.includes('下一轮强制工具: write_file'))) {
-    throw new Error('validate_st_code 成功后没有强制推进到 write_file');
+  if (!freshLogs.some((line) => line.includes('下一轮先提交最终候选: commit_st_delivery'))) {
+    throw new Error('validate_st_code 成功后没有强制推进到 commit_st_delivery');
   }
   if (asked.length !== 1 || asked[0].name !== 'write_file') {
     throw new Error('重复校验折叠场景触发了错误的审批工具');
@@ -1013,7 +1016,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3d] 完成验收兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
     throw new Error('完成验收没有按交付契约强制验证、落盘并提交正式交付');
   }
   if (asked.join(',') !== 'write_file') {
@@ -1051,7 +1054,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((event) => event.type === 'tool.started')
     .map((event) => event.payload.toolName);
   console.log('[3e] 普通正文 schema 兜底:工具链 =', toolCalls.join(','), '| 审批 =', asked.join(','));
-  if (toolCalls.join(',') !== 'validate_st_code,write_file,commit_st_delivery') {
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
     throw new Error('普通正文输出没有进入校验、落盘并提交正式交付闭环');
   }
   if (!r.output.includes('PumpControl.st')) {
@@ -1375,7 +1378,9 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   console.log('[5] 审批(允许):asked =', JSON.stringify(asked.map((a) => a.name)), '| 落盘文件 =', files.join(','), '| 输出含确认 =', r.output.includes('导出'));
   if (asked.length !== 1 || asked[0].name !== 'export_st_program' || !asked[0].args.includes('PROGRAM'))
     throw new Error('场景5 审批请求参数不符合预期');
-  if (!files.includes('StarDelta.st')) throw new Error('场景5 批准后未落盘');
+  if (!files.some((name) => name.toLowerCase() === 'stardelta.st')) {
+    throw new Error('场景5 批准后未落盘');
+  }
   const capabilityRequests = diagLines
     .slice(capabilityLogStart)
     .filter((line) => line.includes('[req]'));
@@ -1744,11 +1749,13 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     '| tool.completed =', JSON.stringify(results.map((e) => ({ n: e.payload.toolName, ok: e.payload.ok }))),
     '| 模型调用 =', r.usage.requests,
   );
-  if (!r.output.includes('已导出') || !r.output.includes('StarDelta.st')) {
+  if (!r.output.includes('已导出') || !r.output.toLowerCase().includes('stardelta.st')) {
     throw new Error('场景9 未用工具结果生成兜底输出');
   }
   const okResult = results.find((e) => e.payload.toolName === 'export_st_program' && e.payload.ok);
-  if (!okResult || !okResult.payload.summary.includes('StarDelta.st')) throw new Error('场景9 未透出成功的工具回执');
+  if (!okResult || !okResult.payload.summary.toLowerCase().includes('stardelta.st')) {
+    throw new Error('场景9 未透出成功的工具回执');
+  }
   // 熔断生效:空回复重试被截停在个位数(SDK 原生会一路重试到 maxTurns=10)
   if (r.usage.requests < 2 || r.usage.requests > 6)
     throw new Error(`场景9 熔断未生效或过度截停,模型调用 = ${r.usage.requests}`);
@@ -1762,7 +1769,7 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
   const myLines = diagLines.slice(before);
   const respLine = myLines.find((l) => l.includes('正文=0') && /推理=[1-9]/.test(l));
   console.log('[10] 只思考不说话:模型文本长度 =', r.output.length, '| tool.completed ok =', r.events.some((e) => e.type === 'tool.completed' && e.payload.ok), '| 诊断行:', (respLine ?? myLines.at(-1) ?? '(无)').slice(0, 90));
-  if (!r.output.includes('已导出') || !r.output.includes('StarDelta.st')) {
+  if (!r.output.includes('已导出') || !r.output.toLowerCase().includes('stardelta.st')) {
     throw new Error('场景10 未用工具结果生成兜底输出');
   }
   if (!respLine) throw new Error('场景10 诊断日志未识别出"正文0/推理>0"的响应');

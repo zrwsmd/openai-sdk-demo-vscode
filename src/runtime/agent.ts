@@ -496,10 +496,20 @@ export async function runAgent(
   const artifactDeliveryTool = createArtifactDeliveryTool(
     requiresInlineFinalArtifact,
   );
+  const stDeliveryCommitOnWrite =
+    workflowRuntime?.id === "st_workspace_delivery";
   const toolEvidence: Record<string, readonly DeliveryEvidence[]> = {
     ...registeredToolEvidence,
     ...(artifactDeliveryTool
       ? { deliver_artifact: ["final_artifact"] }
+      : {}),
+    ...(stDeliveryCommitOnWrite
+      ? {
+          write_file: [
+            ...(registeredToolEvidence.write_file ?? []),
+            "delivery_commit",
+          ],
+        }
       : {}),
   };
   const reportDiagnostics: DiagnosticSideReporter = (report) => {
@@ -935,7 +945,7 @@ export async function runAgent(
     const verificationTool = workflowRuntime?.requiredActionTool ?? requiredTool;
     if (!verificationTool) return [];
     const verified: Artifact[] = [];
-    const calls = [...toolResults.values()].filter(
+    const calls = [...historicalToolResults, ...toolResults.values()].filter(
       (call) => call.name === verificationTool,
     );
     for (const call of calls) {

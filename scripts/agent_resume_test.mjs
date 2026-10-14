@@ -61,7 +61,7 @@ const resumed = await runAgent(
 );
 if (resumed.status !== 'completed') throw new Error(`resume returned ${resumed.status}`);
 const exported = await fs.readdir(baseConfig.exportDir);
-if (exported.filter((name) => name === 'StarDelta.st').length !== 1) {
+if (exported.filter((name) => name.toLowerCase() === 'stardelta.st').length !== 1) {
   throw new Error('approved resumed tool did not execute exactly once');
 }
 

@@ -72,13 +72,26 @@ export type StDeliveryCommit = {
   sequence: number;
 };
 
+export type StDeliveryAuthorization = {
+  authorizationId: string;
+  path: string;
+  workspaceRoot?: string;
+  contentHash: string;
+  declarations: StDeclaration[];
+};
+
 export type StValidationState = {
   hashes: Set<string>;
   lastSuccessful?: StValidatedDraft;
+  /**
+   * Legacy/read-only projection of the formally delivered declaration.
+   * Validation candidates do not populate this field.
+   */
   draftIdentity?: StDraftIdentity;
   candidates: StValidationCandidate[];
   nextCandidateSequence: number;
   persistedWrites: StPersistedWrite[];
+  deliveryAuthorization?: StDeliveryAuthorization;
   deliveryCommits: StDeliveryCommit[];
   nextWriteSequence: number;
   nextDeliveryCommitSequence: number;
@@ -413,16 +426,16 @@ export class StValidationRuntimeService {
 
   recordValidationAttempt(content: string): StDraftIdentityCheck {
     const actual = identifyStDraft(content);
-    const expected = this.state.draftIdentity?.declaration;
-    if (!expected) {
-      if (actual) this.state.draftIdentity = actual;
-      return {
-        accepted: !expected || !!actual,
-        ...(actual ? { actualDeclaration: actual.declaration } : {}),
-      };
-    }
-    const check = this.checkDraftIdentity(content);
-    return check;
+    // Validation is candidate discovery. It must not lock the first
+    // declaration because a model may validate several alternatives before it
+    // chooses the actual deliverable.
+    return {
+      accepted: true,
+      ...(this.state.draftIdentity?.declaration
+        ? { expectedDeclaration: this.state.draftIdentity.declaration }
+        : {}),
+      ...(actual ? { actualDeclaration: actual.declaration } : {}),
+    };
   }
 
   recordSuccessfulValidation(content: string, hash: string): boolean {
@@ -496,6 +509,7 @@ export class StValidationRuntimeService {
     content: string;
     contentHash: string;
     source: StPersistedWriteSource;
+    requireDeliveryAuthorization?: boolean;
   }): StPersistedWrite | undefined {
     const contentHash = options.contentHash.trim();
     if (
@@ -503,8 +517,17 @@ export class StValidationRuntimeService {
       !options.path.toLocaleLowerCase().endsWith(".st") ||
       !contentHash ||
       hashStContent(options.content) !== contentHash ||
-      !this.hasValidatedContent(options.content) ||
-      !this.checkDraftIdentity(options.content).accepted
+      !this.hasValidatedContent(options.content)
+    ) {
+      return undefined;
+    }
+    if (
+      options.requireDeliveryAuthorization &&
+      !this.checkDeliveryAuthorization({
+        path: options.path,
+        workspaceRoot: options.workspaceRoot,
+        contentHash,
+      }).accepted
     ) {
       return undefined;
     }
@@ -535,6 +558,89 @@ export class StValidationRuntimeService {
 
   getPersistedWrites(): readonly StPersistedWrite[] {
     return this.state.persistedWrites;
+  }
+
+  getDeliveryAuthorization(): StDeliveryAuthorization | undefined {
+    return this.state.deliveryAuthorization;
+  }
+
+  authorizeDelivery(options: {
+    path: string;
+    workspaceRoot?: string;
+    contentHash: string;
+  }): StDeliveryAuthorization | undefined {
+    const contentHash = options.contentHash.trim();
+    if (
+      !options.path.trim() ||
+      !options.path.toLocaleLowerCase().endsWith(".st") ||
+      !contentHash ||
+      !this.hasValidatedHash(contentHash)
+    ) {
+      return undefined;
+    }
+    const declarations = this.declarationsForHash(contentHash);
+    if (!declarations.length) return undefined;
+    const existing = this.state.deliveryAuthorization;
+    if (
+      existing &&
+      existing.contentHash === contentHash &&
+      sameTarget(
+        existing.path,
+        options.path,
+        existing.workspaceRoot,
+        options.workspaceRoot,
+      )
+    ) {
+      return existing;
+    }
+    const authorization: StDeliveryAuthorization = {
+      authorizationId: `st-delivery-auth-${contentHash.slice(0, 12)}`,
+      path: options.path,
+      ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+      contentHash,
+      declarations,
+    };
+    this.state.deliveryAuthorization = authorization;
+    return authorization;
+  }
+
+  checkDeliveryAuthorization(options: {
+    path: string;
+    workspaceRoot?: string;
+    contentHash: string;
+  }): {
+    accepted: boolean;
+    authorization?: StDeliveryAuthorization;
+  } {
+    const authorization = this.state.deliveryAuthorization;
+    if (!authorization) return { accepted: false };
+    return {
+      accepted:
+        authorization.contentHash === options.contentHash.trim() &&
+        sameTarget(
+          authorization.path,
+          options.path,
+          authorization.workspaceRoot,
+          options.workspaceRoot,
+        ),
+      authorization,
+    };
+  }
+
+  private hasValidatedHash(contentHash: string): boolean {
+    return [...this.state.hashes].some((hash) => hash === contentHash);
+  }
+
+  private declarationsForHash(contentHash: string): StDeclaration[] {
+    const candidate = this.state.candidates
+      .slice()
+      .reverse()
+      .find((item) => item.hash === contentHash && item.status === "passed");
+    if (candidate) return candidate.declarations;
+    if (this.state.lastSuccessful?.hash === contentHash) {
+      return this.state.lastSuccessful.declarations;
+    }
+    return [];
   }
 
   recordDeliveryCommit(options: {
@@ -573,6 +679,13 @@ export class StValidationRuntimeService {
         ),
       );
     if (existing) return existing;
+    const authorization = this.checkDeliveryAuthorization({
+      path: options.path,
+      workspaceRoot: options.workspaceRoot,
+      contentHash,
+    });
+    if (!authorization.accepted || !authorization.authorization) return undefined;
+    const authorized = authorization.authorization;
     const sequence = this.state.nextDeliveryCommitSequence++;
     const commit: StDeliveryCommit = {
       commitId: `st-delivery-${sequence}-${contentHash.slice(0, 12)}`,
@@ -586,6 +699,16 @@ export class StValidationRuntimeService {
       sequence,
     };
     this.state.deliveryCommits.push(commit);
+    this.state.draftIdentity = authorized.declarations[0]
+      ? {
+          declaration: {
+            category: authorized.declarations[0].category,
+            kind: authorized.declarations[0].kind,
+            name: authorized.declarations[0].name,
+          },
+        }
+      : this.state.draftIdentity;
+    this.state.deliveryAuthorization = undefined;
     return commit;
   }
 
@@ -661,7 +784,6 @@ export class StValidationRuntimeService {
         const content = record.name === "export_st_program"
           ? typeof args.code === "string" ? args.code : undefined
           : typeof args.content === "string" ? args.content : undefined;
-        if (content && !this.recordValidationAttempt(content).accepted) continue;
         const hash = typeof data.contentHash === "string"
           ? data.contentHash
           : preWriteValidationHash(data);
@@ -688,6 +810,38 @@ export class StValidationRuntimeService {
               contentHash: validationHash,
               source: record.name,
             });
+            const persistedCommit =
+              data.deliveryCommit &&
+              typeof data.deliveryCommit === "object" &&
+              !Array.isArray(data.deliveryCommit)
+                ? data.deliveryCommit as Record<string, unknown>
+                : undefined;
+            const persistedCommitPath =
+              typeof persistedCommit?.path === "string"
+                ? persistedCommit.path
+                : path;
+            const persistedCommitHash =
+              typeof persistedCommit?.contentHash === "string"
+                ? persistedCommit.contentHash
+                : validationHash;
+            if (persistedCommitPath && persistedCommitHash) {
+              this.authorizeDelivery({
+                path: persistedCommitPath,
+                contentHash: persistedCommitHash,
+                workspaceRoot:
+                  typeof persistedCommit?.workspaceRoot === "string"
+                    ? persistedCommit.workspaceRoot
+                    : undefined,
+              });
+              this.recordDeliveryCommit({
+                path: persistedCommitPath,
+                contentHash: persistedCommitHash,
+                workspaceRoot:
+                  typeof persistedCommit?.workspaceRoot === "string"
+                    ? persistedCommit.workspaceRoot
+                    : undefined,
+              });
+            }
           }
         }
       } else if (record.name === "write_file") {
@@ -711,6 +865,30 @@ export class StValidationRuntimeService {
           commitData && typeof commitData === "object" && !Array.isArray(commitData)
             ? commitData as Record<string, unknown>
             : {};
+        const authorizationData = data.deliveryAuthorization;
+        if (
+          authorizationData &&
+          typeof authorizationData === "object" &&
+          !Array.isArray(authorizationData)
+        ) {
+          const authorization = authorizationData as Record<string, unknown>;
+          const authorizationPath =
+            typeof authorization.path === "string" ? authorization.path : undefined;
+          const authorizationHash =
+            typeof authorization.contentHash === "string"
+              ? authorization.contentHash
+              : undefined;
+          if (authorizationPath && authorizationHash) {
+            this.authorizeDelivery({
+              path: authorizationPath,
+              contentHash: authorizationHash,
+              workspaceRoot:
+                typeof authorization.workspaceRoot === "string"
+                  ? authorization.workspaceRoot
+                  : undefined,
+            });
+          }
+        }
         const args = parseArgs(record.args);
         const path = typeof commit.path === "string"
           ? commit.path
@@ -719,7 +897,16 @@ export class StValidationRuntimeService {
           ? commit.contentHash
           : typeof args.contentHash === "string" ? args.contentHash : undefined;
         if (path && contentHash) {
-          this.recordDeliveryCommit({ path, contentHash });
+          const workspaceRoot =
+            typeof commit.workspaceRoot === "string"
+              ? commit.workspaceRoot
+              : undefined;
+          this.authorizeDelivery({
+            path,
+            contentHash,
+            workspaceRoot,
+          });
+          this.recordDeliveryCommit({ path, contentHash, workspaceRoot });
         }
       }
     }

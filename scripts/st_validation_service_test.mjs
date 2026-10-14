@@ -114,9 +114,9 @@ assert(
 );
 
 const unrelated = 'PROGRAM Probe\nEND_PROGRAM';
-assert.equal(restored.recordValidationAttempt(unrelated).accepted, false);
-assert.equal(restored.recordSuccessfulValidation(unrelated, hashStContent(unrelated)), false);
-assert.equal(restored.hasValidatedContent(unrelated), false);
+assert.equal(restored.recordValidationAttempt(unrelated).accepted, true);
+assert.equal(restored.recordSuccessfulValidation(unrelated, hashStContent(unrelated)), true);
+assert.equal(restored.hasValidatedContent(unrelated), true);
 
 const genericDeclarationCases = [
   {
@@ -165,8 +165,8 @@ for (const item of genericDeclarationCases) {
   );
   assert.equal(
     genericService.recordValidationAttempt(item.other).accepted,
-    false,
-    `${item.label} 不同声明不应冒充当前交付目标`,
+    true,
+    `${item.label} 不同声明也应作为独立候选继续校验`,
   );
 }
 
@@ -187,7 +187,7 @@ assert.deepEqual(
 assert.equal(
   legacyIdentityService.checkDraftIdentity('PROGRAM LegacyProgram\nEND_PROGRAM').accepted,
   true,
-  '升级后的旧 PROGRAM 身份仍应保持原有锁定语义',
+  '旧 PROGRAM 身份仍可作为正式交付后的兼容投影读取',
 );
 
 const deliveryService = new StValidationRuntimeService(createStValidationState());
@@ -238,6 +238,13 @@ const persistedTarget = deliveryService.recordSuccessfulWrite({
   source: 'write_file',
 });
 assert(persistedTarget, '通过校验的正式 ST 写入应进入持久化账本');
+assert(
+  deliveryService.authorizeDelivery({
+    path: 'out/PressureFilterScale.st',
+    contentHash: hashStContent(targetCode),
+  }),
+  '正式写入前应能登记交付授权',
+);
 const deliveryCommit = deliveryService.recordDeliveryCommit({
   path: 'out/PressureFilterScale.st',
   contentHash: hashStContent(targetCode),
@@ -302,6 +309,10 @@ const staleCommitService = new StValidationRuntimeService(createStValidationStat
 const firstDeliveryCode = 'PROGRAM SharedDelivery\nx := 1;\nEND_PROGRAM';
 const firstDeliveryHash = hashStContent(firstDeliveryCode);
 staleCommitService.recordSuccessfulValidation(firstDeliveryCode, firstDeliveryHash);
+staleCommitService.authorizeDelivery({
+  path: 'out/first.st',
+  contentHash: firstDeliveryHash,
+});
 assert(
   staleCommitService.recordSuccessfulWrite({
     path: 'out/first.st',
@@ -314,6 +325,10 @@ assert(
 const secondDeliveryCode = 'PROGRAM SharedDelivery\nx := 2;\nEND_PROGRAM';
 const secondDeliveryHash = hashStContent(secondDeliveryCode);
 staleCommitService.recordSuccessfulValidation(secondDeliveryCode, secondDeliveryHash);
+staleCommitService.authorizeDelivery({
+  path: 'out/second.st',
+  contentHash: secondDeliveryHash,
+});
 assert(
   staleCommitService.recordSuccessfulWrite({
     path: 'out/second.st',

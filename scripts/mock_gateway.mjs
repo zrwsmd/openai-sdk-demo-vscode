@@ -345,6 +345,10 @@ const server = http.createServer((req, res) => {
     const hasCommitTool = (req_body.tools || []).some((item) =>
       item?.function?.name === 'commit_st_delivery' || item?.name === 'commit_st_delivery',
     );
+    const lastValidationPassed =
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      /"errorCount"\s*:\s*0/.test(String(last.content ?? ''));
     const completionGateRepair = serializedMessages.includes('运行时完成验收未通过');
     const unknownToolRecovery = userText.includes('未知工具恢复回归');
     const historicalArgumentRecovery = userText.includes('历史参数恢复回归');
@@ -480,13 +484,23 @@ const server = http.createServer((req, res) => {
       }));
     } else if (
       last.role === 'tool' &&
-      lastAssistantToolCall === 'write_file' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      lastValidationPassed &&
       hasCommitTool &&
       !hasAssistantToolCall('commit_st_delivery')
     ) {
       endWithNamedToolCall(res, model, 'commit_st_delivery', JSON.stringify({
         path: 'PumpControl.st',
         contentHash: ST_CODE_HASH,
+      }));
+    } else if (
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'commit_st_delivery' &&
+      !hasAssistantToolCall('write_file')
+    ) {
+      endWithNamedToolCall(res, model, 'write_file', JSON.stringify({
+        path: 'PumpControl.st',
+        content: ST_CODE,
       }));
     } else if (
       userText.includes('ST草稿修正回归') &&
@@ -574,6 +588,16 @@ const server = http.createServer((req, res) => {
     } else if (userText.includes('预写校验回归') && last.role !== 'tool') {
       endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
         code: BAD_ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('预写校验回归') &&
+      last.role === 'tool' &&
+      lastAssistantToolCall === 'validate_st_code' &&
+      forcedToolChoice === 'validate_st_code'
+    ) {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
         loadWorkspaceContext: false,
       }));
     } else if (

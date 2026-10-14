@@ -15,7 +15,6 @@ import { createStDeliveryCommitTool } from "./tools/commitStDeliveryTool";
 import { createStToolBuildContext } from "./stToolContext";
 import { preparePlcRuntimeConfigSync } from "../../../plc/plcRuntimeConfigSync";
 import {
-  describeStDeclaration,
   type StPersistedWriteSource,
 } from "./stValidationRuntimeService";
 import { isStWorkspaceDeliveryContract } from "./stDeliveryContract";
@@ -114,6 +113,7 @@ const ST_TOOL_CAPABILITIES: readonly ToolCapability[] = [
 function fileBeforeEffect(
   context: ReturnType<typeof createStToolBuildContext>,
   validateStContentBeforeWrite: ReturnType<typeof createValidateStTools>["validateStContentBeforeWrite"],
+  requireDeliveryAuthorization: boolean,
 ): (request: BeforeEffectContext) => Promise<BeforeEffectResult | undefined> {
   return async ({ input, signal, toolName }) => {
     if (!input || typeof input !== "object") return undefined;
@@ -127,9 +127,6 @@ function fileBeforeEffect(
         : toolName === "export_st_program"
           ? "export_st_program"
           : "write_file";
-    const draftIdentityCheck = content === undefined
-      ? undefined
-      : context.validationService?.checkDraftIdentity(content);
     const contentAlreadyValidated = content === undefined
       ? false
       : context.validationService?.canWriteContent(content) ??
@@ -137,35 +134,37 @@ function fileBeforeEffect(
     if (!path.toLowerCase().endsWith(".st") || content === undefined) {
       return undefined;
     }
-    if (draftIdentityCheck && !draftIdentityCheck.accepted) {
-      const expected = describeStDeclaration(draftIdentityCheck.expectedDeclaration);
-      const actual = describeStDeclaration(draftIdentityCheck.actualDeclaration);
-      const message =
-        `当前 ST 写入内容的目标声明=${actual} 与本轮已锁定的目标声明=${expected} 不一致；` +
-        "已阻止写入，请继续修正原始交付草稿。";
-      agentLog(
-        `[st-validation] rejected target=${path} tool=${toolName} ` +
-        `expectedDeclaration=${expected} ` +
-        `actualDeclaration=${actual}`,
-      );
-      return {
-        ok: false,
-        error: message,
-        failureData: {
-          suppliedContentHash: hashStContent(content),
-          draftIdentity: {
-            expectedDeclaration: draftIdentityCheck.expectedDeclaration,
-            actualDeclaration: draftIdentityCheck.actualDeclaration,
+    const contentHash = hashStContent(content);
+    if (requireDeliveryAuthorization) {
+      const authorization = context.validationService?.checkDeliveryAuthorization({
+        path,
+        workspaceRoot,
+        contentHash,
+      });
+      if (!authorization?.accepted) {
+        const message =
+          "当前 ST 内容尚未被选为正式交付候选；请先用 commit_st_delivery 提交最终候选的 path 和 contentHash，" +
+          "校验草稿本身不会产生文件写入。";
+        agentLog(
+          `[st-delivery] rejected target=${path} tool=${toolName} ` +
+          `contentHash=${contentHash.slice(0, 12)} reason=missing_or_mismatched_authorization`,
+        );
+        return {
+          ok: false,
+          error: message,
+          failureData: {
+            suppliedContentHash: contentHash,
+            deliveryAuthorization: authorization?.authorization,
           },
-        },
-        diagnostics: [{
-          code: "st_draft_identity_mismatch",
-          message,
-          severity: "error" as const,
-          path,
-        }],
-        risk: "write",
-      };
+          diagnostics: [{
+            code: "st_delivery_authorization_required",
+            message,
+            severity: "error" as const,
+            path,
+          }],
+          risk: "write",
+        };
+      }
     }
 
     const receiptData: Record<string, unknown> = {};
@@ -213,6 +212,82 @@ function fileBeforeEffect(
       });
     }
 
+    const commitPersistedWrite = () => {
+      if (!context.validationService) return undefined;
+      const persistedWrite = context.validationService.recordSuccessfulWrite({
+        path,
+        workspaceRoot,
+        content,
+        contentHash,
+        source: persistedWriteSource,
+        requireDeliveryAuthorization,
+      });
+      if (!persistedWrite) return undefined;
+      const deliveryCommit = requireDeliveryAuthorization
+        ? context.validationService.recordDeliveryCommit({
+            path,
+            workspaceRoot,
+            contentHash,
+          })
+        : undefined;
+      return { persistedWrite, deliveryCommit };
+    };
+
+    const persistenceReceipt = () => {
+      if (!context.validationService) {
+        return {
+          ok: true as const,
+          receiptData: {},
+        };
+      }
+      const persisted = commitPersistedWrite();
+      if (!persisted) {
+        return {
+          ok: false as const,
+          error: requireDeliveryAuthorization
+            ? "ST 文件已经写入，但正式交付授权未能生成 delivery commit。"
+            : "ST 文件已经写入，但运行时没有记录到有效的 ST 持久化回执。",
+          risk: "write" as const,
+          diagnostics: [{
+            code: "st_delivery_commit_missing",
+            message: requireDeliveryAuthorization
+              ? "ST 文件写入后没有生成正式 delivery commit。"
+              : "ST 文件写入后没有生成持久化回执。",
+            severity: "error" as const,
+            path,
+          }],
+        };
+      }
+      if (requireDeliveryAuthorization && !persisted.deliveryCommit) {
+        return {
+          ok: false as const,
+          error: "ST 文件已经写入，但正式交付 commit 未生成。",
+          risk: "write" as const,
+          diagnostics: [{
+            code: "st_delivery_commit_missing",
+            message: "ST 文件已经写入，但正式交付 commit 未生成。",
+            severity: "error" as const,
+            path,
+          }],
+        };
+      }
+      return {
+        ok: true as const,
+        receiptData: {
+          stPersistence: {
+            status: "persisted",
+            path,
+            workspaceRoot,
+            contentHash,
+            source: persistedWriteSource,
+          },
+          ...(persisted.deliveryCommit
+            ? { deliveryCommit: persisted.deliveryCommit }
+            : {}),
+        },
+      };
+    };
+
     try {
       const syncPlan = await preparePlcRuntimeConfigSync({
         workspaceRoot,
@@ -223,39 +298,11 @@ function fileBeforeEffect(
         clarification: context.cfg.clarification,
         signal,
       });
-      const commitPersistedWrite = () => {
-        if (!context.validationService) return undefined;
-        return context.validationService.recordSuccessfulWrite({
-          path,
-          workspaceRoot,
-          content,
-          contentHash: hashStContent(content),
-          source: persistedWriteSource,
-        });
-      };
       if (!syncPlan) {
         return {
           ok: true,
           receiptData,
-          afterEffect: async () => {
-            const persistedWrite = commitPersistedWrite();
-            return {
-              ok: true,
-              receiptData: {
-                ...(persistedWrite
-                  ? {
-                      stPersistence: {
-                        status: "persisted",
-                        path,
-                        workspaceRoot,
-                        contentHash: hashStContent(content),
-                        source: persistedWriteSource,
-                      },
-                    }
-                  : {}),
-              },
-            };
-          },
+          afterEffect: async () => persistenceReceipt(),
         };
       }
       return {
@@ -276,7 +323,8 @@ function fileBeforeEffect(
         afterEffect: async () => {
           try {
             await syncPlan.commit();
-            const persistedWrite = commitPersistedWrite();
+            const persisted = persistenceReceipt();
+            if (!persisted.ok) return persisted;
             return {
               ok: true,
               receiptData: {
@@ -290,17 +338,7 @@ function fileBeforeEffect(
                   source: syncPlan.source,
                   ...(syncPlan.periodMs === undefined ? {} : { periodMs: syncPlan.periodMs }),
                 },
-                ...(persistedWrite
-                  ? {
-                      stPersistence: {
-                        status: "persisted",
-                        path,
-                        workspaceRoot,
-                        contentHash: hashStContent(content),
-                        source: persistedWriteSource,
-                      },
-                    }
-                  : {}),
+                ...persisted.receiptData,
               },
             };
           } catch (error) {
@@ -319,13 +357,15 @@ function fileBeforeEffect(
         },
       };
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
       return {
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
         risk: "plan",
         diagnostics: [{
           code: "plc_runtime_config_required",
-          message: error instanceof Error ? error.message : String(error),
+          message,
           severity: "error" as const,
           path,
         }],
@@ -356,6 +396,7 @@ export function createStToolProvider(): ToolProvider {
         fileBeforeEffect(
           stContext,
           validationTools.validateStContentBeforeWrite,
+          isWorkspaceDelivery,
         ),
       );
       return [

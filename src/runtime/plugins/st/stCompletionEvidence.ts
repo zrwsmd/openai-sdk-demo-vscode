@@ -155,7 +155,7 @@ const stPersistenceEvidenceExtractor: ToolEvidenceExtractor = {
 
 const stDeliveryCommitEvidenceExtractor: ToolEvidenceExtractor = {
   id: "st.deliveryCommit",
-  toolNames: ["commit_st_delivery"],
+  toolNames: ["commit_st_delivery", "write_file"],
   extract: (record, context) => {
     const { helpers } = context;
     const data = helpers.data(record.result);

@@ -36,12 +36,33 @@ function makeDiagnostic(path: string, code: string, message: string): StDiagnost
   };
 }
 
-/** 内置简易规则:刻意保持与接入真实校验器之前完全一致的两条判断。 */
+/**
+ * 内置简易规则:在真实分析器不可用时只做保守的结构检查。
+ * 这里至少识别 IEC 61131-3 的几类声明块，避免把合法的
+ * FUNCTION/FUNCTION_BLOCK/TYPE 草稿误报成缺少 END_PROGRAM。
+ */
 export function fallbackStDiagnostics(target: StTarget): StDiagnostic[] {
   const diagnostics: StDiagnostic[] = [];
-  if (!/END_PROGRAM/i.test(target.text)) {
+  const blockEndings: ReadonlyArray<readonly [RegExp, RegExp, string]> = [
+    [/\bPROGRAM\b/i, /\bEND_PROGRAM\b/i, "END_PROGRAM"],
+    [/\bFUNCTION_BLOCK\b/i, /\bEND_FUNCTION_BLOCK\b/i, "END_FUNCTION_BLOCK"],
+    [/\bFUNCTION\b/i, /\bEND_FUNCTION\b/i, "END_FUNCTION"],
+    [/\bTYPE\b/i, /\bEND_TYPE\b/i, "END_TYPE"],
+  ];
+  const declaration = blockEndings.find(([start]) => start.test(target.text));
+  if (!declaration) {
+    if (!blockEndings.some(([, end]) => end.test(target.text))) {
+      diagnostics.push(
+        makeDiagnostic(target.path, ST_DIAGNOSTIC_CODES.parseError, "缺少 IEC 61131-3 声明块"),
+      );
+    }
+  } else if (!declaration[1].test(target.text)) {
     diagnostics.push(
-      makeDiagnostic(target.path, ST_DIAGNOSTIC_CODES.parseError, '缺少 END_PROGRAM 结束标记'),
+      makeDiagnostic(
+        target.path,
+        ST_DIAGNOSTIC_CODES.parseError,
+        `缺少 ${declaration[2]} 结束标记`,
+      ),
     );
   }
   // 与接入前的工具实现一致:子串匹配(能覆盖 TON1 / TON_Star 等实例名)

@@ -483,10 +483,10 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     workflow?.id !== 'st_workspace_delivery' ||
     workflow?.stages?.length !== 3 ||
     workflow?.stages?.[0]?.toolName !== 'validate_st_code' ||
-    workflow?.stages?.[1]?.toolName !== 'write_file' ||
-    workflow?.stages?.[2]?.toolName !== 'commit_st_delivery'
+    workflow?.stages?.[1]?.toolName !== 'commit_st_delivery' ||
+    workflow?.stages?.[2]?.toolName !== 'write_file'
   ) {
-    throw new Error('runtime-managed ST delivery fallback did not install the fixed validate/write pipeline and stage descriptor');
+    throw new Error('runtime-managed ST delivery fallback did not install the fixed validate/commit/write pipeline and stage descriptor');
   }
 }
 
