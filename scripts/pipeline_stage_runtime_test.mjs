@@ -1,6 +1,7 @@
 import {
   PipelineStageRuntime,
   ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
+  ST_WORKSPACE_DELIVERY_TURN_BUDGET,
 } from './agent.testbundle.mjs';
 
 {
@@ -102,6 +103,116 @@ import {
   });
   if (firstVisible || !secondSuppressed || !runtime.shouldSuppressCompleted('st-2')) {
     throw new Error('ST pipeline duplicate suppression failed');
+  }
+}
+
+{
+  const baseContext = {
+    currentTurn: 10,
+    currentLimit: 10,
+    softLimit: 10,
+    hardLimit: 20,
+    completed: false,
+    progressToolNames: new Set([
+      'validate_st_code',
+      'commit_st_delivery',
+      'write_file',
+      'matiec_compile',
+    ]),
+  };
+  const stageRecord = (name, result, args = '{}') => ({
+    name,
+    args,
+    result: {
+      diagnostics: [],
+      effect: 'none',
+      risk: 'plan',
+      ...result,
+    },
+  });
+
+  const successfulFutureStage = ST_WORKSPACE_DELIVERY_TURN_BUDGET.evaluateAtSoftLimit({
+    ...baseContext,
+    records: [
+      stageRecord('matiec_compile', {
+        ok: true,
+        data: { exitCode: 0, artifact: 'plc.c' },
+      }),
+    ],
+  });
+  if (successfulFutureStage.action !== 'continue') {
+    throw new Error('ST turn budget should continue after a successful future stage');
+  }
+
+  const changingFailure = ST_WORKSPACE_DELIVERY_TURN_BUDGET.evaluateAtSoftLimit({
+    ...baseContext,
+    records: [
+      stageRecord('validate_st_code', {
+        ok: false,
+        error: 'syntax error near IF',
+        data: { errorCount: 1 },
+        diagnostics: [{
+          code: 'ST_SYNTAX',
+          severity: 'error',
+          message: 'syntax error near IF',
+        }],
+      }),
+      stageRecord('validate_st_code', {
+        ok: false,
+        error: 'missing END_IF',
+        data: { errorCount: 1 },
+        diagnostics: [{
+          code: 'ST_SYNTAX',
+          severity: 'error',
+          message: 'missing END_IF',
+        }],
+      }),
+    ],
+  });
+  if (changingFailure.action !== 'continue') {
+    throw new Error('ST turn budget should continue when diagnostics change');
+  }
+
+  const repeatedFailure = ST_WORKSPACE_DELIVERY_TURN_BUDGET.evaluateAtSoftLimit({
+    ...baseContext,
+    records: [
+      stageRecord('validate_st_code', {
+        ok: false,
+        error: 'missing END_IF',
+        data: { errorCount: 1 },
+        diagnostics: [{
+          code: 'ST_SYNTAX',
+          severity: 'error',
+          message: 'missing END_IF',
+        }],
+      }),
+      stageRecord('validate_st_code', {
+        ok: false,
+        error: 'missing END_IF',
+        data: { errorCount: 1 },
+        diagnostics: [{
+          code: 'ST_SYNTAX',
+          severity: 'error',
+          message: 'missing END_IF',
+        }],
+      }),
+    ],
+  });
+  if (repeatedFailure.action !== 'pause') {
+    throw new Error('ST turn budget should pause after repeated identical failure');
+  }
+
+  const noStageEvidence = ST_WORKSPACE_DELIVERY_TURN_BUDGET.evaluateAtSoftLimit({
+    ...baseContext,
+    records: [
+      stageRecord('st_dependency_map', {
+        ok: true,
+        data: { files: [] },
+      }),
+    ],
+  });
+  if (noStageEvidence.action !== 'pause') {
+    throw new Error('ST turn budget should pause without stage evidence');
   }
 }
 

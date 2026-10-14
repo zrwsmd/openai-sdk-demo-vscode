@@ -43,6 +43,9 @@ import type {
   WorkflowDescriptor,
   WorkflowLocalMatch,
   WorkflowRuntime,
+  WorkflowTurnBudgetContext,
+  WorkflowTurnBudgetDecision,
+  WorkflowTurnBudgetPolicy,
   WorkflowToolRecord,
 } from "../../workflow/types";
 import {
@@ -70,6 +73,93 @@ export const ST_WORKSPACE_DELIVERY_TOOL_NAMES = [
   ...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES,
   ...ST_WORKSPACE_DELIVERY_AUXILIARY_TOOL_NAMES,
 ] as const;
+
+export const ST_WORKSPACE_DELIVERY_TURN_BUDGET: WorkflowTurnBudgetPolicy = {
+  softLimit: 10,
+  hardLimit: 20,
+  evaluateAtSoftLimit: evaluateStTurnBudget,
+};
+
+function stBudgetRecordFingerprint(record: WorkflowToolRecord): string {
+  const data = resultData(record.result);
+  const diagnostics = Array.isArray(record.result.diagnostics)
+    ? record.result.diagnostics.map((diagnostic: unknown) => {
+        const value =
+          diagnostic && typeof diagnostic === "object"
+            ? (diagnostic as Record<string, unknown>)
+            : {};
+        return {
+          code: value.code ?? null,
+          severity: value.severity ?? null,
+          message: value.message ?? null,
+        };
+      })
+    : [];
+  return hashStContent(JSON.stringify({
+    name: record.name,
+    args: hashStContent(record.args),
+    ok: record.result.ok,
+    error: record.result.error ?? "",
+    errorCount: data.errorCount ?? null,
+    warningCount: data.warningCount ?? null,
+    validatedContentHash: data.validatedContentHash ?? null,
+    contentHash: data.contentHash ?? null,
+    dataHash: hashStContent(JSON.stringify(data) ?? ""),
+    hasAuthorization: data.deliveryAuthorization !== undefined,
+    hasCommit: data.deliveryCommit !== undefined,
+    diagnostics,
+  }));
+}
+
+function isSuccessfulStProgressRecord(record: WorkflowToolRecord): boolean {
+  return record.result.ok === true;
+}
+
+function evaluateStTurnBudget(
+  context: WorkflowTurnBudgetContext,
+): WorkflowTurnBudgetDecision {
+  const recentRecords = context.records.slice(-4);
+  const recentProgressRecords = recentRecords.filter((record) =>
+    context.progressToolNames.has(record.name),
+  );
+  const latest = recentProgressRecords.at(-1);
+  if (!latest) {
+    return {
+      action: "pause",
+      reason:
+        `已达到 ${context.softLimit} 次模型往返，但最近没有新的交付阶段工具证据；` +
+        "已暂停并保留当前状态，避免继续消耗额度。",
+    };
+  }
+  if (isSuccessfulStProgressRecord(latest)) {
+    return {
+      action: "continue",
+      reason: `最近的阶段工具 ${latest.name} 已成功，交付仍在有效推进。`,
+    };
+  }
+
+  const previous = recentProgressRecords.at(-2);
+  if (!previous) {
+    return {
+      action: "continue",
+      reason: `最近一次阶段工具 ${latest.name} 首次失败，尚未形成重复撞墙证据。`,
+    };
+  }
+  const latestFingerprint = stBudgetRecordFingerprint(latest);
+  const previousFingerprint = stBudgetRecordFingerprint(previous);
+  if (latestFingerprint !== previousFingerprint) {
+    return {
+      action: "continue",
+      reason: `最近两次阶段工具回执不同，诊断仍在变化，继续给模型一次修复机会。`,
+    };
+  }
+  return {
+    action: "pause",
+    reason:
+      `已达到 ${context.softLimit} 次模型往返，阶段工具 ${latest.name} 连续返回相同失败结果；` +
+      "已暂停并保留当前状态，避免在同一问题上循环。",
+  };
+}
 
 function describeStWorkspaceDelivery(): WorkflowDescription {
   return {
@@ -150,6 +240,7 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
 
   readonly stages = ST_WORKSPACE_DELIVERY_STAGES;
   readonly pipelinePlan = ST_WORKSPACE_DELIVERY_PIPELINE_PLAN;
+  readonly turnBudget = ST_WORKSPACE_DELIVERY_TURN_BUDGET;
 
   readonly businessToolNames = ST_WORKSPACE_DELIVERY_TOOL_NAMES;
   readonly parallelToolCalls = false;

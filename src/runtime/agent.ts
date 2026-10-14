@@ -113,6 +113,7 @@ import {
   getResumableAgentState,
   isAgentCancellationError,
   isRetryableAgentError,
+  WorkflowTurnBudgetExceededError,
 } from "./agentErrors";
 import { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 import {
@@ -166,6 +167,7 @@ export {
   AgentActionVerificationError,
   getResumableAgentState,
   isRetryableAgentError,
+  WorkflowTurnBudgetExceededError,
 } from "./agentErrors";
 export { verifyWorkspaceWrite } from "./workspaceWriteVerification";
 export {
@@ -348,8 +350,9 @@ export function renderFallbackModeInstructions(mode: WorkflowFallbackMode): stri
 /** Protocol usage alias shared by runtime and run store. */
 export type TurnUsage = UsageSummary;
 
-/** 单次用户消息允许的最大模型往返轮数,防止工具死循环烧额度 */
+/** Ordinary requests keep this conservative hard turn limit. */
 export const MAX_TURNS = 10;
+/** Workflow-specific policies may extend a run only up to their own hard limit. */
 const MAX_COMPLETION_GATE_RETRIES = 3;
 
 export async function runAgent(
@@ -410,6 +413,13 @@ export async function runAgent(
     workflowState,
     options.workflowRegistry,
     workflowVisibilityContext,
+  );
+  const workflowTurnBudget = workflowRuntime?.turnBudget;
+  let modelTurnLimit = workflowTurnBudget?.softLimit ?? MAX_TURNS;
+  const workflowProgressToolNames = new Set(
+    (workflowRuntime?.stages ?? [])
+      .map((stage) => stage.toolName)
+      .filter((name): name is string => typeof name === "string" && name.length > 0),
   );
   const isolateHistoricalToolChain =
     !options.initialState && !options.preserveToolHistory;
@@ -1902,6 +1912,12 @@ export async function runAgent(
     usage.requests = state.usage.requests;
     usage.inputTokens = state.usage.inputTokens;
     usage.outputTokens = state.usage.outputTokens;
+    if (
+      workflowTurnBudget &&
+      state._currentTurn >= workflowTurnBudget.softLimit
+    ) {
+      modelTurnLimit = workflowTurnBudget.hardLimit;
+    }
   }
   const historicalToolResults = options.initialState
     ? await loadHistoricalToolResults(session, userText)
@@ -1961,7 +1977,7 @@ export async function runAgent(
 
     const stream = await runner.run(agent, state ?? userText, {
       stream: true,
-      maxTurns: MAX_TURNS,
+      maxTurns: modelTurnLimit,
       session: runnerSession,
       ...(sessionInputCallback ? { sessionInputCallback } : {}),
       signal: options.signal,
@@ -1970,9 +1986,61 @@ export async function runAgent(
     try {
       outcome = await pump(stream);
     } catch (error) {
+      state = stream.state;
+      const currentTurn = Number.isFinite(state._currentTurn)
+        ? state._currentTurn
+        : usage.requests;
+      const maxTurnsError =
+        error instanceof MaxTurnsExceededError ||
+        (error instanceof Error && error.name === "MaxTurnsExceededError");
+      if (maxTurnsError && workflowTurnBudget) {
+        refreshWorkflowCompletion();
+        if (workflowCompleted) {
+          structuredOutput = synthesizeStructuredOutputFromEvidence();
+          if (structuredOutput) {
+            outcome = "done";
+          } else {
+            throw error;
+          }
+        } else if (modelTurnLimit < workflowTurnBudget.hardLimit) {
+          const decision = workflowTurnBudget.evaluateAtSoftLimit({
+            currentTurn,
+            currentLimit: modelTurnLimit,
+            softLimit: workflowTurnBudget.softLimit,
+            hardLimit: workflowTurnBudget.hardLimit,
+            completed: workflowCompleted,
+            records: workflowToolRecords(),
+            progressToolNames: workflowProgressToolNames,
+          });
+          if (decision.action === "continue") {
+            modelTurnLimit = workflowTurnBudget.hardLimit;
+            agentLog(
+              `[workflow] soft turn limit ${workflowTurnBudget.softLimit} reached; ` +
+              `continue up to ${workflowTurnBudget.hardLimit}: ${decision.reason}`,
+            );
+            continue;
+          }
+          const budgetError = new WorkflowTurnBudgetExceededError(
+            decision.reason,
+          );
+          try {
+            attachResumableAgentState(budgetError, state.toString());
+          } catch {
+            // The coordinator will fall back to a safe restart if serialization
+            // is unavailable.
+          }
+          throw budgetError;
+        } else {
+          throw new WorkflowTurnBudgetExceededError(
+            `已达到该工作流的硬上限 ${workflowTurnBudget.hardLimit} 次模型往返，` +
+            "本轮已停止，避免无限消耗；请拆分需求或重新开始。",
+            false,
+          );
+        }
+      }
       let serializedState: string | undefined;
       try {
-        serializedState = stream.state.toString();
+        serializedState = state.toString();
       } catch {
         // Fall back to a boundary restart when this provider state cannot be
         // serialized after an error.

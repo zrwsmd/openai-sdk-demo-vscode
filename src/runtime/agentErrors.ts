@@ -10,6 +10,16 @@ export class AgentActionVerificationError extends Error {
   }
 }
 
+export class WorkflowTurnBudgetExceededError extends Error {
+  readonly canContinue: boolean;
+
+  constructor(message: string, canContinue = true) {
+    super(message);
+    this.name = "WorkflowTurnBudgetExceededError";
+    this.canContinue = canContinue;
+  }
+}
+
 const AGENT_RUN_STATE_FIELD = "agentRunState";
 
 export function attachResumableAgentState(
@@ -38,6 +48,7 @@ export function getResumableAgentState(error: unknown): string | undefined {
 
 /** Transient provider failures may continue from RunState or a safe boundary. */
 export function isRetryableAgentError(error: unknown): boolean {
+  if (error instanceof WorkflowTurnBudgetExceededError) return error.canContinue;
   if (
     error instanceof MaxTurnsExceededError ||
     error instanceof EmptyGatewayResponseError ||

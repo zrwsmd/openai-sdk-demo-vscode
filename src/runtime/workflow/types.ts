@@ -33,6 +33,36 @@ export type WorkflowToolRecord = {
   order?: number;
 };
 
+export type WorkflowTurnBudgetDecision = {
+  action: "continue" | "pause";
+  reason: string;
+};
+
+export type WorkflowTurnBudgetContext = {
+  currentTurn: number;
+  currentLimit: number;
+  softLimit: number;
+  hardLimit: number;
+  completed: boolean;
+  records: readonly WorkflowToolRecord[];
+  /** Stage tools are progress-bearing; auxiliary tools are not assumed to be. */
+  progressToolNames: ReadonlySet<string>;
+};
+
+/**
+ * A workflow may opt into a soft turn boundary without changing the global
+ * safety limit used by ordinary requests. The runtime asks the workflow what
+ * to do when the soft limit is reached, then enforces hardLimit regardless of
+ * the answer.
+ */
+export type WorkflowTurnBudgetPolicy = {
+  softLimit: number;
+  hardLimit: number;
+  evaluateAtSoftLimit(
+    context: WorkflowTurnBudgetContext,
+  ): WorkflowTurnBudgetDecision;
+};
+
 export type WorkflowStage = {
   order: number;
   id: string;
@@ -108,6 +138,7 @@ export interface WorkflowRuntime extends WorkflowToolPolicy {
   readonly id: string;
   readonly title: string;
   readonly stages?: readonly WorkflowStage[];
+  readonly turnBudget?: WorkflowTurnBudgetPolicy;
   readonly services?: RuntimeServiceContainer;
   readonly completionAdapter?: WorkflowCompletionAdapter;
   readonly evidenceExtractors?: readonly ToolEvidenceExtractor[];

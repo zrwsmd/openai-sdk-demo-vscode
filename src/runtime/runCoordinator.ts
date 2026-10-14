@@ -11,6 +11,7 @@ import {
   MaxTurnsExceededError,
   AgentActionVerificationError,
   MAX_TURNS,
+  WorkflowTurnBudgetExceededError,
   type AgentRunOptions,
   type AgentRunResult,
   type TurnUsage,
@@ -2714,6 +2715,11 @@ export class RunCoordinator {
   }
 
   private formatError(error: unknown): string {
+    if (error instanceof WorkflowTurnBudgetExceededError) {
+      return error.canContinue
+        ? `本轮已暂停：${error.message}`
+        : `本轮已停止：${error.message}`;
+    }
     if (error instanceof MaxTurnsExceededError) {
       return `本轮模型往返超过 ${MAX_TURNS} 次上限，已自动停止。请重试或把需求拆细。`;
     }
