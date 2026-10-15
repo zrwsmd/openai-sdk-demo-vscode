@@ -14,6 +14,8 @@ const stopBtn = document.getElementById('stop');
 const retryBtn = document.getElementById('retry');
 const continueBtn = document.getElementById('continue');
 const gearBtn = document.getElementById('gear');
+const modeChip = document.getElementById('mode-chip');
+const permissionMenuEl = document.getElementById('permission-menu');
 const modelChip = document.getElementById('model-chip');
 const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
@@ -39,6 +41,7 @@ let awaitingRunAck = false;
 let stopRequestedBeforeRunAck = false;
 let activeSessionId = null;
 let showThinking = true;
+let permissionMode = 'ask';
 let knownSessions = [];
 let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
@@ -1903,6 +1906,50 @@ function closeSettings() {
   inputEl.focus();
 }
 
+const permissionModeLabels = {
+  ask: '请求批准',
+  auto: '帮我批准',
+  full_access: '完全访问权限',
+};
+
+function updatePermissionMode(mode) {
+  permissionMode = Object.prototype.hasOwnProperty.call(permissionModeLabels, mode)
+    ? mode
+    : 'ask';
+  modeChip.textContent = `Agent · ${permissionModeLabels[permissionMode]} ▾`;
+  modeChip.setAttribute('aria-expanded', permissionMenuEl.classList.contains('hidden') ? 'false' : 'true');
+  for (const option of permissionMenuEl.querySelectorAll('[data-permission-mode]')) {
+    option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);
+  }
+}
+
+function togglePermissionMenu(open) {
+  const shouldOpen = open === undefined
+    ? permissionMenuEl.classList.contains('hidden')
+    : open;
+  permissionMenuEl.classList.toggle('hidden', !shouldOpen);
+  modeChip.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+}
+
+modeChip.addEventListener('click', (event) => {
+  event.stopPropagation();
+  togglePermissionMenu();
+});
+permissionMenuEl.addEventListener('click', (event) => {
+  const option = event.target.closest('[data-permission-mode]');
+  if (!option) return;
+  const nextMode = option.dataset.permissionMode;
+  if (!nextMode) return;
+  updatePermissionMode(nextMode);
+  togglePermissionMenu(false);
+  vscode.postMessage({ type: 'setPermissionMode', permissionMode: nextMode });
+});
+document.addEventListener('click', (event) => {
+  if (!permissionMenuEl.contains(event.target) && event.target !== modeChip) {
+    togglePermissionMenu(false);
+  }
+});
+
 gearBtn.addEventListener('click', openSettings);
 modelChip.addEventListener('click', openSettings);
 setCancelEl.addEventListener('click', closeSettings);
@@ -2922,6 +2969,7 @@ window.addEventListener('message', (event) => {
       setProviderEl.value = msg.provider || (msg.apiFormat === 'messages' ? 'anthropic' : 'openai');
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
       setPermissionEl.value = msg.permissionMode || 'ask';
+      updatePermissionMode(msg.permissionMode || 'ask');
       syncFormatOptions(setProviderEl.value);
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
@@ -2937,16 +2985,20 @@ window.addEventListener('message', (event) => {
       settingsSavePending = false;
       closeSettings();
       updateModelChip(msg.model);
+      updatePermissionMode(msg.permissionMode || permissionMode);
       addNote(
         'tool-note',
         msg.permissionMode === 'full_access'
           ? '已启用完全访问权限'
           : msg.permissionMode === 'auto'
-            ? '已启用自动批准低风险权限'
+            ? '已启用帮我批准'
             : msg.model
               ? `已保存模型配置:${msg.model}`
               : '已保存模型配置',
       );
+      break;
+    case 'permissionModeSaved':
+      updatePermissionMode(msg.permissionMode || 'ask');
       break;
   }
 });

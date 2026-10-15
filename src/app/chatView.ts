@@ -53,7 +53,8 @@ import {
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'clarificationResponse', runId, requestId, cancelled, selectedOptionId?, customText?}
  *                   {type:'getSettings', apiFormat?, requestId?}
- *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
+ *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat, permissionMode}
+ *                   {type:'setPermissionMode', permissionMode}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
@@ -131,6 +132,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
       } else if (msg.type === 'saveSettings') {
         void this.saveSettings(msg);
+      } else if (msg.type === 'setPermissionMode') {
+        void this.setPermissionMode(msg.permissionMode);
       }
     });
 
@@ -511,6 +514,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async setPermissionMode(value: unknown): Promise<void> {
+    if (!isPermissionMode(value)) {
+      this.post({ type: 'settingsError', message: '未选择有效的工具权限模式' });
+      return;
+    }
+    try {
+      await vscode.workspace
+        .getConfiguration('plcAgent')
+        .update('permissionMode', value, vscode.ConfigurationTarget.Global);
+      this.post({ type: 'permissionModeSaved', permissionMode: value });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `保存工具权限失败: ${message}` });
+    }
+  }
+
   private async send(text: string): Promise<void> {
     await this.ensureRuntime();
     await this.coordinator!.initialize();
@@ -655,8 +674,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </select></label>
       <label>工具权限<select id="set-permission">
         <option value="ask">请求批准</option>
-        <option value="auto">自动批准低风险</option>
-        <option value="full_access">完全访问</option>
+        <option value="auto">帮我批准</option>
+        <option value="full_access">完全访问权限</option>
       </select></label>
       <div class="settings-actions">
         <button id="set-save" class="btn primary">保存</button>
@@ -671,7 +690,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <textarea id="input" rows="1" placeholder="请输入需求…(/指令 @文件 后续支持)"></textarea>
       <div class="composer-bar">
         <div class="left">
-          <span class="chip" id="mode-chip">Agent ▾</span>
+          <div class="permission-menu-wrap">
+            <button class="chip mode-chip" id="mode-chip" type="button" aria-expanded="false">Agent · 请求批准 ▾</button>
+            <div id="permission-menu" class="permission-menu hidden" role="menu">
+              <button type="button" role="menuitem" data-permission-mode="ask">
+                <strong>请求批准</strong>
+                <small>编辑文件、使用互联网等操作前始终询问</small>
+              </button>
+              <button type="button" role="menuitem" data-permission-mode="auto">
+                <strong>帮我批准</strong>
+                <small>仅对检测到的风险操作请求批准</small>
+              </button>
+              <button type="button" role="menuitem" data-permission-mode="full_access">
+                <strong>完全访问权限</strong>
+                <small>不经用户批准访问互联网和电脑上的文件</small>
+              </button>
+            </div>
+          </div>
           <span class="chip model" id="model-chip" title="点击配置模型">未配置</span>
           <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
