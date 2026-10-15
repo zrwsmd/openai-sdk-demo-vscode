@@ -481,9 +481,25 @@ export class RunCoordinator {
     requestId: string,
     response: Omit<ClarificationResponse, 'requestId'>,
   ): Promise<void> {
-    if (!runId || !requestId) return;
+    // 与 approve() 同一原则:早退必须留痕,否则界面停住而日志空白,无法排查。
+    if (!runId || !requestId) {
+      this.writeLog('[clarification] 忽略澄清回复: 缺少 runId 或 requestId');
+      return;
+    }
     const pending = this.pendingClarifications.get(requestId);
-    if (!pending || pending.runId !== runId) return;
+    if (!pending) {
+      this.writeLog(
+        `[run:${runId}] 忽略澄清回复 ${requestId}: 该澄清请求不存在或已结束`,
+      );
+      return;
+    }
+    if (pending.runId !== runId) {
+      this.writeLog(
+        `[run:${runId}] 忽略澄清回复 ${requestId}: 澄清请求属于其它任务` +
+        ` (owner=${pending.runId})`,
+      );
+      return;
+    }
     const resolved: ClarificationResponse = {
       requestId,
       cancelled: response.cancelled === true,
