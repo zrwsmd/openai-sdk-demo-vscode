@@ -2261,10 +2261,11 @@ function showClarificationModal(runId, request) {
   }
 
   const optionInputs = [];
+  const optionLabels = [];
   if (options.length) {
     const group = document.createElement('div');
     group.className = 'clarification-option-list';
-    for (const option of options) {
+    options.forEach((option, index) => {
       const label = document.createElement('label');
       label.className = 'clarification-option';
       const input = document.createElement('input');
@@ -2273,6 +2274,11 @@ function showClarificationModal(runId, request) {
       input.value = option.id;
       input.dataset.value = option.value ?? '';
       optionInputs.push(input);
+      // 序号方块代替原来的圆圈,选中时整行和方块一起高亮。
+      const ordinal = document.createElement('span');
+      ordinal.className = 'clarification-option-index';
+      ordinal.setAttribute('aria-hidden', 'true');
+      ordinal.textContent = String(index + 1);
       const text = document.createElement('span');
       text.className = 'clarification-option-text';
       const main = document.createElement('strong');
@@ -2283,19 +2289,37 @@ function showClarificationModal(runId, request) {
         desc.textContent = option.description;
         text.appendChild(desc);
       }
-      label.append(input, text);
+      label.append(input, ordinal, text);
+      optionLabels.push(label);
       group.appendChild(label);
-    }
+    });
     panel.appendChild(group);
   }
 
   let customInput = null;
   if (request.allowCustom !== false) {
-    customInput = document.createElement('textarea');
+    const customRow = document.createElement('div');
+    customRow.className = 'clarification-custom-row';
+    const customIcon = document.createElement('span');
+    customIcon.className = 'clarification-custom-icon';
+    customIcon.setAttribute('aria-hidden', 'true');
+    customIcon.textContent = '✎';
+    customInput = document.createElement('input');
+    customInput.type = 'text';
     customInput.className = 'clarification-custom';
-    customInput.rows = 3;
-    customInput.placeholder = request.customPlaceholder || '填写自定义答案';
-    panel.appendChild(customInput);
+    customInput.placeholder = request.customPlaceholder || '输入你的答案';
+    customRow.append(customIcon, customInput);
+    panel.appendChild(customRow);
+  }
+
+  // 可跳过的步骤:把"不选会怎样"写出来,免得用户不知道跳过意味着什么。
+  if (request.required === false) {
+    const skipHint = document.createElement('div');
+    skipHint.className = 'clarification-skip-hint';
+    skipHint.textContent = options.length
+      ? `可跳过 · 不选则用第一个:${options[0].label}`
+      : '可跳过';
+    panel.appendChild(skipHint);
   }
 
   const actions = document.createElement('div');
@@ -2305,14 +2329,15 @@ function showClarificationModal(runId, request) {
   cancel.textContent = '取消';
   const confirm = document.createElement('button');
   confirm.className = 'btn primary';
-  confirm.textContent = '确认';
-  const progressText = clarificationProgressLabel(request);
-  if (progressText) {
-    const progress = document.createElement('span');
-    progress.className = 'clarification-progress';
-    progress.textContent = progressText;
-    actions.appendChild(progress);
-  }
+  confirm.textContent = '提交';
+  // 分页指示:参考样式是左右箭头夹着页码。当前是"一步一弹窗",答过的步骤翻不回去,
+  // 所以箭头只是装饰、不是按钮 —— 别改成可点的,那会让人以为能翻页。
+  const stepIndex = Number.isInteger(request.stepIndex) ? request.stepIndex : 0;
+  const stepCount = Number.isInteger(request.stepCount) ? request.stepCount : 1;
+  const pager = document.createElement('span');
+  pager.className = 'clarification-pager';
+  pager.textContent = `‹ ${stepIndex + 1}/${stepCount} ›`;
+  actions.appendChild(pager);
   actions.append(cancel, confirm);
   panel.appendChild(actions);
   overlay.appendChild(panel);
@@ -2346,6 +2371,26 @@ function showClarificationModal(runId, request) {
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay && request.required === false) sendResponse(true);
   });
+
+  // 选中态高亮 + 必填的步骤没作答时"提交"不可点。
+  // 后者不做的话,"必填"只是句提示:什么都不选照样能过,到了工具那边才报错,用户白跑一趟。
+  const enforceAnswer =
+    request.required !== false && (options.length > 0 || request.allowCustom !== false);
+  const syncClarificationState = () => {
+    optionLabels.forEach((label, index) => {
+      label.classList.toggle('selected', optionInputs[index].checked);
+    });
+    if (!enforceAnswer) {
+      confirm.disabled = false;
+      return;
+    }
+    const picked = optionInputs.some((input) => input.checked);
+    const typed = (customInput?.value ?? '').trim().length > 0;
+    confirm.disabled = !picked && !typed;
+  };
+  for (const input of optionInputs) input.addEventListener('change', syncClarificationState);
+  customInput?.addEventListener('input', syncClarificationState);
+  syncClarificationState();
   requestAnimationFrame(() => {
     const first = optionInputs[0] || customInput || confirm;
     first?.focus();

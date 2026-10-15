@@ -1084,6 +1084,7 @@ body { display: flex; flex-direction: column; }
 .clarification-modal-question {
   color: var(--fg);
   font-size: 13px;
+  font-weight: 600;
   line-height: 1.55;
 }
 .clarification-modal-details {
@@ -1101,8 +1102,9 @@ body { display: flex; flex-direction: column; }
   margin-top: 14px;
 }
 .clarification-option {
+  position: relative;
   display: grid;
-  grid-template-columns: 18px 1fr;
+  grid-template-columns: 22px 1fr;
   gap: 10px;
   align-items: start;
   border: 1px solid var(--border);
@@ -1116,7 +1118,36 @@ body { display: flex; flex-direction: column; }
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--box));
 }
-.clarification-option input { margin-top: 2px; }
+/* 圆圈藏起来,由序号方块顶替。保留元素本身:整行仍然可点、键盘也能上下选,
+   聚焦时 .clarification-option:focus-within 会把整行点亮。 */
+.clarification-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.clarification-option-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.clarification-option.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--box));
+}
+.clarification-option.selected .clarification-option-index {
+  background: var(--accent);
+  color: var(--vscode-button-foreground, #fff);
+}
 .clarification-option-text {
   display: flex;
   flex-direction: column;
@@ -1133,23 +1164,33 @@ body { display: flex; flex-direction: column; }
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.clarification-custom {
-  width: 100%;
-  min-height: 76px;
-  resize: vertical;
+/* 自定义答案:单行输入,左侧一个铅笔图标,整条框聚焦时描边高亮。 */
+.clarification-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--box);
+  padding: 0 10px;
+}
+.clarification-custom-row:focus-within { border-color: var(--accent); }
+.clarification-custom-icon {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+.clarification-custom {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
   color: var(--fg);
-  padding: 9px 10px;
+  padding: 9px 0;
   font: inherit;
-  line-height: 1.45;
 }
-.clarification-custom:focus {
-  outline: none;
-  border-color: var(--accent);
-}
+.clarification-custom:focus { outline: none; }
 .clarification-actions {
   display: flex;
   justify-content: flex-end;
@@ -1160,9 +1201,26 @@ body { display: flex; flex-direction: column; }
   margin-right: auto;
   align-self: center;
 }
+/* 分页指示:左右箭头是装饰,不可点 —— 当前一步一弹窗,翻不回去。 */
+.clarification-pager {
+  margin-right: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 1px;
+  user-select: none;
+}
 .clarification-actions .btn {
   min-width: 78px;
   min-height: 30px;
+}
+/* 必填未作答时"确认"置灰,让"必填"真的拦得住。 */
+.clarification-actions .btn:disabled { opacity: 0.5; cursor: default; }
+.clarification-skip-hint {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .send-btn {
