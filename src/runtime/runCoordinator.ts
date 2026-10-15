@@ -516,9 +516,14 @@ export class RunCoordinator {
       ...(typeof response.customText === 'string' ? { customText: response.customText } : {}),
       ...(response.value !== undefined ? { value: response.value } : {}),
     };
+    // 选择题打选项名,填空题打用户输入的原文。少了后半截,日志看起来像"用户没填"。
+    const answer: string[] = [];
+    if (resolved.selectedOptionId) answer.push(`option=${resolved.selectedOptionId}`);
+    const typedText = resolved.customText?.trim();
+    if (typedText) answer.push(`text=${typedText}`);
     this.writeLog(
       `[run:${runId}] 用户${resolved.cancelled ? '取消' : '回复'}澄清 ${requestId}` +
-        (resolved.selectedOptionId ? ` option=${resolved.selectedOptionId}` : ''),
+        (answer.length ? ` ${answer.join(' ')}` : ''),
     );
     pending.complete(resolved);
   }
