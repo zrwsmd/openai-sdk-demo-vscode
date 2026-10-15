@@ -2413,15 +2413,20 @@ function markClarificationCard(requestId, response = {}) {
     status.textContent = cancelled ? '已取消' : '已回复';
     status.classList.add(cancelled ? 'cancelled' : 'resolved');
   }
-  if (!cancelled) {
-    const summary = document.createElement('div');
+  if (cancelled) return;
+  // 这条会被叫两次:用户点提交时本地先标一次(立刻有反馈),
+  // 后端 clarification.resolved 事件回来再标一次(以服务端为准)。
+  // 所以复用已有那一行改写,不能每次新建 —— 否则答案会显示两遍。
+  let summary = card.querySelector('.clarification-answer');
+  if (!summary) {
+    summary = document.createElement('div');
     summary.className = 'clarification-answer';
-    const parts = [];
-    if (response.selectedOptionId) parts.push(`选项：${response.selectedOptionId}`);
-    if (response.customText) parts.push(`补充：${response.customText}`);
-    summary.textContent = parts.length ? parts.join('；') : '已确认当前选项';
     card.appendChild(summary);
   }
+  const parts = [];
+  if (response.selectedOptionId) parts.push(`选项：${response.selectedOptionId}`);
+  if (response.customText) parts.push(`补充：${response.customText}`);
+  summary.textContent = parts.length ? parts.join('；') : '已确认当前选项';
 }
 
 function finishClarificationCards(statusText = '已取消') {
