@@ -5,10 +5,12 @@ import {
   mount,
 } from '@openai/agents/sandbox/local';
 import type {
+  CommandShell,
   CommandRunner,
   CommandRunnerOptions,
   CommandRunnerResult,
 } from './commandRunner';
+import { looksLikePowerShellCommand } from './commandRunner';
 
 const OUTPUT_LIMIT = 20_000;
 
@@ -65,8 +67,12 @@ export class SandboxCommandRunner implements CommandRunner {
       command,
       timeoutMs,
       signal,
+      shell = 'auto',
     } = options;
     if (!cwd) throw new Error('未打开工作区文件夹,无法执行命令');
+    if (shell === 'powershell' || (shell === 'auto' && looksLikePowerShellCommand(command))) {
+      throw new Error('dockerSandbox 使用 Linux shell，不支持 PowerShell；请切换 run_command 执行后端为 local。');
+    }
     signal?.throwIfAborted();
     const manifest = new Manifest({
       root: '/workspace',

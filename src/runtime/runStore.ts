@@ -37,9 +37,11 @@ export type DurableRunStatus =
 export type DurableRunResumeStage = 'workflow' | 'delivery' | 'routing' | 'planning' | 'execution';
 
 export type DurableRunCommandMode = 'local' | 'dockerSandbox';
+export type DurableRunCommandShell = 'auto' | 'native' | 'powershell';
 
 export interface DurableRunCommandConfig {
   mode: DurableRunCommandMode;
+  shell?: DurableRunCommandShell;
   dockerImage?: string;
   networkMode?: 'none';
 }
@@ -359,6 +361,7 @@ function isRunCommandConfig(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
     (value.mode === 'local' || value.mode === 'dockerSandbox') &&
+    (value.shell === undefined || value.shell === 'auto' || value.shell === 'native' || value.shell === 'powershell') &&
     (value.dockerImage === undefined || typeof value.dockerImage === 'string') &&
     (value.networkMode === undefined || value.networkMode === 'none')
   );

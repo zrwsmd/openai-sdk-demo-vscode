@@ -246,6 +246,21 @@
           "default": "local",
           "description": "run_command 的执行后端；local 使用当前工作区本机 shell，dockerSandbox 使用 OpenAI Agents SDK Docker sandbox"
         },
+        "plcAgent.runCommand.shell": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "native",
+            "powershell"
+          ],
+          "enumDescriptions": [
+            "自动识别 PowerShell 命令；普通命令保持宿主默认 shell",
+            "始终使用宿主默认 shell",
+            "始终使用 PowerShell；仅适用于本机 local 执行后端"
+          ],
+          "default": "auto",
+          "description": "run_command 的命令解释器选择；默认自动支持 Windows PowerShell 命令"
+        },
         "plcAgent.runCommand.dockerImage": {
           "type": "string",
           "default": "",

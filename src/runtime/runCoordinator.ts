@@ -74,6 +74,7 @@ import {
   type ToolRegistry,
 } from './toolRegistry';
 import type { CommandRunner } from '../tools/commandRunner';
+import { LocalCommandRunner } from '../tools/localCommandRunner';
 import type {
   ClarificationAnswer,
   ClarificationRequest,
@@ -215,7 +216,10 @@ function shouldSkipPlanPreparation(
 }
 
 function commandRunnerFromConfig(config: DurableRunCommandConfig | undefined): CommandRunner | undefined {
-  if (!config || config.mode === 'local') return undefined;
+  if (!config) return undefined;
+  if (config.mode === 'local') {
+    return new LocalCommandRunner({ defaultShell: config.shell });
+  }
   return new SandboxCommandRunner({
     ...(config.dockerImage?.trim() ? { image: config.dockerImage.trim() } : {}),
     ...(config.networkMode ? { networkMode: config.networkMode } : {}),

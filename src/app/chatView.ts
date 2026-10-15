@@ -275,10 +275,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const allowedCommands = stringListSetting(cfg, 'allowedCommands', true);
     const runCommandModeSetting = cfg.get<'local' | 'dockerSandbox'>('runCommand.mode') ?? 'local';
     const runCommandMode: 'local' | 'dockerSandbox' = runCommandModeSetting === 'dockerSandbox' ? 'dockerSandbox' : 'local';
+    const runCommandShellSetting = cfg.get<'auto' | 'native' | 'powershell'>('runCommand.shell') ?? 'auto';
+    const runCommandShell: 'auto' | 'native' | 'powershell' =
+      runCommandShellSetting === 'native' || runCommandShellSetting === 'powershell'
+        ? runCommandShellSetting
+        : 'auto';
     const runCommandDockerImage = (cfg.get<string>('runCommand.dockerImage') ?? '').trim();
     const runCommandNetworkMode = cfg.get<'default' | 'none'>('runCommand.networkMode') ?? 'default';
     const runCommand: NonNullable<DurableRunConfig['runCommand']> = {
       mode: runCommandMode,
+      shell: runCommandShell,
       ...(runCommandDockerImage ? { dockerImage: runCommandDockerImage } : {}),
       ...(runCommandNetworkMode === 'none' ? { networkMode: 'none' as const } : {}),
     };

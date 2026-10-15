@@ -65,7 +65,7 @@ export class DefaultToolPolicy implements ToolPolicy {
       if (context.allowedCommands?.length && !context.allowedCommands.includes(first)) {
         return { allowed: false, requiresApproval, risk, reason: `命令 ${first} 不在允许列表中。` };
       }
-      if (/\b(shutdown|format|del|rm|rmdir|diskpart)\b/i.test(command)) {
+      if (/(?:\bshutdown(?:\.exe)?(?:\s|$)|\bformat(?:\.exe)?(?:\s|$)|\bdel(?:\.exe)?(?:\s|$)|\brm(?:\s|$)|\brmdir(?:\.exe)?(?:\s|$)|\bdiskpart(?:\.exe)?(?:\s|$)|\bRemove-Item\b|\bClear-Content\b|\bStop-Computer\b|\bRestart-Computer\b|\bFormat-Volume\b)/i.test(command)) {
         return { allowed: false, requiresApproval, risk, reason: '检测到破坏性命令，策略禁止执行。' };
       }
     }

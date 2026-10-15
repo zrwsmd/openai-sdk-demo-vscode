@@ -5,7 +5,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import type { CommandRunnerResult } from './commandRunner';
+import type { CommandRunnerResult, CommandShell } from './commandRunner';
 import { LocalCommandRunner } from './localCommandRunner';
 export { LocalCommandRunner } from './localCommandRunner';
 
@@ -473,6 +473,7 @@ export async function runCommand(
   command: string,
   timeoutMs = 60_000,
   signal?: AbortSignal,
+  shell?: CommandShell,
 ): Promise<CommandRunnerResult> {
   signal?.throwIfAborted();
   return defaultLocalCommandRunner.run({
@@ -480,5 +481,6 @@ export async function runCommand(
     command,
     timeoutMs,
     signal,
+    ...(shell ? { shell } : {}),
   });
 }

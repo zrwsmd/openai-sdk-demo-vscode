@@ -1,9 +1,13 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import type {
+  CommandShell,
   CommandRunner,
   CommandRunnerOptions,
   CommandRunnerResult,
 } from './commandRunner';
+import { looksLikePowerShellCommand } from './commandRunner';
 
 const OUTPUT_LIMIT = 20_000;
 
@@ -13,8 +17,30 @@ function truncateOutput(output: string): string {
     : output;
 }
 
+export interface LocalCommandRunnerOptions {
+  defaultShell?: CommandShell;
+}
+
+function resolvePowerShellExecutable(): string {
+  if (process.platform !== 'win32') return 'pwsh';
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (systemRoot) {
+    const windowsPowerShell = path.join(
+      systemRoot,
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe',
+    );
+    if (existsSync(windowsPowerShell)) return windowsPowerShell;
+  }
+  return 'pwsh.exe';
+}
+
 export class LocalCommandRunner implements CommandRunner {
   readonly id = 'local';
+
+  constructor(private readonly options: LocalCommandRunnerOptions = {}) {}
 
   async run(options: CommandRunnerOptions): Promise<CommandRunnerResult> {
     const {
@@ -27,9 +53,17 @@ export class LocalCommandRunner implements CommandRunner {
     signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const isWindows = process.platform === 'win32';
-      const child = spawn(command, {
+      const requestedShell = options.shell ?? this.options.defaultShell ?? 'auto';
+      const usePowerShell =
+        requestedShell === 'powershell' ||
+        (requestedShell === 'auto' && looksLikePowerShellCommand(command));
+      const executable = usePowerShell ? resolvePowerShellExecutable() : command;
+      const args = usePowerShell
+        ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]
+        : [];
+      const child = spawn(executable, args, {
         cwd,
-        shell: true,
+        shell: usePowerShell ? false : true,
         windowsHide: true,
         detached: !isWindows,
       });

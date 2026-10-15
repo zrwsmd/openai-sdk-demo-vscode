@@ -7,6 +7,7 @@ import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileTe
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-ws-test-'));
 await fs.writeFile(path.join(ws, 'main.st'), 'PROGRAM Demo\n  x := 1;\nEND_PROGRAM\n');
+await fs.writeFile(path.join(ws, 'powershell-fixture.txt'), 'first-line\nsecond-line\n');
 await fs.mkdir(path.join(ws, 'sub'), { recursive: true });
 await fs.writeFile(path.join(ws, 'sub', 'util.txt'), 'Motor_Star := TON_Star.Q;\n');
 await fs.mkdir(path.join(ws, 'node_modules', 'foo'), { recursive: true });
@@ -191,6 +192,26 @@ await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM Sh
   const childSurvived = await fs.access(marker).then(() => true, () => false);
   console.log('[8] run_command: 取消 =', aborted, '| 耗时 =', elapsed, 'ms | 子进程存活 =', childSurvived);
   if (!aborted || elapsed > 3000 || childSurvived) throw new Error('命令取消未终止进程树');
+}
+
+// [9] run_command:Windows 本机支持 PowerShell，并可由 auto 自动识别
+if (process.platform === 'win32') {
+  const command = 'Get-Content -LiteralPath "powershell-fixture.txt" | Select-Object -First 1';
+  const explicit = await runCommand(ws, command, 10_000, undefined, 'powershell');
+  const automatic = await runCommand(ws, command);
+  console.log(
+    '[9] run_command: PowerShell 显式 =', explicit.exitCode,
+    '| 自动 =', automatic.exitCode,
+    '| 输出 =', JSON.stringify(automatic.output.trim()),
+  );
+  if (
+    explicit.exitCode !== 0 ||
+    automatic.exitCode !== 0 ||
+    explicit.output.trim() !== 'first-line' ||
+    automatic.output.trim() !== 'first-line'
+  ) {
+    throw new Error('PowerShell 命令未正确执行或 auto 未识别');
+  }
 }
 
 console.log(`\n工作区工具层 全部通过 ✔ (工作区 ${ws})`);
