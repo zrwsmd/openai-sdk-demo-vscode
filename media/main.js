@@ -858,6 +858,7 @@ function rememberToolRun(name, payload) {
     name,
     args: typeof payload.arguments === 'string' ? payload.arguments : '',
     startedAt: Date.now(),
+    startNote: null,
   };
   const key = toolRunKey(payload);
   if (key) {
@@ -1201,13 +1202,7 @@ function formatToolResult(name, summary, result, run, durationMs) {
   const metaParts = [name, duration].filter(Boolean);
   const meta = metaParts.join(' · ');
   if (isHistoricalArgumentGuardResult(summary, result, parsed)) {
-    return {
-      status: 'skipped',
-      headline: '已跳过本次操作',
-      summary: '当前问题没有明确要求继续使用上一轮资源，本次未执行相关操作。',
-      meta: '系统提示',
-      detail: '',
-    };
+    return { hidden: true };
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     const text = typeof summary === 'string' ? summary.trim() : '';
@@ -1340,6 +1335,7 @@ function formatToolResult(name, summary, result, run, durationMs) {
 
 function addToolResult(name, ok, summary, result, run, durationMs) {
   const formatted = formatToolResult(name, summary, result, run, durationMs);
+  if (formatted.hidden) return null;
   const status = formatted.status || (ok ? 'success' : 'failure');
   const note = document.createElement('div');
   note.className = `tool-result ${status}`;
@@ -2371,9 +2367,9 @@ function handleProtocolEvent(event) {
         detachAgentBubbleFromTimeline();
       }
       closeThinkingAtBoundary(event.runId || currentRunId);
-      rememberToolRun(name, payload);
+      const run = rememberToolRun(name, payload);
       updateWorkflowStage(event.runId, name, 'running');
-      addNote('tool-note', startToolHeadline(name, payload.arguments));
+      run.startNote = addNote('tool-note', startToolHeadline(name, payload.arguments));
       hadToolThisTurn = true;
       pendingToolCount += 1;
       break;
@@ -2389,6 +2385,14 @@ function handleProtocolEvent(event) {
       const durationMs = typeof payload.durationMs === 'number'
         ? payload.durationMs
         : measuredDuration;
+      if (isHistoricalArgumentGuardResult(summary, payload.result, payload.result)) {
+        if (run?.startNote?.isConnected) run.startNote.remove();
+        updateWorkflowStage(event.runId, name, 'completed');
+        pendingToolCount = Math.max(0, pendingToolCount - 1);
+        flushPendingAgentText();
+        closeThinkingAtBoundary(event.runId || currentRunId);
+        break;
+      }
       addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
