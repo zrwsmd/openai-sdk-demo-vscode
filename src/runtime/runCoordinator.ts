@@ -977,13 +977,47 @@ export class RunCoordinator {
   }
 
   async approve(runId: string, approvalId: string, approved: boolean, apiKey: string): Promise<void> {
-    if (this.busy || this.transitioning || this.clearing || !runId || !approvalId) return;
+    // 以下每一条早退都必须留痕:静默丢弃会让界面停在"执行中"而日志空白,无法排查。
+    const decision = approved ? '允许' : '拒绝';
+    if (!runId || !approvalId) {
+      this.writeLog(`[approval] 忽略${decision}: 缺少 runId 或 approvalId`);
+      return;
+    }
+    if (this.busy || this.transitioning || this.clearing) {
+      this.writeLog(
+        `[run:${runId}] 忽略审批${decision} ${approvalId}: 运行时忙` +
+        ` (busy=${this.busy} transitioning=${this.transitioning} clearing=${this.clearing})`,
+      );
+      return;
+    }
     const generation = this.beginTransition();
     try {
-      if (this.isClearing(generation)) return;
+      if (this.isClearing(generation)) {
+        this.writeLog(`[run:${runId}] 忽略审批${decision} ${approvalId}: 运行已被清空`);
+        return;
+      }
       const run = await this.store.getActive();
-      if (!run || run.id !== runId || run.status !== 'awaiting_approval') return;
-      if (!run.approvals.some((approval) => approval.id === approvalId)) return;
+      if (!run || run.id !== runId) {
+        this.writeLog(
+          `[run:${runId}] 忽略审批${decision} ${approvalId}: 当前活动任务不匹配` +
+          ` (active=${run?.id ?? '无'})`,
+        );
+        return;
+      }
+      if (run.status !== 'awaiting_approval') {
+        this.writeLog(
+          `[run:${runId}] 忽略审批${decision} ${approvalId}: 任务状态不是等待审批` +
+          ` (status=${run.status})`,
+        );
+        return;
+      }
+      if (!run.approvals.some((approval) => approval.id === approvalId)) {
+        this.writeLog(
+          `[run:${runId}] 忽略审批${decision} ${approvalId}: 审批项已失效` +
+          ` (待批=${run.approvals.map((item) => item.id).join(',') || '无'})`,
+        );
+        return;
+      }
 
       this.writeLog(`[run:${run.id}] 用户${approved ? '允许' : '拒绝'} ${approvalId}`);
       await this.audit('approval_decided', run, { approvalId, approved });
