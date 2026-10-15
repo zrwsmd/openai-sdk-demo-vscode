@@ -41,15 +41,23 @@ import {
   LEGACY_API_KEY_SECRET_KEY,
   LEGACY_SETTINGS_STATE_KEY,
   apiKeySecretKey,
+  apiKeySecretCandidates,
+  createVendorId,
+  deleteStoredVendor,
+  defaultVendorName,
   getStoredApiProfile,
+  listStoredVendors,
+  providerForApiFormat,
   readLegacyApiSettings,
   readStoredApiSettings,
-  saveStoredApiProfile,
+  resolveStoredVendor,
+  saveStoredVendor,
+  vendorApiKeySecretKey,
 } from './settingsProfiles';
 
 /**
  * 侧边栏聊天视图:WebView(界面) ↔ 扩展进程(agent 内核) 通过 postMessage 通信。
- * 配置持久化:每个 provider/API format 独立保存 baseUrl/model，apiKey 存 SecretStorage(OS 级加密)。
+ * 配置持久化:每个 API format 可保存多个命名供应商(baseUrl/model)，apiKey 存 SecretStorage(OS 级加密)。
  * 会话持久化:每个工作区维护多会话索引,每个会话独立保存 SDK Session 与运行状态。
  * 消息协议:
  *   webview → host: {type:'send', text} / {type:'clear'} / {type:'newSession'} / {type:'switchSession', sessionId}
@@ -58,15 +66,16 @@ import {
  *                   {type:'continue'}
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'clarificationResponse', runId, requestId, cancelled, selectedOptionId?, customText?}
- *                   {type:'getSettings', apiFormat?, requestId?}
- *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
+ *                   {type:'getSettings', apiFormat?, vendorId?, requestId?}
+ *                   {type:'saveSettings', vendorId?, name, baseUrl, apiKey, model, apiFormat}
+ *                   {type:'deleteVendor', vendorId}
  *                   {type:'setPermissionMode', permissionMode}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
- *                   {type:'settings', baseUrl, model, apiFormat, hasKey, requestId?}
- *                   {type:'settingsSaved', model, apiFormat} / {type:'settingsError', message}
+ *                   {type:'settings', baseUrl, model, apiFormat, vendorId, vendors, hasKey, requestId?}
+ *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -136,9 +145,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           isAgentProvider(msg.provider) ? msg.provider : undefined,
           isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined,
           Number.isInteger(msg.requestId) ? msg.requestId : undefined,
+          typeof msg.vendorId === 'string' ? msg.vendorId : undefined,
         );
       } else if (msg.type === 'saveSettings') {
         void this.saveSettings(msg);
+      } else if (msg.type === 'deleteVendor') {
+        void this.deleteVendor(msg.vendorId);
       } else if (msg.type === 'setPermissionMode') {
         void this.setPermissionMode(msg.permissionMode);
       }
@@ -271,6 +283,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   async getConfig(
     requestedProvider?: AgentProvider,
     requestedApiFormat?: AgentApiFormat,
+    requestedVendorId?: string,
   ) {
     const cfg = vscode.workspace.getConfiguration('plcAgent');
     const savedProfiles = readStoredApiSettings(
@@ -358,8 +371,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch {
       mcp = emptyMcpSettings();
     }
+    const vendor = resolveStoredVendor(savedProfiles, {
+      vendorId: requestedVendorId,
+      provider: requestedProvider,
+      apiFormat: requestedApiFormat,
+    });
     const configuredProvider = cfg.get<unknown>('provider');
-    const provider = requestedProvider
+    const provider = vendor?.provider
+      ?? requestedProvider
       ?? savedProfiles.activeProvider
       ?? (isAgentProvider(configuredProvider) ? configuredProvider : 'openai');
     const savedProvider = savedProfiles.activeProvider;
@@ -388,10 +407,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       requestedApiFormat ?? configuredApiFormat,
       provider,
     );
-    const storedProfile = getStoredApiProfile(savedProfiles, provider, apiFormat);
+    const storedProfile = vendor
+      ? { baseUrl: vendor.baseUrl, model: vendor.model }
+      : getStoredApiProfile(savedProfiles, provider, apiFormat);
     const hasStoredProviderProfiles = Object.keys(
       savedProfiles.profiles[provider] ?? {},
-    ).length > 0;
+    ).length > 0 || savedProfiles.vendors.length > 0;
     const legacyHasValues = provider === 'openai'
       && (!!legacy.baseUrl || !!legacy.model || !!legacy.apiFormat);
     const legacyFormat = provider === 'openai'
@@ -422,7 +443,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       || (useLegacyProfile ? legacy.model : undefined)
       || defaultModel;
     const formatKey = apiKeySecretKey(provider, apiFormat);
-    const formatKeyValue = await this.context.secrets.get(formatKey);
+    let formatKeyValue: string | undefined;
+    if (vendor) {
+      for (const key of apiKeySecretCandidates(vendor)) {
+        formatKeyValue = await this.context.secrets.get(key);
+        if (formatKeyValue) break;
+      }
+    } else {
+      formatKeyValue = await this.context.secrets.get(formatKey);
+    }
     const legacyKeyValue = await this.context.secrets.get(LEGACY_API_KEY_SECRET_KEY);
     const legacyKeyApplies = provider === 'openai'
       && (!hasStoredProviderProfiles
@@ -445,6 +474,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       model,
       provider,
       apiFormat,
+      vendorId: vendor?.id,
+      vendorName: vendor?.name,
+      vendors: listStoredVendors(savedProfiles).map((item) => ({
+        id: item.id,
+        name: item.name,
+        provider: item.provider,
+        apiFormat: item.apiFormat,
+        model: item.model,
+      })),
       orchestration: cfg.get<'auto' | 'single' | 'team'>('orchestration') ?? 'auto',
       permissionMode,
       policyContext: {
@@ -466,15 +504,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     requestedProvider?: AgentProvider,
     requestedApiFormat?: AgentApiFormat,
     requestId?: number,
+    requestedVendorId?: string,
   ): Promise<void> {
     try {
-      const cfg = await this.getConfig(requestedProvider, requestedApiFormat);
+      const cfg = await this.getConfig(
+        requestedProvider,
+        requestedApiFormat,
+        requestedVendorId,
+      );
       this.post({
         type: 'settings',
         baseUrl: cfg.baseUrl,
         model: cfg.model,
         provider: cfg.provider,
         apiFormat: cfg.apiFormat,
+        vendorId: cfg.vendorId ?? '',
+        vendorName: cfg.vendorName ?? '',
+        vendors: cfg.vendors ?? [],
         hasKey: !!cfg.apiKey,
         showThinking: cfg.showThinking !== false,
         permissionMode: cfg.permissionMode ?? 'ask',
@@ -496,36 +542,99 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     model?: string;
     provider?: AgentProvider;
     apiFormat?: AgentApiFormat;
+    vendorId?: string;
+    name?: string;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
-    const provider = isAgentProvider(msg.provider)
-      ? msg.provider
-      : msg.apiFormat === 'messages'
-        ? 'anthropic'
-        : (await this.getConfig()).provider;
     const apiFormat = isAgentApiFormat(msg.apiFormat) ? msg.apiFormat : undefined;
     if (!apiFormat) {
       this.post({ type: 'settingsError', message: '未选择有效的 API Format' });
       return;
     }
+    const provider = isAgentProvider(msg.provider)
+      ? msg.provider
+      : providerForApiFormat(apiFormat);
     try {
       resolveApiFormat(baseUrl, apiFormat, provider);
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
+      const currentSettings = readStoredApiSettings(current);
+      const requestedId = typeof msg.vendorId === 'string' ? msg.vendorId.trim() : '';
+      const existing = requestedId
+        ? currentSettings.vendors.find((vendor) => vendor.id === requestedId)
+        : undefined;
+      const vendorId = existing?.id ?? createVendorId();
+      const name = (msg.name ?? '').trim()
+        || existing?.name
+        || vendorNameFromBaseUrl(baseUrl)
+        || defaultVendorName(provider, apiFormat);
+      const saved = saveStoredVendor(currentSettings, {
+        id: vendorId,
+        name,
+        provider,
+        apiFormat,
+        baseUrl,
+        model,
+      });
       await this.context.globalState.update(
         API_SETTINGS_STATE_KEY,
-        saveStoredApiProfile(current, provider, apiFormat, { baseUrl, model }),
+        saved,
       );
       if (msg.apiKey?.trim()) {
         await this.context.secrets.store(
-          apiKeySecretKey(provider, apiFormat),
+          vendorApiKeySecretKey(vendorId),
           msg.apiKey.trim(),
         );
       }
-      this.post({ type: 'settingsSaved', model, provider, apiFormat });
+      this.post({
+        type: 'settingsSaved',
+        model,
+        provider,
+        apiFormat,
+        vendorId,
+        vendorName: name,
+        vendors: listStoredVendors(saved).map((item) => ({
+          id: item.id,
+          name: item.name,
+          provider: item.provider,
+          apiFormat: item.apiFormat,
+          model: item.model,
+        })),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
+    }
+  }
+
+  private async deleteVendor(vendorId: unknown): Promise<void> {
+    const id = typeof vendorId === 'string' ? vendorId.trim() : '';
+    if (!id) {
+      this.post({ type: 'settingsError', message: '未选择要删除的供应商' });
+      return;
+    }
+    try {
+      const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
+      const currentSettings = readStoredApiSettings(current);
+      const removed = currentSettings.vendors.find((vendor) => vendor.id === id);
+      if (!removed) {
+        this.post({ type: 'settingsError', message: '供应商不存在' });
+        return;
+      }
+      const saved = deleteStoredVendor(currentSettings, id);
+      await this.context.globalState.update(API_SETTINGS_STATE_KEY, saved);
+      for (const key of apiKeySecretCandidates(removed)) {
+        await this.context.secrets.delete(key);
+      }
+      await this.sendSettingsToWebview(
+        saved.activeProvider,
+        saved.activeApiFormat ?? removed.apiFormat,
+        undefined,
+        saved.activeVendorId,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `删除供应商失败: ${message}` });
     }
   }
 
@@ -719,18 +828,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <section id="settings-page-model" class="settings-page" data-settings-page="model">
             <div class="settings-page-title">模型配置</div>
             <div class="settings-form">
-              <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
-              <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
-              <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
-              <label>Provider<select id="set-provider">
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-              </select></label>
               <label>API Format<select id="set-format">
                 <option value="chat_completions">OpenAI Chat Completions</option>
                 <option value="responses">OpenAI Responses</option>
                 <option value="messages">Anthropic Messages</option>
               </select></label>
+              <div class="settings-vendor-row">
+                <label class="settings-vendor-select">供应商<select id="set-vendor"></select></label>
+                <button id="set-vendor-add" class="btn" type="button">添加</button>
+                <button id="set-vendor-delete" class="btn" type="button">删除</button>
+              </div>
+              <label>名称<input id="set-vendor-name" type="text" placeholder="例如 amd / deepseek" spellcheck="false" /></label>
+              <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
+              <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
+              <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
             </div>
             <div class="settings-actions">
               <button id="set-save" class="btn primary">保存</button>
@@ -798,6 +909,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}" src="${js}"></script>
 </body>
 </html>`;
+  }
+}
+
+function vendorNameFromBaseUrl(baseUrl: string): string | undefined {
+  try {
+    const host = new URL(baseUrl).hostname.trim();
+    return host || undefined;
+  } catch {
+    return undefined;
   }
 }
 

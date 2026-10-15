@@ -1411,6 +1411,22 @@ body.settings-open { overflow: hidden; }
 }
 .settings-form input:focus,
 .settings-form select:focus { border-color: var(--accent); }
+.settings-vendor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+.settings-vendor-select {
+  flex: 1 1 140px;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.settings-vendor-row .btn {
+  flex: 0 0 auto;
+  min-height: 28px;
+}
 .settings-tool-group {
   display: flex;
   align-items: center;

@@ -22,6 +22,12 @@ import {
   getStoredApiProfile,
   readStoredApiSettings,
   saveStoredApiProfile,
+  saveStoredVendor,
+  deleteStoredVendor,
+  listStoredVendors,
+  resolveStoredVendor,
+  vendorApiKeySecretKey,
+  legacyVendorId,
   officialResponsesCompactionSettings,
   usesOfficialOpenAIResponses,
   createModelAdapter,
@@ -406,6 +412,50 @@ assert.deepEqual(getStoredApiProfile(migratedProfiles, 'openai', 'chat_completio
 assert.equal(apiKeySecretKey('openai', 'chat_completions'), 'apiKey.openai.chat_completions');
 assert.equal(apiKeySecretKey('openai', 'responses'), 'apiKey.openai.responses');
 assert.equal(apiKeySecretKey('anthropic', 'messages'), 'apiKey.anthropic.messages');
+assert.equal(
+  vendorApiKeySecretKey('v_amd'),
+  'apiKey.vendor.v_amd',
+);
+assert.equal(
+  legacyVendorId('openai', 'chat_completions'),
+  'openai.chat_completions',
+);
+assert.equal(listStoredVendors(bothProfiles).length, 2);
+assert.equal(listStoredVendors(anthropicProfile, 'messages').length, 1);
+assert.deepEqual(
+  listStoredVendors(migratedProfiles, 'chat_completions').map((vendor) => vendor.id),
+  ['openai.chat_completions'],
+);
+
+const firstChatVendor = saveStoredVendor(undefined, {
+  id: 'v_amd',
+  name: 'amd',
+  provider: 'openai',
+  apiFormat: 'chat_completions',
+  baseUrl: 'https://developer.amd.com.cn/v1',
+  model: 'Qwen3.8-Flash-Next',
+});
+const twoChatVendors = saveStoredVendor(firstChatVendor, {
+  id: 'v_deepseek',
+  name: 'deepseek',
+  provider: 'openai',
+  apiFormat: 'chat_completions',
+  baseUrl: 'https://api.deepseek.com/v1',
+  model: 'deepseek-chat',
+});
+assert.equal(listStoredVendors(twoChatVendors, 'chat_completions').length, 2);
+assert.equal(twoChatVendors.activeVendorId, 'v_deepseek');
+assert.equal(
+  resolveStoredVendor(twoChatVendors, { apiFormat: 'chat_completions' })?.id,
+  'v_deepseek',
+);
+const remainingChatVendor = deleteStoredVendor(twoChatVendors, 'v_deepseek');
+assert.equal(remainingChatVendor.activeVendorId, 'v_amd');
+assert.equal(listStoredVendors(remainingChatVendor, 'chat_completions').length, 1);
+assert.deepEqual(getStoredApiProfile(remainingChatVendor, 'openai', 'chat_completions'), {
+  baseUrl: 'https://developer.amd.com.cn/v1',
+  model: 'Qwen3.8-Flash-Next',
+});
 
 const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-agent-write-'));
 try {

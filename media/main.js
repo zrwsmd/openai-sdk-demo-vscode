@@ -21,8 +21,11 @@ const settingsEl = document.getElementById('settings');
 const setBaseEl = document.getElementById('set-base');
 const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
-const setProviderEl = document.getElementById('set-provider');
 const setFormatEl = document.getElementById('set-format');
+const setVendorEl = document.getElementById('set-vendor');
+const setVendorNameEl = document.getElementById('set-vendor-name');
+const setVendorAddEl = document.getElementById('set-vendor-add');
+const setVendorDeleteEl = document.getElementById('set-vendor-delete');
 const setSaveEl = document.getElementById('set-save');
 const setSaveStatusEl = document.getElementById('set-save-status');
 const settingsCloseEl = document.getElementById('settings-close');
@@ -49,6 +52,9 @@ let showThinking = true;
 let permissionMode = 'ask';
 let knownSessions = [];
 let settingsPage = 'model';
+let currentVendorId = '';
+let knownVendors = [];
+let creatingVendor = false;
 let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
 let selectedSessionId = null;
@@ -1924,12 +1930,17 @@ function openSettings(page) {
   else settingsCloseEl.focus();
 }
 
-function requestSettings(provider, apiFormat) {
+function requestSettings(provider, apiFormat, vendorId) {
   const requestId = ++settingsRequestId;
   const message = { type: 'getSettings', requestId };
   if (provider) message.provider = provider;
   if (apiFormat) message.apiFormat = apiFormat;
+  if (vendorId) message.vendorId = vendorId;
   vscode.postMessage(message);
+}
+
+function providerForFormat(format) {
+  return format === 'messages' ? 'anthropic' : 'openai';
 }
 
 function closeSettings() {
@@ -1998,25 +2009,71 @@ settingsBuiltinToggleEl.addEventListener('click', () => {
   const chevron = settingsBuiltinToggleEl.querySelector('.settings-chevron');
   if (chevron) chevron.textContent = expanded ? '▾' : '▸';
 });
-function syncFormatOptions(provider) {
-  const anthropic = provider === 'anthropic';
-  for (const option of setFormatEl.options) {
-    option.disabled = anthropic
-      ? option.value !== 'messages'
-      : option.value === 'messages';
+function vendorOptionLabel(vendor) {
+  if (vendor.name && vendor.model && vendor.name !== vendor.model) {
+    return `${vendor.name} · ${vendor.model}`;
   }
+  return vendor.name || vendor.model || vendor.id || '未命名供应商';
 }
-setProviderEl.addEventListener('change', () => {
-  if (setProviderEl.value === 'anthropic') {
-    setFormatEl.value = 'messages';
-  } else if (setFormatEl.value === 'messages') {
-    setFormatEl.value = 'chat_completions';
+
+function renderVendorOptions(vendors, apiFormat, selectedId) {
+  const list = (Array.isArray(vendors) ? vendors : []).filter((vendor) =>
+    !apiFormat || vendor.apiFormat === apiFormat
+  );
+  knownVendors = Array.isArray(vendors) ? vendors : [];
+  setVendorEl.replaceChildren();
+  if (creatingVendor || !list.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '新供应商';
+    setVendorEl.appendChild(option);
   }
-  syncFormatOptions(setProviderEl.value);
-  requestSettings(setProviderEl.value, setFormatEl.value);
-});
+  for (const vendor of list) {
+    const option = document.createElement('option');
+    option.value = vendor.id;
+    option.textContent = vendorOptionLabel(vendor);
+    setVendorEl.appendChild(option);
+  }
+  if (creatingVendor || !selectedId || !list.some((vendor) => vendor.id === selectedId)) {
+    setVendorEl.value = creatingVendor || !list.length ? '' : list[0].id;
+  } else {
+    setVendorEl.value = selectedId;
+  }
+  currentVendorId = setVendorEl.value;
+  setVendorDeleteEl.disabled = !currentVendorId;
+}
+
+function startNewVendor() {
+  settingsRequestId += 1;
+  creatingVendor = true;
+  currentVendorId = '';
+  setVendorNameEl.value = '';
+  setBaseEl.value = '';
+  setModelEl.value = '';
+  setKeyEl.value = '';
+  hasSavedKey = false;
+  setKeyEl.placeholder = '必填';
+  renderVendorOptions(knownVendors, setFormatEl.value, '');
+  setVendorNameEl.focus();
+}
+
 setFormatEl.addEventListener('change', () => {
-  requestSettings(setProviderEl.value, setFormatEl.value);
+  creatingVendor = false;
+  requestSettings(providerForFormat(setFormatEl.value), setFormatEl.value);
+});
+setVendorEl.addEventListener('change', () => {
+  const vendorId = setVendorEl.value;
+  if (!vendorId) {
+    startNewVendor();
+    return;
+  }
+  creatingVendor = false;
+  requestSettings(providerForFormat(setFormatEl.value), setFormatEl.value, vendorId);
+});
+setVendorAddEl.addEventListener('click', startNewVendor);
+setVendorDeleteEl.addEventListener('click', () => {
+  if (!currentVendorId) return;
+  vscode.postMessage({ type: 'deleteVendor', vendorId: currentVendorId });
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !settingsEl.classList.contains('hidden')) closeSettings();
@@ -2027,16 +2084,22 @@ setSaveEl.addEventListener('click', () => {
   showSaveStatus('正在保存…');
   vscode.postMessage({
     type: 'saveSettings',
+    vendorId: currentVendorId || undefined,
+    name: setVendorNameEl.value,
     baseUrl: setBaseEl.value,
     apiKey: setKeyEl.value, // 留空 = 不修改已保存的 key
     model: setModelEl.value,
-    provider: setProviderEl.value,
+    provider: providerForFormat(setFormatEl.value),
     apiFormat: setFormatEl.value,
   });
 });
 
-function updateModelChip(model) {
-  modelChip.textContent = model || '未配置';
+function updateModelChip(model, vendorName) {
+  if (vendorName && model) {
+    modelChip.textContent = `${vendorName} · ${model}`;
+    return;
+  }
+  modelChip.textContent = vendorName || model || '未配置';
 }
 
 const builtinProviderLabels = {
@@ -3141,13 +3204,15 @@ window.addEventListener('message', (event) => {
       hasSavedKey = !!msg.hasKey;
       setBaseEl.value = msg.baseUrl || '';
       setModelEl.value = msg.model || '';
-      setProviderEl.value = msg.provider || (msg.apiFormat === 'messages' ? 'anthropic' : 'openai');
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
       updatePermissionMode(msg.permissionMode || 'ask');
-      syncFormatOptions(setProviderEl.value);
+      creatingVendor = false;
+      currentVendorId = msg.vendorId || '';
+      setVendorNameEl.value = msg.vendorName || '';
+      renderVendorOptions(msg.vendors, setFormatEl.value, currentVendorId);
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
-      updateModelChip(msg.model);
+      updateModelChip(msg.model, msg.vendorName);
       setShowThinking(msg.showThinking !== false);
       renderBuiltinTools(msg.builtinTools);
       renderMcpServers(msg.mcpServers, msg.mcpConfigPath);
@@ -3160,11 +3225,26 @@ window.addEventListener('message', (event) => {
     case 'settingsSaved':
       if (!settingsSavePending) break;
       settingsSavePending = false;
-      updateModelChip(msg.model);
-      showSaveStatus(msg.model ? `已保存:${msg.model}` : '已保存', 'ok');
+      creatingVendor = false;
+      currentVendorId = msg.vendorId || currentVendorId;
+      if (msg.vendorName) setVendorNameEl.value = msg.vendorName;
+      renderVendorOptions(
+        msg.vendors || knownVendors,
+        msg.apiFormat || setFormatEl.value,
+        currentVendorId,
+      );
+      updateModelChip(msg.model, msg.vendorName);
+      showSaveStatus(
+        msg.vendorName || msg.model
+          ? `已保存:${msg.vendorName || msg.model}`
+          : '已保存',
+        'ok',
+      );
       addNote(
         'tool-note',
-        msg.model ? `已保存模型配置:${msg.model}` : '已保存模型配置',
+        msg.vendorName || msg.model
+          ? `已保存模型配置:${msg.vendorName || msg.model}`
+          : '已保存模型配置',
       );
       break;
     case 'permissionModeSaved':
