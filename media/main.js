@@ -23,7 +23,6 @@ const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
 const setProviderEl = document.getElementById('set-provider');
 const setFormatEl = document.getElementById('set-format');
-const setPermissionEl = document.getElementById('set-permission');
 const setSaveEl = document.getElementById('set-save');
 const setCancelEl = document.getElementById('set-cancel');
 
@@ -1989,7 +1988,6 @@ setSaveEl.addEventListener('click', () => {
     model: setModelEl.value,
     provider: setProviderEl.value,
     apiFormat: setFormatEl.value,
-    permissionMode: setPermissionEl.value,
   });
 });
 
@@ -3018,7 +3016,6 @@ window.addEventListener('message', (event) => {
       setModelEl.value = msg.model || '';
       setProviderEl.value = msg.provider || (msg.apiFormat === 'messages' ? 'anthropic' : 'openai');
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
-      setPermissionEl.value = msg.permissionMode || 'ask';
       updatePermissionMode(msg.permissionMode || 'ask');
       syncFormatOptions(setProviderEl.value);
       setKeyEl.value = '';
@@ -3035,16 +3032,10 @@ window.addEventListener('message', (event) => {
       settingsSavePending = false;
       closeSettings();
       updateModelChip(msg.model);
-      updatePermissionMode(msg.permissionMode || permissionMode);
+      // 工具权限不在这里改 —— 它只由输入框上方那个芯片负责,保存模型配置不再捎带它。
       addNote(
         'tool-note',
-        msg.permissionMode === 'full_access'
-          ? '已启用完全访问权限'
-          : msg.permissionMode === 'auto'
-            ? '已启用帮我批准'
-            : msg.model
-              ? `已保存模型配置:${msg.model}`
-              : '已保存模型配置',
+        msg.model ? `已保存模型配置:${msg.model}` : '已保存模型配置',
       );
       break;
     case 'permissionModeSaved':

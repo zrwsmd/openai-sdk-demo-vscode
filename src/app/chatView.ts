@@ -53,7 +53,7 @@ import {
  *                   {type:'approvalResponse', runId, approvalId, approve}
  *                   {type:'clarificationResponse', runId, requestId, cancelled, selectedOptionId?, customText?}
  *                   {type:'getSettings', apiFormat?, requestId?}
- *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat, permissionMode}
+ *                   {type:'saveSettings', baseUrl, apiKey, model, apiFormat}
  *                   {type:'setPermissionMode', permissionMode}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
@@ -478,7 +478,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     model?: string;
     provider?: AgentProvider;
     apiFormat?: AgentApiFormat;
-    permissionMode?: PermissionMode;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
@@ -492,16 +491,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'settingsError', message: '未选择有效的 API Format' });
       return;
     }
-    const permissionMode = isPermissionMode(msg.permissionMode)
-      ? msg.permissionMode
-      : undefined;
     try {
       resolveApiFormat(baseUrl, apiFormat, provider);
-      if (permissionMode) {
-        await vscode.workspace
-          .getConfiguration('plcAgent')
-          .update('permissionMode', permissionMode, vscode.ConfigurationTarget.Global);
-      }
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
       await this.context.globalState.update(
         API_SETTINGS_STATE_KEY,
@@ -513,7 +504,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           msg.apiKey.trim(),
         );
       }
-      this.post({ type: 'settingsSaved', model, provider, apiFormat, permissionMode });
+      this.post({ type: 'settingsSaved', model, provider, apiFormat });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
@@ -677,11 +668,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <option value="chat_completions">OpenAI Chat Completions</option>
         <option value="responses">OpenAI Responses</option>
         <option value="messages">Anthropic Messages</option>
-      </select></label>
-      <label>工具权限<select id="set-permission">
-        <option value="ask">请求批准</option>
-        <option value="auto">帮我批准</option>
-        <option value="full_access">完全访问权限</option>
       </select></label>
       <div class="settings-actions">
         <button id="set-save" class="btn primary">保存</button>
