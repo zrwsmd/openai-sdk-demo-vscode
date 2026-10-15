@@ -30,7 +30,12 @@ import {
   type AgentProvider,
 } from '../runtime/modelAdapter';
 import { isPermissionMode, type PermissionMode } from '../runtime/agentConfig';
-import { emptyMcpSettings, loadMcpSettings } from '../runtime/mcp/mcpConfig';
+import {
+  emptyMcpSettings,
+  loadMcpSettings,
+  MCP_CONFIG_RELATIVE_PATH,
+  type McpSettings,
+} from '../runtime/mcp/mcpConfig';
 import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
@@ -62,6 +67,7 @@ import {
  *                   {type:'approval', name, args}(审批卡片) / {type:'history', messages}
  *                   {type:'settings', baseUrl, model, apiFormat, hasKey, requestId?}
  *                   {type:'settingsSaved', model, apiFormat} / {type:'settingsError', message}
+ *                   {type:'permissionModeSaved', permissionMode}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -473,6 +479,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         showThinking: cfg.showThinking !== false,
         permissionMode: cfg.permissionMode ?? 'ask',
         source: cfg.savedInPlugin ? 'plugin' : 'other',
+        builtinTools: this.builtinToolsForSettings(),
+        mcpConfigPath: MCP_CONFIG_RELATIVE_PATH,
+        mcpServers: this.mcpServersForSettings(cfg.mcp),
         ...(requestId === undefined ? {} : { requestId }),
       });
     } catch (error) {
@@ -534,6 +543,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存工具权限失败: ${message}` });
     }
+  }
+
+  private builtinToolsForSettings(): Array<{
+    name: string;
+    description: string;
+    providerId: string;
+    risk?: string;
+  }> {
+    return this.toolRegistry.getToolCatalog().list().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      providerId: tool.providerId,
+      ...(tool.risk ? { risk: tool.risk } : {}),
+    }));
+  }
+
+  private mcpServersForSettings(mcp: McpSettings): Array<{
+    name: string;
+    transport: string;
+    detail: string;
+  }> {
+    return mcp.servers.map((server) => ({
+      name: server.name,
+      transport: server.transport,
+      detail: server.transport === 'http'
+        ? server.url
+        : [server.command, ...(server.args ?? [])].join(' '),
+    }));
   }
 
   private async send(text: string): Promise<void> {
@@ -664,26 +701,80 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="messages" aria-live="polite"></div>
 
   <!-- 设置面板(齿轮打开) -->
-  <div id="settings" class="settings hidden">
-    <div class="settings-card">
-      <div class="settings-title">模型配置 <span class="settings-sub">OpenAI API · 保存后全局生效</span></div>
-      <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
-      <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
-      <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
-      <label>Provider<select id="set-provider">
-        <option value="openai">OpenAI</option>
-        <option value="anthropic">Anthropic</option>
-      </select></label>
-      <label>API Format<select id="set-format">
-        <option value="chat_completions">OpenAI Chat Completions</option>
-        <option value="responses">OpenAI Responses</option>
-        <option value="messages">Anthropic Messages</option>
-      </select></label>
-      <div class="settings-actions">
-        <button id="set-save" class="btn primary">保存</button>
-        <button id="set-cancel" class="btn">取消</button>
+  <div id="settings" class="settings hidden" aria-hidden="true">
+    <div class="settings-shell">
+      <header class="settings-head">
+        <div class="settings-head-title">设置</div>
+        <span id="set-save-status" class="settings-save-status"></span>
+        <button id="settings-close" class="settings-close" type="button" title="关闭">×</button>
+      </header>
+      <div class="settings-body">
+        <nav class="settings-nav" aria-label="设置分类">
+          <div class="settings-nav-group">基础</div>
+          <button type="button" class="settings-nav-item active" data-settings-page="model">模型配置</button>
+          <button type="button" class="settings-nav-item" data-settings-page="system">系统配置</button>
+          <div class="settings-nav-group">扩展</div>
+          <button type="button" class="settings-nav-item" data-settings-page="tools">Tools &amp; MCP</button>
+        </nav>
+        <div class="settings-content">
+          <section id="settings-page-model" class="settings-page" data-settings-page="model">
+            <div class="settings-page-title">模型配置</div>
+            <div class="settings-form">
+              <label>Base URL<input id="set-base" type="text" placeholder="https://你的网关/v1" spellcheck="false" /></label>
+              <label>API Key<input id="set-key" type="password" placeholder="未设置" spellcheck="false" /></label>
+              <label>Model<input id="set-model" type="text" placeholder="gpt-4o-mini" spellcheck="false" /></label>
+              <label>Provider<select id="set-provider">
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+              </select></label>
+              <label>API Format<select id="set-format">
+                <option value="chat_completions">OpenAI Chat Completions</option>
+                <option value="responses">OpenAI Responses</option>
+                <option value="messages">Anthropic Messages</option>
+              </select></label>
+            </div>
+            <div class="settings-actions">
+              <button id="set-save" class="btn primary">保存</button>
+            </div>
+            <div class="settings-tip">Key 保存在系统安全存储(不会进 git / 同步)。配置一次,重开 VSCode 和 F5 调试窗口都生效。</div>
+          </section>
+          <section id="settings-page-system" class="settings-page hidden" data-settings-page="system">
+            <div class="settings-page-title">系统配置</div>
+            <div class="settings-section-title">工具权限</div>
+            <div id="settings-permission" class="settings-choice-list">
+              <button type="button" data-permission-mode="ask">
+                <strong>请求批准</strong>
+                <small>编辑文件、使用互联网等操作前始终询问</small>
+              </button>
+              <button type="button" data-permission-mode="auto">
+                <strong>帮我批准</strong>
+                <small>仅对检测到的风险操作请求批准</small>
+              </button>
+              <button type="button" data-permission-mode="full_access">
+                <strong>完全访问权限</strong>
+                <small>不经用户批准访问互联网和电脑上的文件</small>
+              </button>
+            </div>
+          </section>
+          <section id="settings-page-tools" class="settings-page hidden" data-settings-page="tools">
+            <div class="settings-page-title">Tools &amp; MCP</div>
+            <div class="settings-section-title">系统工具</div>
+            <button type="button" id="settings-builtin-toggle" class="settings-tool-group" aria-expanded="true">
+              <span class="settings-tool-group-main">
+                <span class="settings-chevron">▾</span>
+                <span>内置工具</span>
+                <span class="settings-badge">只读</span>
+                <span id="settings-builtin-count" class="settings-count"></span>
+              </span>
+              <span class="settings-status-dot" title="已启用"></span>
+            </button>
+            <div id="settings-builtin-tools" class="settings-tool-list"></div>
+            <div class="settings-section-title">项目级 MCP <span id="settings-mcp-path" class="settings-sub"></span></div>
+            <div id="settings-mcp-list" class="settings-empty">暂无 MCP 服务</div>
+            <div class="settings-tip">配置文件：工作区 .plc-agent/mcp.json</div>
+          </section>
+        </div>
       </div>
-      <div class="settings-tip">Key 保存在系统安全存储(不会进 git / 同步)。配置一次,重开 VSCode 和 F5 调试窗口都生效。</div>
     </div>
   </div>
 
@@ -713,7 +804,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <span class="chip action" id="newchat" title="创建新会话,保留历史会话">＋ 新会话</span>
         </div>
         <div class="right">
-          <button id="gear" class="gear-btn" title="模型设置">⚙</button>
+          <button id="gear" class="gear-btn" title="设置">⚙</button>
           <button id="retry" class="tool-btn" title="重试上一轮" disabled>↻</button>
           <button id="continue" class="tool-btn" title="继续上次任务" disabled>↪</button>
           <button id="stop" class="tool-btn danger hidden" title="停止本轮">■</button>

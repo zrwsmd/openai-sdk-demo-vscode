@@ -24,7 +24,14 @@ const setModelEl = document.getElementById('set-model');
 const setProviderEl = document.getElementById('set-provider');
 const setFormatEl = document.getElementById('set-format');
 const setSaveEl = document.getElementById('set-save');
-const setCancelEl = document.getElementById('set-cancel');
+const setSaveStatusEl = document.getElementById('set-save-status');
+const settingsCloseEl = document.getElementById('settings-close');
+const settingsPermissionEl = document.getElementById('settings-permission');
+const settingsBuiltinToggleEl = document.getElementById('settings-builtin-toggle');
+const settingsBuiltinToolsEl = document.getElementById('settings-builtin-tools');
+const settingsBuiltinCountEl = document.getElementById('settings-builtin-count');
+const settingsMcpPathEl = document.getElementById('settings-mcp-path');
+const settingsMcpListEl = document.getElementById('settings-mcp-list');
 
 let hasSavedKey = false;
 let runtimeMode = 'idle';
@@ -42,6 +49,7 @@ let activeSessionId = null;
 let showThinking = true;
 let permissionMode = 'ask';
 let knownSessions = [];
+let settingsPage = 'model';
 let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
 let selectedSessionId = null;
@@ -1884,11 +1892,37 @@ function autoGrow() {
 
 // ---------- 设置面板 ----------
 
-function openSettings() {
+function showSaveStatus(text, kind) {
+  setSaveStatusEl.textContent = text || '';
+  setSaveStatusEl.classList.toggle('error', kind === 'error');
+  setSaveStatusEl.classList.toggle('ok', kind === 'ok');
+}
+
+function showSettingsPage(page) {
+  const nextPage = page === 'system' || page === 'tools' ? page : 'model';
+  settingsPage = nextPage;
+  for (const item of settingsEl.querySelectorAll('[data-settings-page]')) {
+    const match = item.dataset.settingsPage === nextPage;
+    if (item.classList.contains('settings-nav-item')) {
+      item.classList.toggle('active', match);
+    }
+    if (item.classList.contains('settings-page')) {
+      item.classList.toggle('hidden', !match);
+    }
+  }
+}
+
+function openSettings(page) {
+  if (page) showSettingsPage(page);
+  else showSettingsPage(settingsPage);
   settingsEl.classList.remove('hidden');
+  settingsEl.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('settings-open');
   settingsSavePending = false;
+  showSaveStatus('');
   requestSettings();
-  setBaseEl.focus();
+  if (settingsPage === 'model') setBaseEl.focus();
+  else settingsCloseEl.focus();
 }
 
 function requestSettings(provider, apiFormat) {
@@ -1901,7 +1935,10 @@ function requestSettings(provider, apiFormat) {
 
 function closeSettings() {
   settingsSavePending = false;
+  showSaveStatus('');
   settingsEl.classList.add('hidden');
+  settingsEl.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('settings-open');
   inputEl.focus();
 }
 
@@ -1917,8 +1954,10 @@ function updatePermissionMode(mode) {
     : 'ask';
   modeChip.textContent = `Agent · ${permissionModeLabels[permissionMode]} ▾`;
   modeChip.setAttribute('aria-expanded', permissionMenuEl.classList.contains('hidden') ? 'false' : 'true');
-  for (const option of permissionMenuEl.querySelectorAll('[data-permission-mode]')) {
-    option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);
+  for (const root of [permissionMenuEl, settingsPermissionEl]) {
+    for (const option of root.querySelectorAll('[data-permission-mode]')) {
+      option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);
+    }
   }
 }
 
@@ -1934,14 +1973,17 @@ modeChip.addEventListener('click', (event) => {
   event.stopPropagation();
   togglePermissionMenu();
 });
-permissionMenuEl.addEventListener('click', (event) => {
-  const option = event.target.closest('[data-permission-mode]');
-  if (!option) return;
-  const nextMode = option.dataset.permissionMode;
-  if (!nextMode) return;
+function applyPermissionMode(nextMode, closeMenu) {
+  if (!nextMode || !Object.prototype.hasOwnProperty.call(permissionModeLabels, nextMode)) return;
   updatePermissionMode(nextMode);
-  togglePermissionMenu(false);
+  if (closeMenu) togglePermissionMenu(false);
   vscode.postMessage({ type: 'setPermissionMode', permissionMode: nextMode });
+}
+permissionMenuEl.addEventListener('click', (event) => {
+  applyPermissionMode(event.target.closest('[data-permission-mode]')?.dataset.permissionMode, true);
+});
+settingsPermissionEl.addEventListener('click', (event) => {
+  applyPermissionMode(event.target.closest('[data-permission-mode]')?.dataset.permissionMode, false);
 });
 document.addEventListener('click', (event) => {
   if (!permissionMenuEl.contains(event.target) && event.target !== modeChip) {
@@ -1949,11 +1991,20 @@ document.addEventListener('click', (event) => {
   }
 });
 
-gearBtn.addEventListener('click', openSettings);
-modelChip.addEventListener('click', openSettings);
-setCancelEl.addEventListener('click', closeSettings);
-settingsEl.addEventListener('click', (e) => {
-  if (e.target === settingsEl) closeSettings(); // 点遮罩关闭
+gearBtn.addEventListener('click', () => openSettings());
+modelChip.addEventListener('click', () => openSettings('model'));
+settingsCloseEl.addEventListener('click', closeSettings);
+settingsEl.querySelector('.settings-nav').addEventListener('click', (event) => {
+  const item = event.target.closest('[data-settings-page]');
+  if (!item || !item.classList.contains('settings-nav-item')) return;
+  showSettingsPage(item.dataset.settingsPage);
+});
+settingsBuiltinToggleEl.addEventListener('click', () => {
+  const expanded = settingsBuiltinToggleEl.getAttribute('aria-expanded') !== 'true';
+  settingsBuiltinToggleEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  settingsBuiltinToolsEl.classList.toggle('hidden', !expanded);
+  const chevron = settingsBuiltinToggleEl.querySelector('.settings-chevron');
+  if (chevron) chevron.textContent = expanded ? '▾' : '▸';
 });
 function syncFormatOptions(provider) {
   const anthropic = provider === 'anthropic';
@@ -1981,6 +2032,7 @@ document.addEventListener('keydown', (e) => {
 
 setSaveEl.addEventListener('click', () => {
   settingsSavePending = true;
+  showSaveStatus('正在保存…');
   vscode.postMessage({
     type: 'saveSettings',
     baseUrl: setBaseEl.value,
@@ -1993,6 +2045,89 @@ setSaveEl.addEventListener('click', () => {
 
 function updateModelChip(model) {
   modelChip.textContent = model || '未配置';
+}
+
+const builtinProviderLabels = {
+  core: '核心',
+  st: 'ST',
+  devuni: 'DevUni',
+};
+
+function renderBuiltinTools(tools) {
+  settingsBuiltinToolsEl.replaceChildren();
+  const list = Array.isArray(tools) ? tools : [];
+  settingsBuiltinCountEl.textContent = list.length ? `${list.length}` : '';
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-empty';
+    empty.style.minHeight = '48px';
+    empty.style.border = '0';
+    empty.textContent = '暂无内置工具';
+    settingsBuiltinToolsEl.appendChild(empty);
+    return;
+  }
+  const groups = new Map();
+  for (const tool of list) {
+    const providerId = typeof tool.providerId === 'string' && tool.providerId.trim()
+      ? tool.providerId.trim()
+      : 'core';
+    const items = groups.get(providerId) ?? [];
+    items.push(tool);
+    groups.set(providerId, items);
+  }
+  for (const [providerId, items] of groups) {
+    const heading = document.createElement('div');
+    heading.className = 'settings-tool-provider';
+    heading.textContent = builtinProviderLabels[providerId] || providerId;
+    settingsBuiltinToolsEl.appendChild(heading);
+    for (const tool of items) {
+      const row = document.createElement('div');
+      row.className = 'settings-tool-row';
+      const name = document.createElement('div');
+      name.className = 'settings-tool-name';
+      name.textContent = tool.name || '';
+      if (tool.risk) {
+        const badge = document.createElement('span');
+        badge.className = 'settings-badge';
+        badge.textContent = tool.risk;
+        name.appendChild(badge);
+      }
+      row.appendChild(name);
+      if (tool.description) {
+        const desc = document.createElement('div');
+        desc.className = 'settings-tool-desc';
+        desc.textContent = tool.description;
+        row.appendChild(desc);
+      }
+      settingsBuiltinToolsEl.appendChild(row);
+    }
+  }
+}
+
+function renderMcpServers(servers, configPath) {
+  settingsMcpPathEl.textContent = configPath ? `(${configPath})` : '';
+  const list = Array.isArray(servers) ? servers : [];
+  settingsMcpListEl.replaceChildren();
+  if (!list.length) {
+    settingsMcpListEl.className = 'settings-empty';
+    settingsMcpListEl.textContent = '暂无 MCP 服务';
+    return;
+  }
+  settingsMcpListEl.className = 'settings-mcp-list';
+  for (const server of list) {
+    const row = document.createElement('div');
+    row.className = 'settings-mcp-row';
+    const name = document.createElement('div');
+    name.className = 'settings-mcp-name';
+    name.textContent = server.name || '未命名服务';
+    const detail = document.createElement('div');
+    detail.className = 'settings-mcp-detail';
+    const transport = server.transport ? `${server.transport} · ` : '';
+    detail.textContent = `${transport}${server.detail || ''}`.trim();
+    row.appendChild(name);
+    row.appendChild(detail);
+    settingsMcpListEl.appendChild(row);
+  }
 }
 
 // ---------- 新会话 ----------
@@ -3022,17 +3157,19 @@ window.addEventListener('message', (event) => {
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
       updateModelChip(msg.model);
       setShowThinking(msg.showThinking !== false);
+      renderBuiltinTools(msg.builtinTools);
+      renderMcpServers(msg.mcpServers, msg.mcpConfigPath);
       break;
     case 'settingsError':
       settingsSavePending = false;
+      showSaveStatus(msg.message || '保存失败', 'error');
       addNote('error-note', msg.message || '保存模型配置失败');
       break;
     case 'settingsSaved':
       if (!settingsSavePending) break;
       settingsSavePending = false;
-      closeSettings();
       updateModelChip(msg.model);
-      // 工具权限不在这里改 —— 它只由输入框上方那个芯片负责,保存模型配置不再捎带它。
+      showSaveStatus(msg.model ? `已保存:${msg.model}` : '已保存', 'ok');
       addNote(
         'tool-note',
         msg.model ? `已保存模型配置:${msg.model}` : '已保存模型配置',
@@ -3040,6 +3177,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'permissionModeSaved':
       updatePermissionMode(msg.permissionMode || 'ask');
+      if (!settingsEl.classList.contains('hidden')) {
+        showSaveStatus(`已切换为${permissionModeLabels[permissionMode]}`, 'ok');
+      }
       break;
   }
 });
