@@ -1635,8 +1635,11 @@ export async function runAgent(
       const callId = protocolPayloadString(payload, "callId");
       const toolName = protocolPayloadString(payload, "toolName");
       if (toolName && autoApproves(toolName)) {
+        // 自动批准只藏"要审批"这一条,绝不把 callId 记进 suppressedEffectCallIds:
+        // 那份名单还会吞掉"干完了"(见下面的 tool.completed 分支),而"开始执行"不受它管。
+        // 只吞一头会让前端 pendingToolCount 永远归不了零 —— 界面卡在"正在执行",
+        // 最后的答复被存进 pendingFinalText 再也渲染不出来。工具是照常执行的。
         if (approvalId) suppressedApprovalIds.add(approvalId);
-        if (callId) suppressedEffectCallIds.add(callId);
         return true;
       }
       if (toolName && completedWorkflowToolRejection(toolName)) {
