@@ -9,6 +9,12 @@ import {
   mcpFunctionToolName,
   openMcpSession,
   parseMcpSettings,
+  parseMcpServerInput,
+  readMcpConfigFile,
+  removeMcpServer,
+  serializeMcpDocument,
+  upsertMcpServer,
+  writeMcpConfigFile,
   shouldExposeMcpTools,
   wrapMcpFunctionTool,
 } from './agent.testbundle.mjs';
@@ -132,5 +138,31 @@ const loaded = await loadMcpSettings([ws]);
 assert.equal(loaded.enabled, true);
 assert.equal(loaded.servers[0]?.name, 'files');
 assert.equal(loaded.servers[0]?.args?.[2], ws);
+
+const serialized = serializeMcpDocument(fromClaudeFile);
+assert.equal(serialized.mcpServers.files.command, 'npx');
+assert.equal(serialized.mcpServers.files.args[2], '${workspaceFolder}');
+assert.equal(serialized.mcpServers.remote.url, 'http://127.0.0.1:3333/mcp');
+
+const added = upsertMcpServer(fromClaudeFile, parseMcpServerInput('docs', {
+  command: 'npx',
+  args: ['-y', 'docs'],
+}));
+assert.equal(added.servers.length, 3);
+assert.equal(added.servers[2]?.name, 'docs');
+const renamed = upsertMcpServer(added, parseMcpServerInput('notes', {
+  command: 'npx',
+  args: ['-y', 'docs'],
+}), 'docs');
+assert.equal(renamed.servers.some((server) => server.name === 'docs'), false);
+assert.equal(removeMcpServer(renamed, 'notes').servers.length, 2);
+
+const ws2 = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-write-'));
+const writtenPath = path.join(ws2, '.plc-agent', 'mcp.json');
+await writeMcpConfigFile(writtenPath, added);
+const reread = await readMcpConfigFile([ws2]);
+assert.equal(reread.exists, true);
+assert.equal(reread.settings.servers[2]?.name, 'docs');
+assert.equal(reread.settings.servers[0]?.args?.[2], '${workspaceFolder}');
 
 console.log('mcp client tests passed');

@@ -34,6 +34,12 @@ import {
   emptyMcpSettings,
   loadMcpSettings,
   MCP_CONFIG_RELATIVE_PATH,
+  parseMcpServerInput,
+  readMcpConfigFile,
+  removeMcpServer,
+  upsertMcpServer,
+  writeMcpConfigFile,
+  mcpConfigFilePath,
   type McpSettings,
 } from '../runtime/mcp/mcpConfig';
 import {
@@ -70,6 +76,9 @@ import {
  *                   {type:'saveSettings', vendorId?, name, baseUrl, apiKey, model, apiFormat}
  *                   {type:'deleteVendor', vendorId}
  *                   {type:'setPermissionMode', permissionMode}
+ *                   {type:'saveMcpServer', name, originalName?, transport, command?, args?, url?, cwd?, env?}
+ *                   {type:'deleteMcpServer', name}
+ *                   {type:'openMcpConfig'}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
@@ -153,6 +162,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.deleteVendor(msg.vendorId);
       } else if (msg.type === 'setPermissionMode') {
         void this.setPermissionMode(msg.permissionMode);
+      } else if (msg.type === 'saveMcpServer') {
+        void this.saveMcpServer(msg);
+      } else if (msg.type === 'deleteMcpServer') {
+        void this.deleteMcpServer(msg.name);
+      } else if (msg.type === 'openMcpConfig') {
+        void this.openMcpConfig();
       }
     });
 
@@ -526,8 +541,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         permissionMode: cfg.permissionMode ?? 'ask',
         source: cfg.savedInPlugin ? 'plugin' : 'other',
         builtinTools: this.builtinToolsForSettings(),
-        mcpConfigPath: MCP_CONFIG_RELATIVE_PATH,
-        mcpServers: this.mcpServersForSettings(cfg.mcp),
+        ...(await this.mcpSettingsPayload()),
         ...(requestId === undefined ? {} : { requestId }),
       });
     } catch (error) {
@@ -672,6 +686,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     name: string;
     transport: string;
     detail: string;
+    command?: string;
+    args?: string[];
+    url?: string;
+    cwd?: string;
+    env?: Record<string, string>;
   }> {
     return mcp.servers.map((server) => ({
       name: server.name,
@@ -679,7 +698,139 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       detail: server.transport === 'http'
         ? server.url
         : [server.command, ...(server.args ?? [])].join(' '),
+      ...(server.transport === 'http'
+        ? { url: server.url }
+        : {
+          command: server.command,
+          args: server.args ?? [],
+          ...(server.cwd ? { cwd: server.cwd } : {}),
+          ...(server.env ? { env: server.env } : {}),
+        }),
     }));
+  }
+
+  private workspaceRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+  }
+
+  private async mcpSettingsPayload(): Promise<{
+    mcpConfigPath: string;
+    mcpConfigWritable: boolean;
+    mcpServers: ReturnType<ChatViewProvider['mcpServersForSettings']>;
+    mcpError?: string;
+  }> {
+    try {
+      const file = await readMcpConfigFile(this.workspaceRoots());
+      return {
+        mcpConfigPath: MCP_CONFIG_RELATIVE_PATH,
+        mcpConfigWritable: !!file.filePath,
+        mcpServers: this.mcpServersForSettings(file.settings),
+      };
+    } catch (error) {
+      return {
+        mcpConfigPath: MCP_CONFIG_RELATIVE_PATH,
+        mcpConfigWritable: this.workspaceRoots().length > 0,
+        mcpServers: [],
+        mcpError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async saveMcpServer(msg: {
+    name?: string;
+    originalName?: string;
+    transport?: string;
+    command?: string;
+    args?: unknown;
+    url?: string;
+    cwd?: string;
+    env?: unknown;
+  }): Promise<void> {
+    try {
+      const file = await this.requireMcpConfigFile();
+      const name = (msg.name ?? '').trim();
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+        this.post({ type: 'settingsError', message: 'MCP 服务名只能包含字母、数字、点、下划线和连字符' });
+        return;
+      }
+      const spec = msg.transport === 'http'
+        ? { url: typeof msg.url === 'string' ? msg.url : '' }
+        : {
+          command: typeof msg.command === 'string' ? msg.command : '',
+          args: Array.isArray(msg.args)
+            ? msg.args.filter((item): item is string => typeof item === 'string')
+            : undefined,
+          cwd: typeof msg.cwd === 'string' ? msg.cwd : undefined,
+          env: isStringRecord(msg.env) ? msg.env : undefined,
+        };
+      const server = parseMcpServerInput(name, spec);
+      const saved = upsertMcpServer(
+        file.settings,
+        server,
+        typeof msg.originalName === 'string' ? msg.originalName : undefined,
+      );
+      await writeMcpConfigFile(file.filePath, saved);
+      this.post({ type: 'mcpConfigSaved', name: server.name });
+      await this.sendSettingsToWebview();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `保存 MCP 配置失败: ${message}` });
+    }
+  }
+
+  private async deleteMcpServer(name: unknown): Promise<void> {
+    const serverName = typeof name === 'string' ? name.trim() : '';
+    if (!serverName) {
+      this.post({ type: 'settingsError', message: '未选择要删除的 MCP 服务' });
+      return;
+    }
+    try {
+      const file = await this.requireMcpConfigFile();
+      const saved = removeMcpServer(file.settings, serverName);
+      await writeMcpConfigFile(file.filePath, saved);
+      this.post({ type: 'mcpConfigSaved', name: serverName, deleted: true });
+      await this.sendSettingsToWebview();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `删除 MCP 配置失败: ${message}` });
+    }
+  }
+
+  private async openMcpConfig(): Promise<void> {
+    try {
+      const file = await this.requireMcpConfigFile(false);
+      if (!file.exists) {
+        await writeMcpConfigFile(file.filePath, emptyMcpSettings());
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file.filePath));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `打开 MCP 配置失败: ${message}` });
+    }
+  }
+
+  private async requireMcpConfigFile(mustParse = true): Promise<{
+    filePath: string;
+    exists: boolean;
+    settings: McpSettings;
+  }> {
+    const roots = this.workspaceRoots();
+    if (!roots.length) {
+      throw new Error('需要打开工作区才能配置项目级 MCP');
+    }
+    try {
+      const file = await readMcpConfigFile(roots);
+      if (!file.filePath) throw new Error('需要打开工作区才能配置项目级 MCP');
+      return { filePath: file.filePath, exists: file.exists, settings: file.settings };
+    } catch (error) {
+      if (mustParse) throw error;
+      return {
+        filePath: mcpConfigFilePath(roots[0]!),
+        exists: true,
+        settings: emptyMcpSettings(),
+      };
+    }
   }
 
   private async send(text: string): Promise<void> {
@@ -861,9 +1012,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               <span class="settings-status-dot" title="已启用"></span>
             </button>
             <div id="settings-builtin-tools" class="settings-tool-list"></div>
-            <div class="settings-section-title">项目级 MCP <span id="settings-mcp-path" class="settings-sub"></span></div>
+            <div class="settings-section-head">
+              <div class="settings-section-title">项目级 MCP <span id="settings-mcp-path" class="settings-sub"></span></div>
+              <div class="settings-section-actions">
+                <button id="mcp-add" class="btn" type="button">添加</button>
+                <button id="mcp-open" class="btn" type="button">打开文件</button>
+              </div>
+            </div>
             <div id="settings-mcp-list" class="settings-empty">暂无 MCP 服务</div>
-            <div class="settings-tip">配置文件：工作区 .plc-agent/mcp.json</div>
+            <div id="mcp-form" class="settings-form hidden">
+              <input id="mcp-original-name" type="hidden" />
+              <label>名称<input id="mcp-name" type="text" placeholder="filesystem" spellcheck="false" /></label>
+              <label>类型<select id="mcp-transport">
+                <option value="stdio">Stdio</option>
+                <option value="http">HTTP</option>
+              </select></label>
+              <div id="mcp-stdio-fields">
+                <label>命令<input id="mcp-command" type="text" placeholder="npx" spellcheck="false" /></label>
+                <label>参数<textarea id="mcp-args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;\${workspaceFolder}" spellcheck="false"></textarea></label>
+                <label>工作目录<input id="mcp-cwd" type="text" placeholder="可选，默认工作区" spellcheck="false" /></label>
+                <label>环境变量<textarea id="mcp-env" rows="2" placeholder="可选，一行一个 KEY=value" spellcheck="false"></textarea></label>
+              </div>
+              <div id="mcp-http-fields" class="hidden">
+                <label>URL<input id="mcp-url" type="text" placeholder="http://127.0.0.1:3333/mcp" spellcheck="false" /></label>
+              </div>
+              <div class="settings-actions">
+                <button id="mcp-cancel" class="btn" type="button">取消</button>
+                <button id="mcp-save" class="btn primary" type="button">保存</button>
+              </div>
+            </div>
           </section>
         </div>
       </div>
@@ -919,6 +1096,11 @@ function vendorNameFromBaseUrl(baseUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.values(value).every((item) => typeof item === 'string');
 }
 
 function isContinueRequest(text: string): boolean {

@@ -79,6 +79,101 @@ export async function loadMcpSettings(
   return emptyMcpSettings();
 }
 
+export function mcpConfigFilePath(workspaceRoot: string): string {
+  return joinPath(workspaceRoot.trim(), MCP_CONFIG_RELATIVE_PATH);
+}
+
+export async function readMcpConfigFile(
+  workspaceRoots: readonly string[],
+  readFile: (filePath: string, encoding: 'utf8') => Promise<string> = defaultReadFile,
+): Promise<{
+  workspaceRoot?: string;
+  filePath?: string;
+  exists: boolean;
+  settings: McpSettings;
+}> {
+  const workspaceRoot = workspaceRoots.map((root) => root.trim()).find(Boolean);
+  if (!workspaceRoot) {
+    return { exists: false, settings: emptyMcpSettings() };
+  }
+  const filePath = mcpConfigFilePath(workspaceRoot);
+  try {
+    const raw = await readFile(filePath, 'utf8');
+    return {
+      workspaceRoot,
+      filePath,
+      exists: true,
+      settings: parseMcpDocument(JSON.parse(raw)),
+    };
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return { workspaceRoot, filePath, exists: false, settings: emptyMcpSettings() };
+    }
+    throw new Error(
+      `读取 MCP 配置失败: ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+export function serializeMcpDocument(settings: McpSettings): {
+  mcpServers: Record<string, Record<string, unknown>>;
+} {
+  const mcpServers: Record<string, Record<string, unknown>> = {};
+  for (const server of settings.servers) {
+    mcpServers[server.name] = serializeMcpServer(server);
+  }
+  return { mcpServers };
+}
+
+export async function writeMcpConfigFile(
+  filePath: string,
+  settings: McpSettings,
+  writeFile: (filePath: string, contents: string) => Promise<void> = defaultWriteFile,
+): Promise<void> {
+  const target = filePath.trim();
+  if (!target) throw new Error('MCP 配置路径不能为空');
+  await writeFile(
+    target,
+    `${JSON.stringify(serializeMcpDocument(settings), null, 2)}\n`,
+  );
+}
+
+export function parseMcpServerInput(name: string, spec: unknown): McpServerConfig {
+  if (!name.trim()) throw new Error('MCP 服务名不能为空');
+  const parsed = parseMcpDocument({ mcpServers: { [name.trim()]: spec } });
+  const server = parsed.servers[0];
+  if (!server) throw new Error('MCP 服务配置无效');
+  return server;
+}
+
+export function upsertMcpServer(
+  settings: McpSettings,
+  server: McpServerConfig,
+  originalName?: string,
+): McpSettings {
+  const next = parseMcpServerInput(server.name, server);
+  const previousName = (originalName ?? next.name).trim();
+  const existingIndex = settings.servers.findIndex((item) => item.name === previousName);
+  if (settings.servers.some((item, index) => item.name === next.name && index !== existingIndex)) {
+    throw new Error(`已存在同名 MCP 服务: ${next.name}`);
+  }
+  const servers = [...settings.servers];
+  if (existingIndex >= 0) servers[existingIndex] = next;
+  else servers.push(next);
+  return {
+    enabled: servers.length > 0,
+    servers,
+  };
+}
+
+export function removeMcpServer(settings: McpSettings, name: string): McpSettings {
+  const servers = settings.servers.filter((server) => server.name !== name.trim());
+  return {
+    enabled: servers.length > 0,
+    servers,
+  };
+}
+
 export function isMcpSettings(value: unknown): value is McpSettings {
   if (!isRecord(value)) return false;
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') return false;
@@ -193,6 +288,35 @@ function joinPath(root: string, relativePath: string): string {
 async function defaultReadFile(filePath: string, encoding: 'utf8'): Promise<string> {
   const { promises: fs } = await import('node:fs');
   return fs.readFile(filePath, encoding);
+}
+
+async function defaultWriteFile(filePath: string, contents: string): Promise<void> {
+  const { promises: fs } = await import('node:fs');
+  const directory = parentDir(filePath);
+  if (directory) await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(filePath, contents, 'utf8');
+}
+
+function parentDir(filePath: string): string {
+  const sep = filePath.includes('\\') ? '\\' : '/';
+  const index = filePath.lastIndexOf(sep);
+  return index > 0 ? filePath.slice(0, index) : '';
+}
+
+function serializeMcpServer(server: McpServerConfig): Record<string, unknown> {
+  if (server.transport === 'http') {
+    return {
+      url: server.url,
+      ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+    };
+  }
+  return {
+    command: server.command,
+    ...(server.args?.length ? { args: server.args } : {}),
+    ...(server.cwd ? { cwd: server.cwd } : {}),
+    ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
+    ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+  };
 }
 
 function isMissingFileError(error: unknown): boolean {

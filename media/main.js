@@ -34,6 +34,21 @@ const settingsBuiltinToolsEl = document.getElementById('settings-builtin-tools')
 const settingsBuiltinCountEl = document.getElementById('settings-builtin-count');
 const settingsMcpPathEl = document.getElementById('settings-mcp-path');
 const settingsMcpListEl = document.getElementById('settings-mcp-list');
+const mcpAddEl = document.getElementById('mcp-add');
+const mcpOpenEl = document.getElementById('mcp-open');
+const mcpFormEl = document.getElementById('mcp-form');
+const mcpOriginalNameEl = document.getElementById('mcp-original-name');
+const mcpNameEl = document.getElementById('mcp-name');
+const mcpTransportEl = document.getElementById('mcp-transport');
+const mcpStdioFieldsEl = document.getElementById('mcp-stdio-fields');
+const mcpHttpFieldsEl = document.getElementById('mcp-http-fields');
+const mcpCommandEl = document.getElementById('mcp-command');
+const mcpArgsEl = document.getElementById('mcp-args');
+const mcpCwdEl = document.getElementById('mcp-cwd');
+const mcpEnvEl = document.getElementById('mcp-env');
+const mcpUrlEl = document.getElementById('mcp-url');
+const mcpSaveEl = document.getElementById('mcp-save');
+const mcpCancelEl = document.getElementById('mcp-cancel');
 
 let hasSavedKey = false;
 let runtimeMode = 'idle';
@@ -55,6 +70,8 @@ let settingsPage = 'model';
 let currentVendorId = '';
 let knownVendors = [];
 let creatingVendor = false;
+let knownMcpServers = [];
+let mcpConfigWritable = false;
 let sessionHistoryOpen = false;
 let sessionSearchQuery = '';
 let selectedSessionId = null;
@@ -1925,6 +1942,7 @@ function openSettings(page) {
   document.body.classList.add('settings-open');
   settingsSavePending = false;
   showSaveStatus('');
+  hideMcpForm();
   requestSettings();
   if (settingsPage === 'model') setBaseEl.focus();
   else settingsCloseEl.focus();
@@ -2159,19 +2177,73 @@ function renderBuiltinTools(tools) {
   }
 }
 
-function renderMcpServers(servers, configPath) {
+function envToText(env) {
+  if (!env || typeof env !== 'object') return '';
+  return Object.entries(env).map(([key, value]) => `${key}=${value}`).join('\n');
+}
+
+function textToArgs(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function textToEnv(text) {
+  const env = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const index = trimmed.indexOf('=');
+    if (index <= 0) continue;
+    env[trimmed.slice(0, index).trim()] = trimmed.slice(index + 1);
+  }
+  return Object.keys(env).length ? env : undefined;
+}
+
+function syncMcpTransportFields() {
+  const http = mcpTransportEl.value === 'http';
+  mcpStdioFieldsEl.classList.toggle('hidden', http);
+  mcpHttpFieldsEl.classList.toggle('hidden', !http);
+}
+
+function hideMcpForm() {
+  mcpFormEl.classList.add('hidden');
+  mcpOriginalNameEl.value = '';
+}
+
+function showMcpForm(server) {
+  mcpFormEl.classList.remove('hidden');
+  mcpOriginalNameEl.value = server?.name || '';
+  mcpNameEl.value = server?.name || '';
+  mcpTransportEl.value = server?.transport === 'http' ? 'http' : 'stdio';
+  mcpCommandEl.value = server?.command || '';
+  mcpArgsEl.value = Array.isArray(server?.args) ? server.args.join('\n') : '';
+  mcpCwdEl.value = server?.cwd || '';
+  mcpEnvEl.value = envToText(server?.env);
+  mcpUrlEl.value = server?.url || '';
+  syncMcpTransportFields();
+  mcpNameEl.focus();
+}
+
+function renderMcpServers(servers, configPath, writable) {
   settingsMcpPathEl.textContent = configPath ? `(${configPath})` : '';
-  const list = Array.isArray(servers) ? servers : [];
+  knownMcpServers = Array.isArray(servers) ? servers : [];
+  mcpConfigWritable = writable !== false && !!configPath;
+  mcpAddEl.disabled = !mcpConfigWritable;
+  mcpOpenEl.disabled = !mcpConfigWritable;
   settingsMcpListEl.replaceChildren();
-  if (!list.length) {
+  if (!knownMcpServers.length) {
     settingsMcpListEl.className = 'settings-empty';
-    settingsMcpListEl.textContent = '暂无 MCP 服务';
+    settingsMcpListEl.textContent = mcpConfigWritable ? '暂无 MCP 服务' : '打开工作区后才能配置项目级 MCP';
     return;
   }
   settingsMcpListEl.className = 'settings-mcp-list';
-  for (const server of list) {
+  for (const server of knownMcpServers) {
     const row = document.createElement('div');
     row.className = 'settings-mcp-row';
+    const main = document.createElement('div');
+    main.className = 'settings-mcp-main';
     const name = document.createElement('div');
     name.className = 'settings-mcp-name';
     name.textContent = server.name || '未命名服务';
@@ -2179,11 +2251,58 @@ function renderMcpServers(servers, configPath) {
     detail.className = 'settings-mcp-detail';
     const transport = server.transport ? `${server.transport} · ` : '';
     detail.textContent = `${transport}${server.detail || ''}`.trim();
-    row.appendChild(name);
-    row.appendChild(detail);
+    main.appendChild(name);
+    main.appendChild(detail);
+    const actions = document.createElement('div');
+    actions.className = 'settings-mcp-actions';
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.textContent = '编辑';
+    editBtn.dataset.mcpEdit = server.name;
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = '删除';
+    deleteBtn.dataset.mcpDelete = server.name;
+    actions.appendChild(editBtn);
+    actions.appendChild(deleteBtn);
+    row.appendChild(main);
+    row.appendChild(actions);
     settingsMcpListEl.appendChild(row);
   }
 }
+
+mcpAddEl.addEventListener('click', () => showMcpForm());
+mcpOpenEl.addEventListener('click', () => {
+  vscode.postMessage({ type: 'openMcpConfig' });
+});
+mcpCancelEl.addEventListener('click', hideMcpForm);
+mcpTransportEl.addEventListener('change', syncMcpTransportFields);
+mcpSaveEl.addEventListener('click', () => {
+  const transport = mcpTransportEl.value === 'http' ? 'http' : 'stdio';
+  vscode.postMessage({
+    type: 'saveMcpServer',
+    name: mcpNameEl.value,
+    originalName: mcpOriginalNameEl.value || undefined,
+    transport,
+    command: mcpCommandEl.value,
+    args: textToArgs(mcpArgsEl.value),
+    cwd: mcpCwdEl.value,
+    env: textToEnv(mcpEnvEl.value),
+    url: mcpUrlEl.value,
+  });
+});
+settingsMcpListEl.addEventListener('click', (event) => {
+  const edit = event.target.closest('[data-mcp-edit]');
+  if (edit) {
+    const server = knownMcpServers.find((item) => item.name === edit.dataset.mcpEdit);
+    showMcpForm(server || { name: edit.dataset.mcpEdit });
+    return;
+  }
+  const remove = event.target.closest('[data-mcp-delete]');
+  if (remove?.dataset.mcpDelete) {
+    vscode.postMessage({ type: 'deleteMcpServer', name: remove.dataset.mcpDelete });
+  }
+});
 
 // ---------- 新会话 ----------
 
@@ -3215,7 +3334,8 @@ window.addEventListener('message', (event) => {
       updateModelChip(msg.model, msg.vendorName);
       setShowThinking(msg.showThinking !== false);
       renderBuiltinTools(msg.builtinTools);
-      renderMcpServers(msg.mcpServers, msg.mcpConfigPath);
+      renderMcpServers(msg.mcpServers, msg.mcpConfigPath, msg.mcpConfigWritable);
+      if (msg.mcpError) showSaveStatus(msg.mcpError, 'error');
       break;
     case 'settingsError':
       settingsSavePending = false;
@@ -3249,6 +3369,15 @@ window.addEventListener('message', (event) => {
       break;
     case 'permissionModeSaved':
       updatePermissionMode(msg.permissionMode || 'ask');
+      break;
+    case 'mcpConfigSaved':
+      hideMcpForm();
+      showSaveStatus(
+        msg.deleted
+          ? (msg.name ? `已删除 MCP:${msg.name}` : '已删除 MCP 配置')
+          : (msg.name ? `已保存 MCP:${msg.name}` : '已保存 MCP 配置'),
+        'ok',
+      );
       break;
   }
 });
