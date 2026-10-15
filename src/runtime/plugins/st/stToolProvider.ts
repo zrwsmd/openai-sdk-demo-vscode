@@ -165,6 +165,33 @@ function fileBeforeEffect(
           risk: "write",
         };
       }
+      if (
+        context.requiresStRuntimeProgram &&
+        !context.validationService?.hasValidatedProgram(contentHash)
+      ) {
+        const message =
+          "当前 ST 交付候选没有 PROGRAM 主入口，不能写入可运行 PLC 交付。" +
+          "请补充 PROGRAM 主入口并重新校验；FUNCTION_BLOCK、FUNCTION、TYPE 等只能作为复用声明。";
+        agentLog(
+          `[st-delivery] rejected target=${path} tool=${toolName} ` +
+          `contentHash=${contentHash.slice(0, 12)} reason=missing_program_entry`,
+        );
+        return {
+          ok: false,
+          error: message,
+          failureData: {
+            suppliedContentHash: contentHash,
+            reason: "missing_program_entry",
+          },
+          diagnostics: [{
+            code: "st_delivery_program_entry_required",
+            message,
+            severity: "error" as const,
+            path,
+          }],
+          risk: "plan",
+        };
+      }
     }
 
     const receiptData: Record<string, unknown> = {};

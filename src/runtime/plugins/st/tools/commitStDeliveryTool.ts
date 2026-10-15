@@ -15,12 +15,14 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
     guardrails,
     validationService,
     workspace,
+    requiresStRuntimeProgram,
   } = ctx;
 
   return tool({
     name: "commit_st_delivery",
     description:
       "提交最终选定的 .st 交付候选，参数必须来自最近一次 validate_st_code 成功回执。" +
+      "默认的可运行 ST 交付必须包含 PROGRAM 主入口；只有明确的复用库交付才允许没有 PROGRAM。" +
       "这个工具本身不写文件：写入前调用时会登记路径和 contentHash，运行时只允许随后写入完全匹配的内容；" +
       "写入成功后运行时自动生成正式 deliveryCommit。若旧流程在写入后再次调用本工具，会返回已有正式 commit。",
     parameters: z.object({
@@ -36,6 +38,17 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
             return failed(
               "当前没有活动的 ST 交付 workflow，不能创建正式交付 commit。",
               "plan",
+            );
+          }
+          if (
+            requiresStRuntimeProgram &&
+            !validationService.hasValidatedProgram(contentHash)
+          ) {
+            return failed(
+              "当前 ST 交付候选没有 PROGRAM 主入口，不能作为可运行 PLC 交付提交。" +
+                "请保留 FUNCTION_BLOCK、FUNCTION、TYPE 等复用声明，并补充一个 PROGRAM 主入口后重新校验。",
+              "plan",
+              "none",
             );
           }
           const target = workspace.resolve(path);

@@ -194,9 +194,23 @@ const deliveryService = new StValidationRuntimeService(createStValidationState()
 const targetCode = 'PROGRAM PressureFilterScale\nEND_PROGRAM';
 deliveryService.recordValidationAttempt(targetCode);
 deliveryService.recordSuccessfulValidation(targetCode, hashStContent(targetCode));
+assert.equal(
+  deliveryService.hasValidatedProgram(hashStContent(targetCode)),
+  true,
+  '包含 PROGRAM 的校验候选应被识别为可运行入口',
+);
 const deliveryWorkflow = new StWorkspaceDeliveryWorkflow(
   createStCodeDeliveryContract({ workspacePersistence: 'required' }),
   deliveryService,
+);
+
+const reusableBlockCode = 'FUNCTION_BLOCK ReusableBlock\nEND_FUNCTION_BLOCK';
+const reusableBlockHash = hashStContent(reusableBlockCode);
+deliveryService.recordSuccessfulValidation(reusableBlockCode, reusableBlockHash);
+assert.equal(
+  deliveryService.hasValidatedProgram(reusableBlockHash),
+  false,
+  '只有功能块的候选不应被识别为可运行入口',
 );
 const probeCode = 'PROGRAM Probe5\nEND_PROGRAM';
 const probeHash = hashStContent(probeCode);

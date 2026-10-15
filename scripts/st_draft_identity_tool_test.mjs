@@ -12,11 +12,11 @@ import {
   createStValidationState,
 } from './agent.testbundle.mjs';
 
-async function withSession(run) {
+async function withSession(run, options = {}) {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'st-delivery-ws-'));
   const exportDir = await fs.mkdtemp(path.join(os.tmpdir(), 'st-delivery-export-'));
   try {
-    const contract = createStCodeDeliveryContract({
+    const contract = options.contract ?? createStCodeDeliveryContract({
       workspacePersistence: 'required',
     });
     const service = new StValidationRuntimeService(createStValidationState());
@@ -33,7 +33,7 @@ async function withSession(run) {
         workspaceRoot,
         workspaceRoots: [workspaceRoot],
       },
-      userText: '生成 ST 程序并保存到工作区',
+      userText: options.userText ?? '生成 ST 程序并保存到工作区',
       workflowContract: contract,
       workflow,
     });
@@ -57,6 +57,23 @@ async function withSession(run) {
 }
 
 const candidates = [
+  {
+    label: 'FUNCTION_BLOCK + PROGRAM',
+    first: [
+      'FUNCTION_BLOCK MotorControl',
+      'END_FUNCTION_BLOCK',
+      'PROGRAM MainProgram',
+      'END_PROGRAM',
+    ].join('\n'),
+    second: [
+      'FUNCTION_BLOCK PressureControl',
+      'END_FUNCTION_BLOCK',
+      'PROGRAM MainProgram',
+      'END_PROGRAM',
+    ].join('\n'),
+    path: 'MainProgram.st',
+    name: 'PRESSURECONTROL',
+  },
   {
     label: 'FUNCTION_BLOCK',
     first: 'FUNCTION_BLOCK MotorControl\nEND_FUNCTION_BLOCK',
@@ -111,6 +128,12 @@ for (const item of candidates) {
       path: item.path,
       contentHash: hash,
     });
+    if (item.label === 'FUNCTION_BLOCK' || item.label === 'FUNCTION' || item.label === 'TYPE') {
+      assert.equal(authorization.ok, false, `${item.label} 没有 PROGRAM 时不能提交可运行交付`);
+      assert.match(authorization.error, /PROGRAM/u);
+      assert.equal(await fileExists(item.path), false, `${item.label} 没有 PROGRAM 时不得落盘`);
+      return;
+    }
     assert.equal(authorization.ok, true, `${item.label} 应登记最终交付候选`);
     assert(authorization.data.deliveryAuthorization);
     assert.equal(authorization.data.deliveryAuthorization.contentHash, hash);
@@ -130,6 +153,32 @@ for (const item of candidates) {
     );
   });
 }
+
+await withSession(async ({ invoke, fileExists }) => {
+  const libraryCode = [
+    'FUNCTION_BLOCK ReusableMotorControl',
+    'END_FUNCTION_BLOCK',
+  ].join('\n');
+  const validation = await invoke('validate_st_code', { code: libraryCode });
+  assert.equal(validation.ok, true, '复用库功能块应能校验');
+  const authorization = await invoke('commit_st_delivery', {
+    path: 'ReusableMotorControl.st',
+    contentHash: validation.data.validatedContentHash,
+  });
+  assert.equal(authorization.ok, true, '明确的复用库交付可以没有 PROGRAM');
+  const persisted = await invoke('write_file', {
+    path: 'ReusableMotorControl.st',
+    content: libraryCode,
+  });
+  assert.equal(persisted.ok, true, '复用库交付授权后应能写入');
+  assert.equal(await fileExists('ReusableMotorControl.st'), true);
+}, {
+  contract: createStCodeDeliveryContract({
+    workspacePersistence: 'required',
+    runtimeEntry: 'not_required',
+  }),
+  userText: '只生成一个供其他程序复用的功能块库，不需要运行和绑定任务',
+});
 
 await withSession(async ({ invoke, service, fileExists }) => {
   const probe = 'PROGRAM Probe5\nEND_PROGRAM\n';

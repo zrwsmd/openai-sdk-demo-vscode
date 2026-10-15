@@ -24,6 +24,12 @@ export const workspacePersistenceSchema = z.enum([
   'optional',
 ]);
 
+export const runtimeEntryRequirementSchema = z.enum([
+  'required',
+  'not_required',
+  'optional',
+]);
+
 export const deliveryContractDecisionSchema = z.object({
   requiresDeliverable: z.boolean(),
   reason: z.string(),
@@ -36,6 +42,7 @@ export const deliveryContractDecisionSchema = z.object({
     workspacePersistence: workspacePersistenceSchema.optional(),
     workspaceFileExtension: z.string().regex(/^\.[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
     requiredVerificationTools: z.array(z.string().min(1)).max(8).optional(),
+    runtimeEntry: runtimeEntryRequirementSchema.optional(),
   }).strict()).max(8),
 }).strict();
 
@@ -59,6 +66,7 @@ function normalizeDeliverable(item: DeliveryItem) {
   const workspacePersistence =
     item.workspacePersistence ??
     (item.kind === 'code' ? 'required' : 'optional');
+  const runtimeEntry = item.runtimeEntry;
   const acceptableEvidence = new Set(item.acceptableEvidence);
   if (
     workspacePersistence === 'required' &&
@@ -74,6 +82,7 @@ function normalizeDeliverable(item: DeliveryItem) {
     description: compact(item.description, 600) || compact(item.title, 120) || '用户要求的交付内容',
     acceptableEvidence: [...acceptableEvidence],
     workspacePersistence,
+    ...(runtimeEntry ? { runtimeEntry } : {}),
     ...(extension ? { workspaceFileExtension: extension } : {}),
     ...(requiredVerificationTools.size
       ? { requiredVerificationTools: [...requiredVerificationTools] }
@@ -126,7 +135,7 @@ export function renderDeliveryContract(contract: DeliveryContract): string {
   return [
     `交付契约: ${contract.reason || '用户要求可交付结果'}`,
     ...contract.deliverables.map((item, index) =>
-      `${index + 1}. ${item.title} (${item.kind}): ${item.description}; 可接受证据: ${item.acceptableEvidence.join(', ')}; 工作区落盘: ${item.workspacePersistence ?? 'optional'}${item.workspaceFileExtension ? ` (${item.workspaceFileExtension})` : ''}${item.requiredVerificationTools?.length ? `; 必须验证: ${item.requiredVerificationTools.join(', ')}` : ''}`,
+      `${index + 1}. ${item.title} (${item.kind}): ${item.description}; 可接受证据: ${item.acceptableEvidence.join(', ')}; 工作区落盘: ${item.workspacePersistence ?? 'optional'}${item.workspaceFileExtension ? ` (${item.workspaceFileExtension})` : ''}${item.runtimeEntry ? `; 运行入口: ${item.runtimeEntry}` : ''}${item.requiredVerificationTools?.length ? `; 必须验证: ${item.requiredVerificationTools.join(', ')}` : ''}`,
     ),
   ].join('\n');
 }

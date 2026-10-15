@@ -340,9 +340,12 @@ export async function classifyDeliveryContract(
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write、successful_export 或 workflow 专用 delivery_commit；其他工具型交付可接受 successful_tool。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
+      "对于需要保存并运行的 IEC 61131-3 ST 交付，默认 runtimeEntry=required，最终源码必须包含 PROGRAM 主入口；FUNCTION_BLOCK、FUNCTION、TYPE、STRUCT、别名等只能作为可复用声明，不能替代 PROGRAM。" +
+      "如果用户明确只要求生成供其他程序复用的功能块、函数、类型或库，并明确不需要运行和任务绑定，才设置 runtimeEntry=not_required；其他情况不要省略该要求。" +
       (useNativeStructuredOutput
         ? "必须严格返回 schema,不要输出 markdown。"
         : "必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。" +
+          "deliverables 中的 ST 代码交付可使用 runtimeEntry 字段，取值为 required、not_required 或 optional。" +
           "只允许字段 requiresDeliverable、reason、deliverables。" +
           '不需要交付物时必须返回 {"requiresDeliverable":false,"reason":"...","deliverables":[]}。'),
     ...(useNativeStructuredOutput

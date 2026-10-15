@@ -12,6 +12,7 @@ import {
   createStValidationState,
   type StValidationRuntimeService,
 } from "./stValidationRuntimeService";
+import { requiresStRuntimeProgram } from "./stDeliveryContract";
 import type { ToolBuildContext } from "../../tools/toolBuildContext";
 
 export const ST_ANALYZER_SERVICE = "st.analyzer";
@@ -22,6 +23,7 @@ export interface StToolBuildContext extends ToolBuildContext {
   stAnalyzer: StAnalyzer;
   stToolOptions: StAnalyzerToolOptions;
   requiresStValidation: boolean;
+  requiresStRuntimeProgram: boolean;
   inlineStValidation: boolean;
   stValidationState: StValidationState;
   validatedStContent: Set<string>;
@@ -56,6 +58,7 @@ export function createStToolBuildContext(
           deliverable.required &&
           deliverable.requiredVerificationTools?.includes("validate_st_code"),
       ) === true,
+    requiresStRuntimeProgram: requiresStRuntimeProgram(context.workflowContract),
     inlineStValidation:
       validationService?.validationInputMode === "inline_code",
     stValidationState,

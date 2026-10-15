@@ -306,6 +306,9 @@ export class StWorkspaceDeliveryWorkflow implements WorkflowRuntime {
       "code 必须是完整 ST 源码，不要传文件路径、工具错误回执、JSON 包装或摘要。" +
       "校验失败时只根据诊断修改内存中的完整草稿并再次校验；errorCount=0 之前禁止写文件。" +
       "validate_st_code 只记录候选内容和哈希，不会因为首个声明或临时草稿锁定正式交付目标。" +
+      "本轮是可运行 PLC 交付时，最终候选必须包含至少一个 PROGRAM 主入口；FUNCTION_BLOCK、FUNCTION、TYPE、STRUCT、别名等可以作为复用声明，但不能替代 PROGRAM。" +
+      "如果用户明确只要求生成供其他程序复用的功能块、函数、类型或库，并明确不需要运行和任务绑定，才允许没有 PROGRAM。" +
+      "没有 PROGRAM 时不要调用 commit_st_delivery；应继续补充或修正主入口，并重新校验完整源码。" +
       "选定最终源码后，先调用 commit_st_delivery，提交最终写入路径和该源码的 validatedContentHash。" +
       "commit_st_delivery 返回 deliveryAuthorization 后，才能调用 write_file；写入的 path 和完整 content 必须完全匹配已授权候选。" +
       "写入成功回执中的 deliveryCommit 才是正式交付证据，不需要为了同一份写入再次调用 commit_st_delivery。" +

@@ -643,6 +643,18 @@ export class StValidationRuntimeService {
     return [];
   }
 
+  getValidatedDeclarations(contentHash: string): readonly StDeclaration[] {
+    return this.declarationsForHash(contentHash.trim());
+  }
+
+  hasValidatedProgram(contentHash: string): boolean {
+    return this.declarationsForHash(contentHash.trim()).some(
+      (declaration) =>
+        declaration.category === "pou" &&
+        declaration.kind === "PROGRAM",
+    );
+  }
+
   recordDeliveryCommit(options: {
     path: string;
     workspaceRoot?: string;
