@@ -2252,7 +2252,12 @@ export async function runAgent(
         }
       }
       if (!structuredOutput) {
-        return failedAgentRunResult(synthesizeStructuredFailureFromEvidence());
+        // 走到这里说明本轮连一份可用的最终输出都没有。把完成门控一并交给合成器，
+        // 让它优先用"这轮为什么没算完"当标题；不传的话标题会退化成账本里的第一条工具报错，
+        // 而第一条报错往往只是某个被拦下的支线动作。
+        return failedAgentRunResult(
+          synthesizeStructuredFailureFromEvidence(runCompletionGate(output)),
+        );
       }
       assertPlanCompleted();
       const authoritativeMessage = authoritativeWorkflowMessage();

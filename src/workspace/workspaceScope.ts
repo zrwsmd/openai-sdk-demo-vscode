@@ -43,7 +43,13 @@ export class WorkspaceScope {
       const absolutePath = path.resolve(candidate);
       const index = this.roots.findIndex((root) => isWithinRoot(root, absolutePath));
       if (index < 0) {
-        throw new WorkspaceScopeError(`路径不在已授权工作区内: ${input}`);
+        // 只报"不允许"等于把问题丢回给用户：他不知道允许的是什么，也不知道下一步该做什么。
+        // 这句话会原样进工具账本、被模型读到，所以把"当前允许哪些目录 + 怎么解"一并写进去。
+        throw new WorkspaceScopeError(
+          `路径不在已授权工作区内: ${input}。` +
+            `当前已授权的工作区是 ${this.roots.join('、')}；` +
+            `请改用工作区内的路径，或先在 VS Code 中打开该目录后重试。`,
+        );
       }
       const root = this.roots[index];
       return {
@@ -57,7 +63,11 @@ export class WorkspaceScope {
     const root = this.primaryRoot;
     const absolutePath = path.resolve(root, candidate);
     if (!isWithinRoot(root, absolutePath)) {
-      throw new WorkspaceScopeError(`路径越界: ${input} 不在工作区 ${root} 内`);
+      throw new WorkspaceScopeError(
+        `路径越界: ${input} 不在工作区 ${root} 内。` +
+          `相对路径只能落在当前工作区内；要写到别处请改用已授权工作区的绝对路径，` +
+          `或先在 VS Code 中打开该目录。`,
+      );
     }
     return {
       root,

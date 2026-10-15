@@ -225,12 +225,33 @@ export function synthesizeStructuredFailure(input: {
   const firstReason = input.gate && !input.gate.passed
     ? input.gate.reason
     : diagnostics[0]?.message ?? "运行时无法确认本轮完成";
+  const artifacts = [...(input.artifacts ?? []), ...(input.deliveredArtifacts ?? [])]
+    .map(normalizeArtifact)
+    .filter((artifact, index, all) => all.findIndex((item) => item.name === artifact.name && item.uri === artifact.uri) === index);
+  // 这一支是"没有可用最终输出"的兜底合成，标题会被当成整轮结论显示给用户。
+  // 本轮完全可能"东西已经做出来了，只是最后一步没走通"，所以先讲已经拿到什么，再讲卡在哪，
+  // 否则用户会把"某一步被拦"读成"整件事失败"。
+  const produced = describeProducedArtifacts(artifacts);
   return {
-    message: `本轮未完成：${firstReason}`,
+    message: produced
+      ? `已生成 ${produced}，但本轮未完成：${firstReason}`
+      : `本轮未完成：${firstReason}`,
     diagnostics: diagnostics.slice(0, 20),
-    artifacts: [...(input.artifacts ?? []), ...(input.deliveredArtifacts ?? [])]
-      .map(normalizeArtifact)
-      .filter((artifact, index, all) => all.findIndex((item) => item.name === artifact.name && item.uri === artifact.uri) === index),
+    artifacts,
     data: null,
   };
+}
+
+const MAX_DESCRIBED_ARTIFACTS = 3;
+
+function describeProducedArtifacts(
+  artifacts: readonly IndustrialAgentOutput["artifacts"][number][],
+): string {
+  const named = artifacts.filter((artifact) => artifact.name.trim());
+  if (!named.length) return "";
+  const described = named
+    .slice(0, MAX_DESCRIBED_ARTIFACTS)
+    .map((artifact) => (artifact.uri ? `${artifact.name}（${artifact.uri}）` : artifact.name));
+  const rest = named.length - described.length;
+  return rest > 0 ? `${described.join("、")} 等 ${named.length} 项` : described.join("、");
 }
