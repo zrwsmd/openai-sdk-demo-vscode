@@ -15,7 +15,7 @@ export * from '../src/runtime/runStore';
 export * from '../src/tools/commandRisk';
 export * from '../src/runtime/permissionPolicy';
 export * from '../src/runtime/mcp/mcpConfig';
-export { wrapMcpFunctionTool, openMcpSession } from '../src/runtime/mcp/mcpSession';
+export { wrapMcpFunctionTool, openMcpSession, probeMcpServer } from '../src/runtime/mcp/mcpSession';
 export * from '../src/runtime/runCoordinator';
 export * from '../src/runtime/clarification';
 export * from '../src/runtime/errors';

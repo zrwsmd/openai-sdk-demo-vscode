@@ -15,6 +15,7 @@ import {
 import type { AgentConfig } from '../agentConfig';
 import {
   mcpFunctionToolName,
+  isMcpServerEnabled,
   type McpServerConfig,
   type McpSettings,
 } from './mcpConfig';
@@ -22,6 +23,15 @@ import {
 export interface McpSession {
   readonly tools: readonly FunctionTool<any, any, any>[];
   close(): Promise<void>;
+}
+
+export type McpProbeStatus = 'connected' | 'disabled' | 'error';
+
+export interface McpProbeResult {
+  name: string;
+  status: McpProbeStatus;
+  error?: string;
+  toolCount?: number;
 }
 
 export interface OpenMcpSessionOptions {
@@ -44,7 +54,7 @@ export async function openMcpSession(options: OpenMcpSessionOptions): Promise<Mc
   const servers: MCPServer[] = [];
   const tools: FunctionTool<any, any, any>[] = [];
 
-  for (const spec of settings.servers) {
+  for (const spec of settings.servers.filter(isMcpServerEnabled)) {
     try {
       const server = createMcpServer(spec);
       await server.connect();
@@ -83,6 +93,53 @@ export async function openMcpSession(options: OpenMcpSessionOptions): Promise<Mc
       }));
     },
   };
+}
+
+export async function probeMcpServer(spec: McpServerConfig): Promise<McpProbeResult> {
+  if (!isMcpServerEnabled(spec)) {
+    return { name: spec.name, status: 'disabled' };
+  }
+  const timeoutMs = spec.timeoutMs ?? 15_000;
+  const server = createMcpServer(spec);
+  try {
+    await withTimeout(server.connect(), timeoutMs, `连接 ${spec.name}`);
+    const listed = await withTimeout(server.listTools(), timeoutMs, `列出 ${spec.name} 工具`);
+    return {
+      name: spec.name,
+      status: 'connected',
+      toolCount: listed.length,
+    };
+  } catch (error) {
+    return {
+      name: spec.name,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    try {
+      await server.close();
+    } catch {
+      // Ignore teardown failures after a probe.
+    }
+  }
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} 超时(${timeoutMs}ms)`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export function wrapMcpFunctionTool(

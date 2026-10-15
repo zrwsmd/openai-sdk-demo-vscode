@@ -1932,6 +1932,7 @@ function showSettingsPage(page) {
       item.classList.toggle('hidden', !match);
     }
   }
+  if (nextPage === 'tools') vscode.postMessage({ type: 'probeMcpServers' });
 }
 
 function openSettings(page) {
@@ -2226,9 +2227,49 @@ function showMcpForm(server) {
   mcpNameEl.focus();
 }
 
+function mcpDotClass(server) {
+  if (server.enabled === false) return 'disabled';
+  if (server.status === 'connected') return 'ok';
+  if (server.status === 'error') return 'error';
+  return 'connecting';
+}
+
+function mcpDotTitle(server) {
+  if (server.enabled === false) return '已关闭';
+  if (server.status === 'connected') {
+    return typeof server.toolCount === 'number'
+      ? `已连接 · ${server.toolCount} 个工具`
+      : '已连接';
+  }
+  if (server.status === 'error') {
+    return server.error ? `连接失败: ${server.error}` : '连接失败';
+  }
+  return '正在连接';
+}
+
+function applyMcpDot(row, server) {
+  const dot = row.querySelector('.settings-status-dot');
+  if (!dot) return;
+  dot.className = `settings-status-dot ${mcpDotClass(server)}`;
+  dot.title = mcpDotTitle(server);
+}
+
 function renderMcpServers(servers, configPath, writable) {
   settingsMcpPathEl.textContent = configPath ? `(${configPath})` : '';
-  knownMcpServers = Array.isArray(servers) ? servers : [];
+  const next = Array.isArray(servers) ? servers : [];
+  knownMcpServers = next.map((server) => {
+    const previous = knownMcpServers.find((item) => item.name === server.name);
+    return {
+      ...server,
+      status: server.enabled === false
+        ? 'disabled'
+        : previous?.status && previous.enabled !== false
+          ? previous.status
+          : 'connecting',
+      error: server.enabled === false ? undefined : previous?.error,
+      toolCount: server.enabled === false ? undefined : previous?.toolCount,
+    };
+  });
   mcpConfigWritable = writable !== false && !!configPath;
   mcpAddEl.disabled = !mcpConfigWritable;
   mcpOpenEl.disabled = !mcpConfigWritable;
@@ -2242,17 +2283,31 @@ function renderMcpServers(servers, configPath, writable) {
   for (const server of knownMcpServers) {
     const row = document.createElement('div');
     row.className = 'settings-mcp-row';
+    row.dataset.mcpName = server.name;
     const main = document.createElement('div');
     main.className = 'settings-mcp-main';
     const name = document.createElement('div');
     name.className = 'settings-mcp-name';
-    name.textContent = server.name || '未命名服务';
+    const dot = document.createElement('span');
+    dot.className = `settings-status-dot ${mcpDotClass(server)}`;
+    dot.title = mcpDotTitle(server);
+    const label = document.createElement('span');
+    label.textContent = server.name || '未命名服务';
+    name.appendChild(dot);
+    name.appendChild(label);
     const detail = document.createElement('div');
     detail.className = 'settings-mcp-detail';
     const transport = server.transport ? `${server.transport} · ` : '';
     detail.textContent = `${transport}${server.detail || ''}`.trim();
     main.appendChild(name);
     main.appendChild(detail);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'settings-switch';
+    toggle.dataset.mcpToggle = server.name;
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', server.enabled === false ? 'false' : 'true');
+    toggle.title = server.enabled === false ? '已关闭' : '已开启';
     const actions = document.createElement('div');
     actions.className = 'settings-mcp-actions';
     const editBtn = document.createElement('button');
@@ -2266,8 +2321,34 @@ function renderMcpServers(servers, configPath, writable) {
     actions.appendChild(editBtn);
     actions.appendChild(deleteBtn);
     row.appendChild(main);
+    row.appendChild(toggle);
     row.appendChild(actions);
     settingsMcpListEl.appendChild(row);
+  }
+  if (
+    settingsPage === 'tools'
+    && !settingsEl.classList.contains('hidden')
+    && knownMcpServers.length
+  ) {
+    vscode.postMessage({ type: 'probeMcpServers' });
+  }
+}
+
+function applyMcpStatus(payload) {
+  const server = knownMcpServers.find((item) => item.name === payload.name);
+  if (server) {
+    server.status = payload.status;
+    server.enabled = payload.status !== 'disabled';
+    server.error = payload.error;
+    server.toolCount = payload.toolCount;
+  }
+  const row = settingsMcpListEl.querySelector(`[data-mcp-name="${CSS.escape(payload.name)}"]`);
+  if (!row) return;
+  if (server) applyMcpDot(row, server);
+  const toggle = row.querySelector('[data-mcp-toggle]');
+  if (toggle && server) {
+    toggle.setAttribute('aria-checked', server.enabled === false ? 'false' : 'true');
+    toggle.title = server.enabled === false ? '已关闭' : '已开启';
   }
 }
 
@@ -2292,6 +2373,16 @@ mcpSaveEl.addEventListener('click', () => {
   });
 });
 settingsMcpListEl.addEventListener('click', (event) => {
+  const toggle = event.target.closest('[data-mcp-toggle]');
+  if (toggle?.dataset.mcpToggle) {
+    const enabled = toggle.getAttribute('aria-checked') !== 'true';
+    vscode.postMessage({
+      type: 'setMcpServerEnabled',
+      name: toggle.dataset.mcpToggle,
+      enabled,
+    });
+    return;
+  }
   const edit = event.target.closest('[data-mcp-edit]');
   if (edit) {
     const server = knownMcpServers.find((item) => item.name === edit.dataset.mcpEdit);
@@ -3378,6 +3469,9 @@ window.addEventListener('message', (event) => {
           : (msg.name ? `已保存 MCP:${msg.name}` : '已保存 MCP 配置'),
         'ok',
       );
+      break;
+    case 'mcpStatus':
+      applyMcpStatus(msg);
       break;
   }
 });

@@ -37,11 +37,14 @@ import {
   parseMcpServerInput,
   readMcpConfigFile,
   removeMcpServer,
+  interpolateMcpSettings,
+  setMcpServerEnabled,
   upsertMcpServer,
   writeMcpConfigFile,
   mcpConfigFilePath,
   type McpSettings,
 } from '../runtime/mcp/mcpConfig';
+import { probeMcpServer } from '../runtime/mcp/mcpSession';
 import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
@@ -76,6 +79,8 @@ import {
  *                   {type:'saveSettings', vendorId?, name, baseUrl, apiKey, model, apiFormat}
  *                   {type:'deleteVendor', vendorId}
  *                   {type:'setPermissionMode', permissionMode}
+ *                   {type:'setMcpServerEnabled', name, enabled}
+ *                   {type:'probeMcpServers'}
  *                   {type:'saveMcpServer', name, originalName?, transport, command?, args?, url?, cwd?, env?}
  *                   {type:'deleteMcpServer', name}
  *                   {type:'openMcpConfig'}
@@ -86,6 +91,7 @@ import {
  *                   {type:'settings', baseUrl, model, apiFormat, vendorId, vendors, hasKey, requestId?}
  *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
+ *                   {type:'mcpStatus', name, status, error?, toolCount?}
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -97,6 +103,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly decisionService: AgentDecisionService;
   private readonly workflowRegistry = createAppWorkflowRegistry();
   private readonly toolRegistry = createAppToolRegistry();
+  private mcpProbeGeneration = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -168,6 +175,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.deleteMcpServer(msg.name);
       } else if (msg.type === 'openMcpConfig') {
         void this.openMcpConfig();
+      } else if (msg.type === 'setMcpServerEnabled') {
+        void this.setMcpEnabled(msg.name, msg.enabled);
+      } else if (msg.type === 'probeMcpServers') {
+        void this.probeMcpServers();
       }
     });
 
@@ -686,6 +697,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     name: string;
     transport: string;
     detail: string;
+    enabled: boolean;
     command?: string;
     args?: string[];
     url?: string;
@@ -695,6 +707,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return mcp.servers.map((server) => ({
       name: server.name,
       transport: server.transport,
+      enabled: server.enabled !== false,
       detail: server.transport === 'http'
         ? server.url
         : [server.command, ...(server.args ?? [])].join(' '),
@@ -753,8 +766,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'settingsError', message: 'MCP 服务名只能包含字母、数字、点、下划线和连字符' });
         return;
       }
+      const originalName = typeof msg.originalName === 'string' ? msg.originalName.trim() : '';
+      const existing = file.settings.servers.find((item) =>
+        item.name === (originalName || name)
+      );
       const spec = msg.transport === 'http'
-        ? { url: typeof msg.url === 'string' ? msg.url : '' }
+        ? {
+          url: typeof msg.url === 'string' ? msg.url : '',
+          enabled: existing?.enabled !== false,
+        }
         : {
           command: typeof msg.command === 'string' ? msg.command : '',
           args: Array.isArray(msg.args)
@@ -762,12 +782,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             : undefined,
           cwd: typeof msg.cwd === 'string' ? msg.cwd : undefined,
           env: isStringRecord(msg.env) ? msg.env : undefined,
+          enabled: existing?.enabled !== false,
         };
       const server = parseMcpServerInput(name, spec);
       const saved = upsertMcpServer(
         file.settings,
         server,
-        typeof msg.originalName === 'string' ? msg.originalName : undefined,
+        originalName || undefined,
       );
       await writeMcpConfigFile(file.filePath, saved);
       this.post({ type: 'mcpConfigSaved', name: server.name });
@@ -807,6 +828,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `打开 MCP 配置失败: ${message}` });
+    }
+  }
+
+  private async setMcpEnabled(name: unknown, enabled: unknown): Promise<void> {
+    const serverName = typeof name === 'string' ? name.trim() : '';
+    if (!serverName) {
+      this.post({ type: 'settingsError', message: '未选择要开关的 MCP 服务' });
+      return;
+    }
+    try {
+      const file = await this.requireMcpConfigFile();
+      const saved = setMcpServerEnabled(file.settings, serverName, enabled === true);
+      await writeMcpConfigFile(file.filePath, saved);
+      this.post({
+        type: 'mcpStatus',
+        name: serverName,
+        status: enabled === true ? 'connecting' : 'disabled',
+      });
+      await this.sendSettingsToWebview();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.post({ type: 'settingsError', message: `更新 MCP 开关失败: ${message}` });
+    }
+  }
+
+  private async probeMcpServers(): Promise<void> {
+    const generation = ++this.mcpProbeGeneration;
+    try {
+      const file = await readMcpConfigFile(this.workspaceRoots());
+      const interpolated = interpolateMcpSettings(file.settings, file.workspaceRoot);
+      await Promise.all(interpolated.servers.map(async (spec) => {
+        const result = await probeMcpServer(spec);
+        if (generation !== this.mcpProbeGeneration) return;
+        this.post({ type: 'mcpStatus', ...result });
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.appendLine(`[mcp] 探测失败: ${message}`);
     }
   }
 

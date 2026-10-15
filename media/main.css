@@ -1503,6 +1503,38 @@ body.settings-open { overflow: hidden; }
   background: #3d9a5f;
   flex: 0 0 auto;
 }
+.settings-status-dot.ok { background: #3d9a5f; }
+.settings-status-dot.error { background: #d54646; }
+.settings-status-dot.disabled,
+.settings-status-dot.connecting { background: #8a8a8a; }
+.settings-mcp-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-switch {
+  width: 28px;
+  height: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #6b6b6b;
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  flex: 0 0 auto;
+}
+.settings-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+}
+.settings-switch[aria-checked="true"] { background: #3d9a5f; }
+.settings-switch[aria-checked="true"]::after { left: 14px; }
 .settings-tool-list {
   border: 1px solid var(--border);
   border-top: 0;
@@ -1555,7 +1587,7 @@ body.settings-open { overflow: hidden; }
 }
 .settings-mcp-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   padding: 10px 12px;
   border: 1px solid var(--border);

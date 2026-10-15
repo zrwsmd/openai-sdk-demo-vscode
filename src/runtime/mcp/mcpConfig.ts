@@ -10,6 +10,7 @@ export interface McpStdioServerConfig {
   env?: Record<string, string>;
   cwd?: string;
   timeoutMs?: number;
+  enabled?: boolean;
 }
 
 export interface McpHttpServerConfig {
@@ -17,6 +18,7 @@ export interface McpHttpServerConfig {
   transport: 'http';
   url: string;
   timeoutMs?: number;
+  enabled?: boolean;
 }
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
@@ -174,6 +176,36 @@ export function removeMcpServer(settings: McpSettings, name: string): McpSetting
   };
 }
 
+export function isMcpServerEnabled(server: Pick<McpServerConfig, 'enabled'>): boolean {
+  return server.enabled !== false;
+}
+
+export function setMcpServerEnabled(
+  settings: McpSettings,
+  name: string,
+  enabled: boolean,
+): McpSettings {
+  const id = name.trim();
+  const index = settings.servers.findIndex((server) => server.name === id);
+  if (index < 0) throw new Error(`MCP 服务不存在: ${id}`);
+  const servers = settings.servers.map((server, serverIndex) =>
+    serverIndex === index ? { ...server, enabled } : server
+  );
+  return {
+    ...settings,
+    enabled: servers.length > 0,
+    servers,
+  };
+}
+
+export function interpolateMcpSettings(
+  settings: McpSettings,
+  workspaceRoot?: string,
+): McpSettings {
+  if (!workspaceRoot?.trim()) return settings;
+  return parseMcpDocument(serializeMcpDocument(settings), workspaceRoot);
+}
+
 export function isMcpSettings(value: unknown): value is McpSettings {
   if (!isRecord(value)) return false;
   if (value.enabled !== undefined && typeof value.enabled !== 'boolean') return false;
@@ -240,8 +272,15 @@ function parseNamedMcpServer(
       : undefined;
   const url = interpolate(typeof value.url === 'string' ? value.url.trim() : '', workspaceRoot);
   const command = interpolate(typeof value.command === 'string' ? value.command.trim() : '', workspaceRoot);
+  const enabled = value.disabled !== true && value.enabled !== false;
   if ((transport === 'http' || url) && url) {
-    return { name: name.trim(), transport: 'http', url, ...(timeoutMs ? { timeoutMs } : {}) };
+    return {
+      name: name.trim(),
+      transport: 'http',
+      url,
+      enabled,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    };
   }
   if ((transport === 'stdio' || command) && command) {
     const args = Array.isArray(value.args)
@@ -260,6 +299,7 @@ function parseNamedMcpServer(
       name: name.trim(),
       transport: 'stdio',
       command,
+      enabled,
       ...(args ? { args } : {}),
       ...(cwd ? { cwd } : {}),
       ...(env ? { env } : {}),
@@ -304,14 +344,17 @@ function parentDir(filePath: string): string {
 }
 
 function serializeMcpServer(server: McpServerConfig): Record<string, unknown> {
+  const disabled = server.enabled === false ? { disabled: true } : {};
   if (server.transport === 'http') {
     return {
       url: server.url,
+      ...disabled,
       ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     };
   }
   return {
     command: server.command,
+    ...disabled,
     ...(server.args?.length ? { args: server.args } : {}),
     ...(server.cwd ? { cwd: server.cwd } : {}),
     ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),

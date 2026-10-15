@@ -13,8 +13,10 @@ import {
   readMcpConfigFile,
   removeMcpServer,
   serializeMcpDocument,
+  setMcpServerEnabled,
   upsertMcpServer,
   writeMcpConfigFile,
+  probeMcpServer,
   shouldExposeMcpTools,
   wrapMcpFunctionTool,
 } from './agent.testbundle.mjs';
@@ -123,6 +125,29 @@ const idle = await openMcpSession({
 });
 assert.equal(idle.tools.length, 0);
 await idle.close();
+
+const disabledDoc = parseMcpSettings({
+  mcpServers: {
+    files: {
+      command: 'npx',
+      args: ['-y', 'demo'],
+      disabled: true,
+    },
+  },
+});
+assert.equal(disabledDoc.servers[0]?.enabled, false);
+assert.equal(serializeMcpDocument(disabledDoc).mcpServers.files.disabled, true);
+const enabledDoc = setMcpServerEnabled(disabledDoc, 'files', true);
+assert.equal(enabledDoc.servers[0]?.enabled, true);
+assert.equal(serializeMcpDocument(enabledDoc).mcpServers.files.disabled, undefined);
+const skipped = await openMcpSession({
+  settings: disabledDoc,
+  policyContext: { workspaceRoot: '.' },
+});
+assert.equal(skipped.tools.length, 0);
+await skipped.close();
+const disabledProbe = await probeMcpServer(disabledDoc.servers[0]);
+assert.equal(disabledProbe.status, 'disabled');
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-'));
 await fs.mkdir(path.join(ws, '.plc-agent'), { recursive: true });
