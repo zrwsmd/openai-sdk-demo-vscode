@@ -12,6 +12,8 @@ export * from '../src/runtime/session';
 export * from '../src/app/chatSessions';
 export * from '../src/tools/workspaceTools';
 export * from '../src/runtime/runStore';
+export * from '../src/tools/commandRisk';
+export * from '../src/runtime/permissionPolicy';
 export * from '../src/runtime/runCoordinator';
 export * from '../src/runtime/clarification';
 export * from '../src/runtime/errors';

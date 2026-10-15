@@ -78,6 +78,7 @@ import {
   type ToolRegistry,
 } from "./toolRegistry";
 import type { AgentConfig } from "./agentConfig";
+import { shouldAutoApproveToolCall } from "./permissionPolicy";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
 import { ToolCallDeduper } from "./toolCallDeduper";
 import { AgentDecisionService } from "./decision/agentDecision";
@@ -394,9 +395,13 @@ export async function runAgent(
     name === "deliver_artifact" || name === "report_plan_progress"
       ? "plan"
       : registeredToolRisks[name] ?? "execute";
-  const autoApproves = (name: string): boolean =>
-    permissionMode === "full_access" ||
-    (permissionMode === "auto" && toolRisk(name) === "write");
+  const autoApprovesCall = (name: string, args?: string): boolean =>
+    shouldAutoApproveToolCall({
+      permissionMode,
+      toolName: name,
+      toolRisk: toolRisk(name),
+      args,
+    });
   const toolCallDeduper = new ToolCallDeduper(
     (name) => {
       const capability = toolCatalog.get(name);
@@ -679,7 +684,7 @@ export async function runAgent(
       permissionMode === "full_access"
         ? "当前权限模式为完全访问权限。工具由运行时自动批准，不要停下来等待用户批准；仍必须遵守工作区边界、参数校验、危险命令拦截和真实工具回执。"
         : permissionMode === "auto"
-          ? "当前权限模式为帮我批准。普通操作自动处理；检测到风险的命令执行等动作仍需用户批准。"
+          ? "当前权限模式为帮我批准。写文件和低风险查询命令会自动执行；检测到风险的命令执行等动作仍需用户批准。"
           : "",
       options.resumeInstruction?.trim()
         ? "本轮是从暂停断点继续。请先判断下面的用户补充是继续、补充或追问上一任务，还是一个明显独立的新问题。" +
@@ -1634,7 +1639,12 @@ export async function runAgent(
       const approvalId = protocolPayloadString(payload, "approvalId");
       const callId = protocolPayloadString(payload, "callId");
       const toolName = protocolPayloadString(payload, "toolName");
-      if (toolName && autoApproves(toolName)) {
+      if (toolName && autoApprovesCall(
+        toolName,
+        protocolPayloadString(payload, "args") ??
+          protocolPayloadString(payload, "arguments") ??
+          "",
+      )) {
         // 自动批准只藏"要审批"这一条,绝不把 callId 记进 suppressedEffectCallIds:
         // 那份名单还会吞掉"干完了"(见下面的 tool.completed 分支),而"开始执行"不受它管。
         // 只吞一头会让前端 pendingToolCount 永远归不了零 —— 界面卡在"正在执行",
@@ -1914,7 +1924,7 @@ export async function runAgent(
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
       if (decision === undefined) decision = decisionByKey.get(duplicateKey);
-      if (decision === undefined && autoApproves(request.name)) {
+      if (decision === undefined && autoApprovesCall(request.name, request.args)) {
         decision = true;
         agentLog(
           `[approval] mode=${permissionMode} 自动批准 tool=${request.name}`,

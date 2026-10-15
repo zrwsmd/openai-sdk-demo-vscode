@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createToolResult, type ToolResultInput, type ToolRisk } from '../protocol/results';
+import { classifyCommandRisk } from './commandRisk';
 
 // Keep the historical toolContract exports stable while making the protocol
 // module the single source of truth for tool result shapes and risk/effect enums.
@@ -65,8 +66,9 @@ export class DefaultToolPolicy implements ToolPolicy {
       if (context.allowedCommands?.length && !context.allowedCommands.includes(first)) {
         return { allowed: false, requiresApproval, risk, reason: `命令 ${first} 不在允许列表中。` };
       }
-      if (/(?:\bshutdown(?:\.exe)?(?:\s|$)|\bformat(?:\.exe)?(?:\s|$)|\bdel(?:\.exe)?(?:\s|$)|\brm(?:\s|$)|\brmdir(?:\.exe)?(?:\s|$)|\bdiskpart(?:\.exe)?(?:\s|$)|\bRemove-Item\b|\bClear-Content\b|\bStop-Computer\b|\bRestart-Computer\b|\bFormat-Volume\b)/i.test(command)) {
-        return { allowed: false, requiresApproval, risk, reason: '检测到破坏性命令，策略禁止执行。' };
+      const commandRisk = classifyCommandRisk(command);
+      if (commandRisk.level === 'blocked') {
+        return { allowed: false, requiresApproval, risk, reason: commandRisk.reason || '检测到破坏性命令，策略禁止执行。' };
       }
     }
     if (toolName === 'write_plc_variables') {
