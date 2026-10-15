@@ -29,6 +29,7 @@ import {
   type AgentApiFormatSetting,
   type AgentProvider,
 } from '../runtime/modelAdapter';
+import { isPermissionMode, type PermissionMode } from '../runtime/agentConfig';
 import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
@@ -82,7 +83,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
     this.decisionService = new AgentDecisionService((line) => this.log.appendLine(line));
     this.context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('plcAgent.ui.showThinking')) {
+      if (
+        event.affectsConfiguration('plcAgent.ui.showThinking') ||
+        event.affectsConfiguration('plcAgent.permissionMode')
+      ) {
         void this.sendSettingsToWebview();
       }
     }));
@@ -327,6 +331,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       enabled: cfg.get<boolean>('promptCache.enabled') ?? false,
       ttl: cfg.get<'30m'>('promptCache.ttl') ?? '30m',
     };
+    const configuredPermissionMode = cfg.get<unknown>('permissionMode');
+    const permissionMode: PermissionMode = isPermissionMode(configuredPermissionMode)
+      ? configuredPermissionMode
+      : 'ask';
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -415,6 +423,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       provider,
       apiFormat,
       orchestration: cfg.get<'auto' | 'single' | 'team'>('orchestration') ?? 'auto',
+      permissionMode,
       policyContext: {
         allowedCommands,
         allowedDevices,
@@ -444,6 +453,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         apiFormat: cfg.apiFormat,
         hasKey: !!cfg.apiKey,
         showThinking: cfg.showThinking !== false,
+        permissionMode: cfg.permissionMode ?? 'ask',
         source: cfg.savedInPlugin ? 'plugin' : 'other',
         ...(requestId === undefined ? {} : { requestId }),
       });
@@ -459,6 +469,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     model?: string;
     provider?: AgentProvider;
     apiFormat?: AgentApiFormat;
+    permissionMode?: PermissionMode;
   }): Promise<void> {
     const baseUrl = (msg.baseUrl ?? '').trim().replace(/\/+$/, '');
     const model = (msg.model ?? '').trim();
@@ -472,8 +483,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'settingsError', message: '未选择有效的 API Format' });
       return;
     }
+    const permissionMode = isPermissionMode(msg.permissionMode)
+      ? msg.permissionMode
+      : undefined;
     try {
       resolveApiFormat(baseUrl, apiFormat, provider);
+      if (permissionMode) {
+        await vscode.workspace
+          .getConfiguration('plcAgent')
+          .update('permissionMode', permissionMode, vscode.ConfigurationTarget.Global);
+      }
       const current = this.context.globalState.get<unknown>(API_SETTINGS_STATE_KEY);
       await this.context.globalState.update(
         API_SETTINGS_STATE_KEY,
@@ -485,7 +504,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           msg.apiKey.trim(),
         );
       }
-      this.post({ type: 'settingsSaved', model, provider, apiFormat });
+      this.post({ type: 'settingsSaved', model, provider, apiFormat, permissionMode });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.post({ type: 'settingsError', message: `保存模型配置失败: ${message}` });
@@ -519,6 +538,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       modelContext: live.modelContext,
       promptCache: live.promptCache,
       orchestration: live.orchestration,
+      permissionMode: live.permissionMode,
       extensions: createStAnalyzerConfigExtension(this.context),
       jev: {
         enabled: live.jev.enabled,
@@ -632,6 +652,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <option value="chat_completions">OpenAI Chat Completions</option>
         <option value="responses">OpenAI Responses</option>
         <option value="messages">Anthropic Messages</option>
+      </select></label>
+      <label>工具权限<select id="set-permission">
+        <option value="ask">请求批准</option>
+        <option value="auto">自动批准低风险</option>
+        <option value="full_access">完全访问</option>
       </select></label>
       <div class="settings-actions">
         <button id="set-save" class="btn primary">保存</button>

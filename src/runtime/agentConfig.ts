@@ -25,6 +25,12 @@ export interface PromptCacheSettings {
   ttl?: "30m";
 }
 
+export type PermissionMode = "ask" | "auto" | "full_access";
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "ask" || value === "auto" || value === "full_access";
+}
+
 export interface AgentConfig {
   /** OpenAI 兼容网关地址(带 /v1),空 = 官方 API */
   baseUrl: string;
@@ -59,6 +65,8 @@ export interface AgentConfig {
   modelContext?: ModelContextProfile;
   /** Experimental OpenAI-compatible prompt cache. Disabled by default. */
   promptCache?: PromptCacheSettings;
+  /** Unified tool approval behavior. Defaults to asking for effectful tools. */
+  permissionMode?: PermissionMode;
   /** Host-selected command execution backend. Defaults to LocalCommandRunner. */
   commandRunner?: CommandRunner;
   /** Host UI channel for asking the user to clarify an ambiguous request. */

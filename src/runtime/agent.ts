@@ -369,6 +369,7 @@ export async function runAgent(
   options: AgentRunOptions,
 ): Promise<AgentRunResult> {
   const actionPolicy = cfg.actionPolicy ?? new DefaultActionPolicy();
+  const permissionMode = cfg.permissionMode ?? "ask";
   const requiredTool = actionPolicy.requiredToolFor(userText);
   const workspace = workspaceScopeFromRoots(
     cfg.workspaceRoot,
@@ -393,6 +394,9 @@ export async function runAgent(
     name === "deliver_artifact" || name === "report_plan_progress"
       ? "plan"
       : registeredToolRisks[name] ?? "execute";
+  const autoApproves = (name: string): boolean =>
+    permissionMode === "full_access" ||
+    (permissionMode === "auto" && toolRisk(name) === "write");
   const toolCallDeduper = new ToolCallDeduper(
     (name) => {
       const capability = toolCatalog.get(name);
@@ -672,6 +676,11 @@ export async function runAgent(
         : {}),
     };
     const runtimeInstructions = [
+      permissionMode === "full_access"
+        ? "当前权限模式为完全访问。副作用工具由运行时自动批准，不要停下来等待用户批准；仍必须遵守工作区边界、参数校验、危险命令拦截和真实工具回执。"
+        : permissionMode === "auto"
+          ? "当前权限模式为自动批准低风险。低风险写操作由运行时自动批准；执行命令或其它高风险动作仍需用户批准。"
+          : "",
       options.resumeInstruction?.trim()
         ? "本轮是从暂停断点继续。请先判断下面的用户补充是继续、补充或追问上一任务，还是一个明显独立的新问题。" +
           "如果它仍然针对上一任务，就继续原任务；如果它是独立新问题，不要因为旧任务尚未完成就擅自执行旧任务剩余动作，应优先按新问题回答。" +
@@ -1625,6 +1634,11 @@ export async function runAgent(
       const approvalId = protocolPayloadString(payload, "approvalId");
       const callId = protocolPayloadString(payload, "callId");
       const toolName = protocolPayloadString(payload, "toolName");
+      if (toolName && autoApproves(toolName)) {
+        if (approvalId) suppressedApprovalIds.add(approvalId);
+        if (callId) suppressedEffectCallIds.add(callId);
+        return true;
+      }
       if (toolName && completedWorkflowToolRejection(toolName)) {
         if (approvalId) suppressedApprovalIds.add(approvalId);
         if (callId) suppressedEffectCallIds.add(callId);
@@ -1897,6 +1911,12 @@ export async function runAgent(
       let decision = decisions.get(request.id);
       if (decision !== undefined) decisions.delete(request.id);
       if (decision === undefined) decision = decisionByKey.get(duplicateKey);
+      if (decision === undefined && autoApproves(request.name)) {
+        decision = true;
+        agentLog(
+          `[approval] mode=${permissionMode} 自动批准 tool=${request.name}`,
+        );
+      }
       if (decision === undefined) {
         if (!unresolvedKeys.has(duplicateKey)) {
           unresolved.push(request);

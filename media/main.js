@@ -21,6 +21,7 @@ const setKeyEl = document.getElementById('set-key');
 const setModelEl = document.getElementById('set-model');
 const setProviderEl = document.getElementById('set-provider');
 const setFormatEl = document.getElementById('set-format');
+const setPermissionEl = document.getElementById('set-permission');
 const setSaveEl = document.getElementById('set-save');
 const setCancelEl = document.getElementById('set-cancel');
 
@@ -1941,6 +1942,7 @@ setSaveEl.addEventListener('click', () => {
     model: setModelEl.value,
     provider: setProviderEl.value,
     apiFormat: setFormatEl.value,
+    permissionMode: setPermissionEl.value,
   });
 });
 
@@ -2919,6 +2921,7 @@ window.addEventListener('message', (event) => {
       setModelEl.value = msg.model || '';
       setProviderEl.value = msg.provider || (msg.apiFormat === 'messages' ? 'anthropic' : 'openai');
       setFormatEl.value = msg.apiFormat || (msg.baseUrl ? 'chat_completions' : 'responses');
+      setPermissionEl.value = msg.permissionMode || 'ask';
       syncFormatOptions(setProviderEl.value);
       setKeyEl.value = '';
       setKeyEl.placeholder = hasSavedKey ? '已保存,留空则不修改' : '必填';
@@ -2934,7 +2937,16 @@ window.addEventListener('message', (event) => {
       settingsSavePending = false;
       closeSettings();
       updateModelChip(msg.model);
-      addNote('tool-note', msg.model ? `已保存模型配置:${msg.model}` : '已保存模型配置');
+      addNote(
+        'tool-note',
+        msg.permissionMode === 'full_access'
+          ? '已启用完全访问权限'
+          : msg.permissionMode === 'auto'
+            ? '已启用自动批准低风险权限'
+            : msg.model
+              ? `已保存模型配置:${msg.model}`
+              : '已保存模型配置',
+      );
       break;
   }
 });

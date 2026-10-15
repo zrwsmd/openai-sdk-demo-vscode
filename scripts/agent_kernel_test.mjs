@@ -494,7 +494,13 @@ const noApproval = async (name) => {
   throw new Error(`不应触发审批,却收到 ${name}`);
 };
 let runSequence = 0;
-async function runTestTurn(userText, decide, extraOptions = {}, runSession = session) {
+async function runTestTurn(
+  userText,
+  decide,
+  extraOptions = {},
+  runSession = session,
+  runConfig = cfg,
+) {
   const events = [];
   const runId = `kernel-${++runSequence}`;
   const factory = new AgentEventFactory(runId, runId);
@@ -504,14 +510,14 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     eventFactory: factory,
     onEvent: (event) => events.push(event),
   };
-  let result = await runAgent(cfg, runSession, userText, { ...extraOptions, protocol });
+  let result = await runAgent(runConfig, runSession, userText, { ...extraOptions, protocol });
   while (result.status === 'awaiting_approval') {
     if (!decide) throw new Error('测试遇到未处理的审批断点');
     const decisions = {};
     for (const approval of result.approvals || []) {
       decisions[approval.id] = await decide(approval.name, approval.args);
     }
-    result = await runAgent(cfg, runSession, userText, {
+    result = await runAgent(runConfig, runSession, userText, {
       ...extraOptions,
       initialState: result.state,
       decisions,
@@ -1387,6 +1393,39 @@ async function runTestTurn(userText, decide, extraOptions = {}, runSession = ses
     .filter((line) => line.includes('[req]'));
   if (!capabilityRequests.some((line) => line.includes('format=json_schema') && line.includes('choice=-'))) {
     throw new Error('场景5 首轮工具选择没有保持 auto');
+  }
+}
+
+// [5a] 完全访问:副作用工具自动批准,但仍走同一套工具与回执链路。
+{
+  const fullAccessSession = new JsonFileSession(
+    path.join(dir, 'full-access-session.json'),
+  );
+  const r = await runTestTurn(
+    '把上面的程序导出为文件',
+    undefined,
+    {},
+    fullAccessSession,
+    { ...cfg, permissionMode: 'full_access' },
+  );
+  const approvalRequests = r.events.filter(
+    (event) => event.type === 'approval.requested',
+  );
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log(
+    '[5a] 完全访问:审批请求 =',
+    approvalRequests.length,
+    '| 工具链 =',
+    toolCalls.join(','),
+  );
+  if (
+    r.status !== 'completed' ||
+    approvalRequests.length !== 0 ||
+    !toolCalls.includes('export_st_program')
+  ) {
+    throw new Error('完全访问没有自动批准副作用工具或工具链未完成');
   }
 }
 
