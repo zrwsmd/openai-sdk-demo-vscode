@@ -75,6 +75,7 @@ import {
 } from './toolRegistry';
 import type { CommandRunner } from '../tools/commandRunner';
 import type {
+  ClarificationAnswer,
   ClarificationRequest,
   ClarificationResponse,
   ClarificationService,
@@ -134,6 +135,10 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
 interface PendingClarification {
   runId: string;
   complete: (response: ClarificationResponse) => void;
+  sequenceId?: string;
+  stepId?: string;
+  stepIndex?: number;
+  stepCount?: number;
 }
 
 function isTeamPreparationSchemaError(error: unknown): boolean {
@@ -518,6 +523,83 @@ export class RunCoordinator {
     request: ClarificationRequest,
     signal?: AbortSignal,
   ): Promise<ClarificationResponse> {
+    const steps = [...(request.steps ?? [])];
+    if (steps.length === 0) {
+      return this.requestClarificationStep(request, signal);
+    }
+    const sequenceId = request.requestId?.trim() || randomUUID();
+    const answers: Record<string, ClarificationAnswer> = {};
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      const response = await this.requestClarificationStep(
+        {
+          ...request,
+          requestId: `${sequenceId}:step:${index + 1}`,
+          title: step.title ?? request.title,
+          question: step.question,
+          ...(step.details !== undefined
+            ? { details: step.details }
+            : request.details !== undefined
+              ? { details: request.details }
+              : {}),
+          ...(step.options !== undefined ? { options: step.options } : {}),
+          ...(step.allowCustom !== undefined
+            ? { allowCustom: step.allowCustom }
+            : {}),
+          ...(step.customPlaceholder !== undefined
+            ? { customPlaceholder: step.customPlaceholder }
+            : {}),
+          ...(step.required !== undefined ? { required: step.required } : {}),
+          steps: undefined,
+        },
+        signal,
+        {
+          sequenceId,
+          stepId: step.id,
+          stepIndex: index,
+          stepCount: steps.length,
+        },
+      );
+      if (response.cancelled) {
+        return {
+          requestId: sequenceId,
+          cancelled: true,
+          answers,
+          sequenceId,
+          stepId: step.id,
+          stepIndex: index,
+          stepCount: steps.length,
+          sequenceCompleted: true,
+        };
+      }
+      answers[step.id] = {
+        ...(response.selectedOptionId
+          ? { selectedOptionId: response.selectedOptionId }
+          : {}),
+        ...(response.customText ? { customText: response.customText } : {}),
+        ...(response.value !== undefined ? { value: response.value } : {}),
+      };
+    }
+    return {
+      requestId: sequenceId,
+      cancelled: false,
+      answers,
+      sequenceId,
+      stepCount: steps.length,
+      sequenceCompleted: true,
+    };
+  }
+
+  private async requestClarificationStep(
+    request: ClarificationRequest,
+    signal?: AbortSignal,
+    sequence?: {
+      sequenceId: string;
+      stepId: string;
+      stepIndex: number;
+      stepCount: number;
+    },
+  ): Promise<ClarificationResponse> {
     const active = this.protocolRun ?? await this.store.getActive();
     if (!active) {
       throw new Error('当前没有可绑定的运行，无法发起澄清。');
@@ -538,6 +620,14 @@ export class RunCoordinator {
       ...(request.customPlaceholder ? { customPlaceholder: request.customPlaceholder } : {}),
       required: request.required !== false,
       ...(request.metadata ? { metadata: request.metadata } : {}),
+      ...(sequence
+        ? {
+            sequenceId: sequence.sequenceId,
+            stepId: sequence.stepId,
+            stepIndex: sequence.stepIndex,
+            stepCount: sequence.stepCount,
+          }
+        : {}),
     };
     if (signal?.aborted) return { requestId, cancelled: true };
     this.writeLog(`[run:${active.id}] 等待用户澄清 ${requestId}: ${request.title}`);
@@ -547,7 +637,20 @@ export class RunCoordinator {
         signal?.removeEventListener('abort', onAbort);
         this.emitProtocol(this.protocolFactory!.next({
           type: 'clarification.resolved',
-          payload: response,
+          payload: {
+            ...response,
+            ...(sequence
+              ? {
+                  sequenceId: sequence.sequenceId,
+                  stepId: sequence.stepId,
+                  stepIndex: sequence.stepIndex,
+                  stepCount: sequence.stepCount,
+                  sequenceCompleted:
+                    response.cancelled ||
+                    sequence.stepIndex === sequence.stepCount - 1,
+                }
+              : { sequenceCompleted: true }),
+          },
         }));
         resolve(response);
       };
@@ -557,6 +660,7 @@ export class RunCoordinator {
       this.pendingClarifications.set(requestId, {
         runId: active.id,
         complete: finish,
+        ...(sequence ? sequence : {}),
       });
       signal?.addEventListener('abort', onAbort, { once: true });
       this.emitProtocol(this.protocolFactory!.next({

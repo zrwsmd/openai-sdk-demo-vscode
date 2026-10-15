@@ -2108,6 +2108,12 @@ function normalizedClarificationOptions(request) {
     : [];
 }
 
+function clarificationProgressLabel(request) {
+  const stepIndex = Number.isInteger(request?.stepIndex) ? request.stepIndex : 0;
+  const stepCount = Number.isInteger(request?.stepCount) ? request.stepCount : 1;
+  return stepCount > 1 ? `${stepIndex + 1}/${stepCount}` : '';
+}
+
 function addClarificationRequest(runId, request) {
   const requestId = request?.requestId;
   if (!requestId) return;
@@ -2122,10 +2128,18 @@ function addClarificationRequest(runId, request) {
   title.className = 'clarification-title';
   const titleText = document.createElement('span');
   titleText.textContent = request.title || '需要补充信息';
+  title.appendChild(titleText);
+  const progressText = clarificationProgressLabel(request);
+  if (progressText) {
+    const progress = document.createElement('span');
+    progress.className = 'clarification-progress';
+    progress.textContent = progressText;
+    title.appendChild(progress);
+  }
   const status = document.createElement('span');
   status.className = 'clarification-status';
   status.textContent = '等待回复';
-  title.append(titleText, status);
+  title.appendChild(status);
   card.appendChild(title);
 
   const question = document.createElement('div');
@@ -2243,6 +2257,13 @@ function showClarificationModal(runId, request) {
   const confirm = document.createElement('button');
   confirm.className = 'btn primary';
   confirm.textContent = '确认';
+  const progressText = clarificationProgressLabel(request);
+  if (progressText) {
+    const progress = document.createElement('span');
+    progress.className = 'clarification-progress';
+    progress.textContent = progressText;
+    actions.appendChild(progress);
+  }
   actions.append(cancel, confirm);
   panel.appendChild(actions);
   overlay.appendChild(panel);

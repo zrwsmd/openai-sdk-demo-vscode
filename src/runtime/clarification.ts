@@ -12,6 +12,17 @@ export interface ClarificationOption {
   value?: unknown;
 }
 
+export interface ClarificationStep {
+  id: string;
+  title?: string;
+  question: string;
+  details?: string;
+  options?: readonly ClarificationOption[];
+  allowCustom?: boolean;
+  customPlaceholder?: string;
+  required?: boolean;
+}
+
 export interface ClarificationRequest {
   requestId?: string;
   kind?: ClarificationKind;
@@ -23,6 +34,14 @@ export interface ClarificationRequest {
   customPlaceholder?: string;
   required?: boolean;
   metadata?: Record<string, unknown>;
+  /** 多步骤澄清；省略时保持原有单步骤行为。 */
+  steps?: readonly ClarificationStep[];
+}
+
+export interface ClarificationAnswer {
+  selectedOptionId?: string;
+  customText?: string;
+  value?: unknown;
 }
 
 export interface ClarificationResponse {
@@ -31,6 +50,13 @@ export interface ClarificationResponse {
   selectedOptionId?: string;
   customText?: string;
   value?: unknown;
+  /** 多步骤澄清的答案，key 是步骤 id。 */
+  answers?: Readonly<Record<string, ClarificationAnswer>>;
+  sequenceId?: string;
+  stepId?: string;
+  stepIndex?: number;
+  stepCount?: number;
+  sequenceCompleted?: boolean;
 }
 
 export interface ClarificationService {
@@ -44,6 +70,9 @@ export function summarizeClarificationResponse(
   response: ClarificationResponse,
 ): string {
   if (response.cancelled) return '用户取消了澄清。';
+  if (response.answers && Object.keys(response.answers).length > 0) {
+    return `用户已完成 ${Object.keys(response.answers).length} 项澄清。`;
+  }
   const parts: string[] = [];
   if (response.selectedOptionId) parts.push(`选项=${response.selectedOptionId}`);
   if (typeof response.customText === 'string' && response.customText.trim()) {

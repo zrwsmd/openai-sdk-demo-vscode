@@ -222,7 +222,9 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
   description:
     "在外部 devUni IDE 插件里创建一个真实工程(会在磁盘上生成工程目录、工作区文件、设备配置和默认 POU)。" +
     "当用户说新建工程、创建工程、建一个 PLC 工程、新建项目时使用。" +
-    "projectPath 必须是已经存在的父目录;机型/语言/类型不填会自动用 devuni_project_options 的第一个可选项。" +
+    "projectPath 必须是已经存在的父目录。" +
+    "语言、工程类型、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
+    "deviceModel 未明确时可以使用 devuni_project_options 的插件默认候选。" +
     "默认不会切换窗口,创建完当前会话继续;属于写操作,执行前需要用户在界面批准。",
   capability: {
     name: "devuni_create_project",

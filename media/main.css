@@ -968,6 +968,11 @@ body { display: flex; flex-direction: column; }
   font-size: 11px;
   white-space: nowrap;
 }
+.clarification-progress {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .clarification-status.cancelled { color: var(--vscode-errorForeground, #f66); }
 .clarification-question {
   color: var(--fg);
@@ -1097,6 +1102,10 @@ body { display: flex; flex-direction: column; }
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+.clarification-actions .clarification-progress {
+  margin-right: auto;
+  align-self: center;
 }
 .clarification-actions .btn {
   min-width: 78px;

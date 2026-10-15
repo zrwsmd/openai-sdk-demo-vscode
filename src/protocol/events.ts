@@ -267,6 +267,10 @@ const clarificationRequested = eventBase.extend({
     customPlaceholder: z.string().optional(),
     required: z.boolean().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
+    sequenceId: z.string().optional(),
+    stepId: z.string().optional(),
+    stepIndex: z.number().int().nonnegative().optional(),
+    stepCount: z.number().int().positive().optional(),
   }).passthrough(),
 });
 
@@ -279,6 +283,11 @@ const clarificationResolved = eventBase.extend({
     selectedOptionId: z.string().optional(),
     customText: z.string().optional(),
     value: z.unknown().optional(),
+    sequenceId: z.string().optional(),
+    stepId: z.string().optional(),
+    stepIndex: z.number().int().nonnegative().optional(),
+    stepCount: z.number().int().positive().optional(),
+    sequenceCompleted: z.boolean().optional(),
   }).passthrough(),
 });
 
