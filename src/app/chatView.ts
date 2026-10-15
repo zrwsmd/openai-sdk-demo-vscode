@@ -30,6 +30,7 @@ import {
   type AgentProvider,
 } from '../runtime/modelAdapter';
 import { isPermissionMode, type PermissionMode } from '../runtime/agentConfig';
+import { emptyMcpSettings, loadMcpSettings } from '../runtime/mcp/mcpConfig';
 import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
@@ -344,6 +345,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const permissionMode: PermissionMode = isPermissionMode(configuredPermissionMode)
       ? configuredPermissionMode
       : 'ask';
+    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    let mcp = emptyMcpSettings();
+    try {
+      mcp = await loadMcpSettings(workspaceRoots);
+    } catch {
+      mcp = emptyMcpSettings();
+    }
     const configuredProvider = cfg.get<unknown>('provider');
     const provider = requestedProvider
       ?? savedProfiles.activeProvider
@@ -439,6 +447,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         dryRun: cfg.get<boolean>('dryRun') ?? false,
       },
       runCommand,
+      mcp,
       modelContext,
       promptCache,
       jev,
@@ -551,6 +560,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       workspaceRoots,
       policyContext: live.policyContext,
       runCommand: live.runCommand,
+      mcp: live.mcp,
       modelContext: live.modelContext,
       promptCache: live.promptCache,
       orchestration: live.orchestration,

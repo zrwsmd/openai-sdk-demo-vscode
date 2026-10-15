@@ -24,6 +24,7 @@ import type {
 } from './workflow/types';
 import type { ModelContextProfile } from './contextManager';
 import { isPermissionMode, type PromptCacheSettings } from './agentConfig';
+import { isMcpSettings, type McpSettings } from './mcp/mcpConfig';
 
 export type DurableRunStatus =
   | 'running'
@@ -65,6 +66,8 @@ export interface DurableRunConfig {
   promptCache?: PromptCacheSettings;
   /** Unified tool approval behavior persisted for resume/retry. */
   permissionMode?: import('./agentConfig').PermissionMode;
+  /** Local MCP client settings persisted for resume/retry. Disabled by default. */
+  mcp?: McpSettings;
   orchestration?: IndustrialAgentMode;
   /** Host/plugin-owned JSON settings persisted with the run for resume/retry. */
   extensions?: Record<string, unknown>;
@@ -454,6 +457,7 @@ export class JsonRunStore implements RunStore {
       (run.config.runCommand !== undefined && !isRunCommandConfig(run.config.runCommand)) ||
       (run.config.modelContext !== undefined && !isModelContextProfile(run.config.modelContext)) ||
       (run.config.permissionMode !== undefined && !isPermissionMode(run.config.permissionMode)) ||
+      (run.config.mcp !== undefined && !isMcpSettings(run.config.mcp)) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       (run.config.extensions !== undefined && !isJsonObject(run.config.extensions)) ||
       (run.config.jev !== undefined && !isJevSettings(run.config.jev)) ||

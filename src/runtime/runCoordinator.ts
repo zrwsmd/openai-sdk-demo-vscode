@@ -75,6 +75,8 @@ import {
 } from './toolRegistry';
 import type { CommandRunner } from '../tools/commandRunner';
 import { LocalCommandRunner } from '../tools/localCommandRunner';
+import { mcpAllowlist, shouldExposeMcpTools } from './mcp/mcpConfig';
+import { openMcpSession, type McpSession } from './mcp/mcpSession';
 import type {
   ClarificationAnswer,
   ClarificationRequest,
@@ -453,6 +455,31 @@ export class RunCoordinator {
     return {
       request: (request, signal) => this.requestClarification(request, signal),
     };
+  }
+
+  private async openRunMcpSession(run: DurableRunRecord, apiKey: string): Promise<McpSession> {
+    const cfg = this.agentConfig(run.config, apiKey);
+    return openMcpSession({
+      settings: run.config.mcp,
+      reservedToolNames: [
+        ...this.toolRegistry.getToolCatalog().list().map((capability) => capability.name),
+        'deliver_artifact',
+        'report_plan_progress',
+      ],
+      policy: cfg.policy,
+      policyContext: {
+        workspaceRoot: cfg.workspaceRoot,
+        workspaceRoots: cfg.workspaceRoots,
+        ...cfg.policyContext,
+      },
+      executeEffect: (toolName, input, invoke) =>
+        this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
+      log: this.writeLog,
+    });
+  }
+
+  private mcpToolsFor(run: DurableRunRecord, session: McpSession): McpSession['tools'] {
+    return shouldExposeMcpTools(run) ? session.tools : [];
   }
 
   private compactContextForAgent(
@@ -1914,6 +1941,7 @@ export class RunCoordinator {
           this.writeLog(`[context] 执行前历史检查失败，继续使用当前历史: ${initialCompaction.error}`);
         }
       }
+      const mcpSession = await this.openRunMcpSession(run, apiKey);
       const executeSingleAgent = (
         agentOptions: Pick<
         AgentRunOptions,
@@ -1946,7 +1974,8 @@ export class RunCoordinator {
             deliveryContract: run.deliveryContract,
             workflowRegistry: this.workflowRegistry,
             toolRegistry: this.toolRegistry,
-            allowedToolNames: run.toolAllowlist,
+            extraBusinessTools: this.mcpToolsFor(run, mcpSession),
+            allowedToolNames: mcpAllowlist(run, mcpSession.tools.map((tool) => tool.name)),
             signal: controller.signal,
             protocol: {
               runId: run.id,
@@ -1997,8 +2026,9 @@ export class RunCoordinator {
         );
 
       let result: AgentRunResult;
+      try {
       if (run.teamTask?.executionGraph) {
-        result = await this.executeTeamGraph(run, apiKey, controller.signal, runGeneration, options);
+        result = await this.executeTeamGraph(run, apiKey, controller.signal, runGeneration, options, mcpSession);
       } else {
         try {
           result = await executeSingleAgent(options);
@@ -2024,6 +2054,9 @@ export class RunCoordinator {
           }));
           result = await executeSingleAgent({});
         }
+      }
+      } finally {
+        await mcpSession.close();
       }
 
       // clear() may have invalidated this run while the SDK was settling its
@@ -2295,6 +2328,7 @@ export class RunCoordinator {
     signal: AbortSignal,
     generation: number,
     options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'continueTurnBudget'>,
+    mcpSession?: McpSession,
   ): Promise<AgentRunResult> {
     if (!run.teamTask?.executionGraph) throw new Error('Team 执行图不存在');
     let graph = run.teamTask.executionGraph;
@@ -2449,10 +2483,11 @@ export class RunCoordinator {
               preserveToolHistory: options.preserveToolHistory,
               continueTurnBudget: options.continueTurnBudget,
               decisions: node.id === resumedNodeId ? resumedDecisions : undefined,
-              teamTask: run.teamTask,
-              fallbackMode: run.fallbackMode,
-              workflowRegistry: this.workflowRegistry,
+             teamTask: run.teamTask,
+             fallbackMode: run.fallbackMode,
+             workflowRegistry: this.workflowRegistry,
               toolRegistry: this.toolRegistry,
+              extraBusinessTools: mcpSession ? this.mcpToolsFor(run, mcpSession) : [],
               signal: nodeController.signal,
               protocol: {
                 runId: run.id,

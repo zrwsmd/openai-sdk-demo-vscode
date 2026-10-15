@@ -17,6 +17,7 @@ import {
   type SessionInputCallback,
   type StreamedRunResult,
   type AgentOutputType,
+  type Tool,
 } from "@openai/agents";
 import { toolResult, type ToolRisk } from "../tools/toolContract";
 import { DefaultActionPolicy } from "../policy/actionPolicy";
@@ -242,6 +243,11 @@ export interface AgentRunOptions {
   toolRegistry?: ToolRegistry;
   /** Optional tool allowlist selected by workflow fallback routing. */
   allowedToolNames?: readonly string[];
+  /**
+   * Extra business tools supplied for this run, such as locally connected MCP
+   * servers. They still pass through the same allowlist, approval and policy.
+   */
+  extraBusinessTools?: readonly Tool[];
   /** Triage mode selected for a workflow fallback; keeps prompt policy aligned with tools. */
   fallbackMode?: WorkflowFallbackMode;
   /**
@@ -554,14 +560,24 @@ export async function runAgent(
       }),
     );
   };
-  const registeredTools = toolRegistry.createTools({
+  const createdTools = toolRegistry.createTools({
     cfg,
     userText,
     workflowContract: options.deliveryContract,
     workflow: workflowRuntime,
     diagnosticReporter: reportDiagnostics,
     runtimeToolGuard,
-  }).filter((item) => {
+  });
+  const createdNames = new Set(
+    createdTools
+      .map((item) => toolNameOf(item))
+      .filter((name): name is string => typeof name === "string"),
+  );
+  const extraBusinessTools = (options.extraBusinessTools ?? []).filter((item) => {
+    const name = toolNameOf(item);
+    return typeof name === "string" && !createdNames.has(name);
+  });
+  const registeredTools = [...createdTools, ...extraBusinessTools].filter((item) => {
     if (!workflowBusinessToolPolicy || workflowBusinessToolPolicy.mode === "allow_all") {
       return true;
     }
