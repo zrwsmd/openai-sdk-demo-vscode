@@ -141,7 +141,7 @@ async function buildTool(port) {
   return tool;
 }
 
-// [3a] 只给必填参数:应当先问可选项,再带着默认值建工程,且默认不切窗口
+// [3a] 给出必填的机型但省略语言/类型:应先问可选项,再建工程,且默认不切窗口
 {
   const { port, calls } = makePort((command) => {
     if (command === 'bridgeProjectInitInfo') return initInfoReply;
@@ -153,7 +153,11 @@ async function buildTool(port) {
   const tool = await buildTool(port);
   const raw = await tool.invoke(
     {},
-    JSON.stringify({ projectName: 'demo', projectPath: 'E:\\' }),
+    JSON.stringify({
+      projectName: 'demo',
+      projectPath: 'E:\\',
+      deviceModel: 'SC5100',
+    }),
     {},
   );
   const result = JSON.parse(raw);
@@ -169,7 +173,7 @@ async function buildTool(port) {
   );
   const createArgs = calls[1].args;
   assert(calls[1].command === 'bridgeCreateProject', '第二次应调用建工程命令');
-  assert(createArgs.deviceModel === 'SC5100', `默认机型不对: ${JSON.stringify(createArgs)}`);
+  assert(createArgs.deviceModel === 'SC5100', `设备型号不对: ${JSON.stringify(createArgs)}`);
   assert(createArgs.lan === 'st', `language 应翻译成 lan: ${JSON.stringify(createArgs)}`);
   assert(createArgs.prjType === 'standard', `默认工程类型不对: ${JSON.stringify(createArgs)}`);
   assert(
@@ -210,7 +214,11 @@ async function buildTool(port) {
   const tool = await buildTool(port);
   const raw = await tool.invoke(
     {},
-    JSON.stringify({ projectName: 'demo', projectPath: 'E:\\' }),
+    JSON.stringify({
+      projectName: 'demo',
+      projectPath: 'E:\\',
+      deviceModel: 'SC5100',
+    }),
     {},
   );
   const result = JSON.parse(raw);
@@ -221,13 +229,17 @@ async function buildTool(port) {
   );
 }
 
-// [3d] 拿不到可选项且参数没给全:应当直接报错,不要瞎猜一个机型
+// [3d] 拿不到可选项且语言/类型没给全:应当直接报错,不要继续创建
 {
   const { port, calls } = makePort(() => ({ status: false }));
   const tool = await buildTool(port);
   const raw = await tool.invoke(
     {},
-    JSON.stringify({ projectName: 'demo', projectPath: 'E:\\' }),
+    JSON.stringify({
+      projectName: 'demo',
+      projectPath: 'E:\\',
+      deviceModel: 'SC5100',
+    }),
     {},
   );
   const result = JSON.parse(raw);

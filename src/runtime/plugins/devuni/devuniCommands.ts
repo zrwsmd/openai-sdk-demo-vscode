@@ -193,8 +193,7 @@ const createProjectParameters = z.object({
   deviceModel: z
     .string()
     .min(1)
-    .optional()
-    .describe("设备型号,取值来自 devuni_project_options。不填则用第一个可用型号。"),
+    .describe("设备型号,必填。取值必须来自 devuni_project_options,不可省略或默默采用第一个可用型号。"),
   language: z
     .string()
     .min(1)
@@ -223,8 +222,8 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     "在外部 devUni IDE 插件里创建一个真实工程(会在磁盘上生成工程目录、工作区文件、设备配置和默认 POU)。" +
     "当用户说新建工程、创建工程、建一个 PLC 工程、新建项目时使用。" +
     "projectPath 必须是已经存在的父目录。" +
-    "语言、工程类型、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
-    "deviceModel 未明确时可以使用 devuni_project_options 的插件默认候选。" +
+    "工程类型、工程语言、设备型号、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
+    "设备型号是必填项,必须从 devuni_project_options 的候选中选择,不能使用插件默认型号代替用户确认。" +
     "默认不会切换窗口,创建完当前会话继续;属于写操作,执行前需要用户在界面批准。",
   capability: {
     name: "devuni_create_project",
@@ -245,12 +244,17 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
   },
   parameters: createProjectParameters,
   buildArgs: async (input, port) => {
-    // 机型/语言/类型没给全时才去问对方要可选项,少一次跨插件往返。
+    // 语言/类型没给全时才去问对方要可选项;设备型号必须由模型先向用户确认。
+    if (!input.deviceModel) {
+      throw new Error(
+        "设备型号是创建工程的必填项,请先通过 request_clarification 让用户从 devuni_project_options 的候选中选择。",
+      );
+    }
     const needsDefaults =
-      !input.deviceModel || !input.language || !input.projectType;
+      !input.language || !input.projectType;
     const options = needsDefaults ? await loadProjectOptions(port) : undefined;
 
-    const deviceModel = input.deviceModel ?? options?.machineList[0]?.id;
+    const deviceModel = input.deviceModel;
     const language = input.language ?? options?.languages[0]?.id;
     const projectType = input.projectType ?? options?.projectType[0]?.id;
 
