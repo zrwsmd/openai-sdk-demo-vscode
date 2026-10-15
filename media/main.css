@@ -1411,39 +1411,6 @@ body.settings-open { overflow: hidden; }
 }
 .settings-form input:focus,
 .settings-form select:focus { border-color: var(--accent); }
-.settings-choice-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.settings-choice-list button {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--box) 72%, transparent);
-  color: var(--fg);
-  padding: 10px 12px;
-  cursor: pointer;
-  font: inherit;
-}
-.settings-choice-list button:hover,
-.settings-choice-list button.selected {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.settings-choice-list button strong {
-  font-size: 12px;
-  font-weight: 600;
-}
-.settings-choice-list button small {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
 .settings-tool-group {
   display: flex;
   align-items: center;

@@ -26,7 +26,6 @@ const setFormatEl = document.getElementById('set-format');
 const setSaveEl = document.getElementById('set-save');
 const setSaveStatusEl = document.getElementById('set-save-status');
 const settingsCloseEl = document.getElementById('settings-close');
-const settingsPermissionEl = document.getElementById('settings-permission');
 const settingsBuiltinToggleEl = document.getElementById('settings-builtin-toggle');
 const settingsBuiltinToolsEl = document.getElementById('settings-builtin-tools');
 const settingsBuiltinCountEl = document.getElementById('settings-builtin-count');
@@ -1899,7 +1898,7 @@ function showSaveStatus(text, kind) {
 }
 
 function showSettingsPage(page) {
-  const nextPage = page === 'system' || page === 'tools' ? page : 'model';
+  const nextPage = page === 'tools' ? page : 'model';
   settingsPage = nextPage;
   for (const item of settingsEl.querySelectorAll('[data-settings-page]')) {
     const match = item.dataset.settingsPage === nextPage;
@@ -1954,10 +1953,8 @@ function updatePermissionMode(mode) {
     : 'ask';
   modeChip.textContent = `Agent · ${permissionModeLabels[permissionMode]} ▾`;
   modeChip.setAttribute('aria-expanded', permissionMenuEl.classList.contains('hidden') ? 'false' : 'true');
-  for (const root of [permissionMenuEl, settingsPermissionEl]) {
-    for (const option of root.querySelectorAll('[data-permission-mode]')) {
-      option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);
-    }
+  for (const option of permissionMenuEl.querySelectorAll('[data-permission-mode]')) {
+    option.classList.toggle('selected', option.dataset.permissionMode === permissionMode);
   }
 }
 
@@ -1973,17 +1970,12 @@ modeChip.addEventListener('click', (event) => {
   event.stopPropagation();
   togglePermissionMenu();
 });
-function applyPermissionMode(nextMode, closeMenu) {
+permissionMenuEl.addEventListener('click', (event) => {
+  const nextMode = event.target.closest('[data-permission-mode]')?.dataset.permissionMode;
   if (!nextMode || !Object.prototype.hasOwnProperty.call(permissionModeLabels, nextMode)) return;
   updatePermissionMode(nextMode);
-  if (closeMenu) togglePermissionMenu(false);
+  togglePermissionMenu(false);
   vscode.postMessage({ type: 'setPermissionMode', permissionMode: nextMode });
-}
-permissionMenuEl.addEventListener('click', (event) => {
-  applyPermissionMode(event.target.closest('[data-permission-mode]')?.dataset.permissionMode, true);
-});
-settingsPermissionEl.addEventListener('click', (event) => {
-  applyPermissionMode(event.target.closest('[data-permission-mode]')?.dataset.permissionMode, false);
 });
 document.addEventListener('click', (event) => {
   if (!permissionMenuEl.contains(event.target) && event.target !== modeChip) {
@@ -3177,9 +3169,6 @@ window.addEventListener('message', (event) => {
       break;
     case 'permissionModeSaved':
       updatePermissionMode(msg.permissionMode || 'ask');
-      if (!settingsEl.classList.contains('hidden')) {
-        showSaveStatus(`已切换为${permissionModeLabels[permissionMode]}`, 'ok');
-      }
       break;
   }
 });

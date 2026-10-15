@@ -712,7 +712,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <nav class="settings-nav" aria-label="设置分类">
           <div class="settings-nav-group">基础</div>
           <button type="button" class="settings-nav-item active" data-settings-page="model">模型配置</button>
-          <button type="button" class="settings-nav-item" data-settings-page="system">系统配置</button>
           <div class="settings-nav-group">扩展</div>
           <button type="button" class="settings-nav-item" data-settings-page="tools">Tools &amp; MCP</button>
         </nav>
@@ -737,24 +736,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               <button id="set-save" class="btn primary">保存</button>
             </div>
             <div class="settings-tip">Key 保存在系统安全存储(不会进 git / 同步)。配置一次,重开 VSCode 和 F5 调试窗口都生效。</div>
-          </section>
-          <section id="settings-page-system" class="settings-page hidden" data-settings-page="system">
-            <div class="settings-page-title">系统配置</div>
-            <div class="settings-section-title">工具权限</div>
-            <div id="settings-permission" class="settings-choice-list">
-              <button type="button" data-permission-mode="ask">
-                <strong>请求批准</strong>
-                <small>编辑文件、使用互联网等操作前始终询问</small>
-              </button>
-              <button type="button" data-permission-mode="auto">
-                <strong>帮我批准</strong>
-                <small>仅对检测到的风险操作请求批准</small>
-              </button>
-              <button type="button" data-permission-mode="full_access">
-                <strong>完全访问权限</strong>
-                <small>不经用户批准访问互联网和电脑上的文件</small>
-              </button>
-            </div>
           </section>
           <section id="settings-page-tools" class="settings-page hidden" data-settings-page="tools">
             <div class="settings-page-title">Tools &amp; MCP</div>
