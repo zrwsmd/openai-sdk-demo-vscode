@@ -2035,7 +2035,6 @@ function showSettingsPage(page) {
       item.classList.toggle('hidden', !match);
     }
   }
-  if (nextPage === 'tools') vscode.postMessage({ type: 'probeMcpServers' });
 }
 
 function openSettings(page) {
@@ -2347,7 +2346,7 @@ function mcpDotTitle(server) {
   if (server.status === 'error') {
     return server.error ? `连接失败: ${server.error}` : '连接失败';
   }
-  return '正在连接';
+  return '未检查';
 }
 
 function applyMcpDot(row, server) {
@@ -2361,16 +2360,11 @@ function renderMcpServers(servers, configPath, writable) {
   settingsMcpPathEl.textContent = configPath ? `(${configPath})` : '';
   const next = Array.isArray(servers) ? servers : [];
   knownMcpServers = next.map((server) => {
-    const previous = knownMcpServers.find((item) => item.name === server.name);
     return {
       ...server,
-      status: server.enabled === false
-        ? 'disabled'
-        : previous?.status && previous.enabled !== false
-          ? previous.status
-          : 'connecting',
-      error: server.enabled === false ? undefined : previous?.error,
-      toolCount: server.enabled === false ? undefined : previous?.toolCount,
+      status: server.enabled === false ? 'disabled' : 'unknown',
+      error: undefined,
+      toolCount: undefined,
     };
   });
   mcpConfigWritable = writable !== false && !!configPath;
@@ -2427,13 +2421,6 @@ function renderMcpServers(servers, configPath, writable) {
     row.appendChild(toggle);
     row.appendChild(actions);
     settingsMcpListEl.appendChild(row);
-  }
-  if (
-    settingsPage === 'tools'
-    && !settingsEl.classList.contains('hidden')
-    && knownMcpServers.length
-  ) {
-    vscode.postMessage({ type: 'probeMcpServers' });
   }
 }
 

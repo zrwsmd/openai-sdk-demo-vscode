@@ -866,7 +866,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({
         type: 'mcpStatus',
         name: serverName,
-        status: enabled === true ? 'connecting' : 'disabled',
+        status: enabled === true ? 'unknown' : 'disabled',
       });
       await this.sendSettingsToWebview();
     } catch (error) {

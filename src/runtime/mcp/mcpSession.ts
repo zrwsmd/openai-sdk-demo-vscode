@@ -263,17 +263,19 @@ export function wrapMcpFunctionTool(
           risk: 'execute',
         });
       }
-      const run = () => originalInvoke(runContext, input, details);
-      try {
-        return await (options.executeEffect
-          ? options.executeEffect(fnTool.name, parsed, run)
-          : run());
-      } catch (error) {
-        // 连接复用之后进程可能已经死了。报错一次就让调用方丢掉这条连接，
-        // 否则后面每一轮都会打在一条死连接上。
-        options.onInvocationError?.(error);
-        throw error;
-      }
+      // 只把真正调用 MCP server 的失败视为连接故障。策略、效果台账或恢复
+      // 流程本身抛错时，server 可能完全健康，不应因此被连接池丢弃。
+      const run = async () => {
+        try {
+          return await originalInvoke(runContext, input, details);
+        } catch (error) {
+          options.onInvocationError?.(error);
+          throw error;
+        }
+      };
+      return await (options.executeEffect
+        ? options.executeEffect(fnTool.name, parsed, run)
+        : run());
     },
   };
 }

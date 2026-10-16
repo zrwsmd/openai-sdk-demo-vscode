@@ -59,6 +59,10 @@ export interface McpConnectionPoolOptions {
 
 interface PoolEntry {
   connection: McpServerConnection;
+  serverName: string;
+  scopeKey: string;
+  leases: number;
+  stale?: boolean;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -93,6 +97,8 @@ export class McpConnectionPool {
     const servers = options.settings?.enabled
       ? options.settings.servers.filter(isMcpServerEnabled)
       : [];
+    const scopeKey = mcpScopeKey(options);
+    this.retireMissingEntries(scopeKey, new Set(servers.map((server) => server.name)));
     if (!servers.length) return { tools: [], toolNames: [], release: () => undefined };
 
     // 跨服务器的重名占位。按配置顺序逐台过：前面接受的名字让后面避让，
@@ -102,7 +108,7 @@ export class McpConnectionPool {
     const connections: McpServerConnection[] = [];
     for (const server of servers) {
       const key = mcpServerKey(server, options);
-      const connection = await this.connectionFor(key, server, reserved);
+      const connection = await this.connectionFor(key, server, reserved, scopeKey);
       if (!connection) continue;
       keys.push(key);
       connections.push(connection);
@@ -111,30 +117,39 @@ export class McpConnectionPool {
     // 借出去的期间不回收：先把空闲计时清掉，归还时再重新起算。
     for (const key of keys) {
       const entry = this.entries.get(key);
-      if (entry) this.clearTimer(entry);
+      if (entry) {
+        this.clearTimer(entry);
+        entry.leases += 1;
+      }
     }
 
-    await this.rememberToolLists(options, connections.map((connection) => connection.toolList));
-    // 逐台包工具，这样某台调用出错时能精确丢掉那一台，不误伤别的服务器。
-    const tools = connections.flatMap((connection, index) => buildMcpTools([connection], {
-      policy: options.policy,
-      policyContext: options.policyContext,
-      executeEffect: options.executeEffect,
-      onInvocationError: (error) => {
-        this.log(
-          `[mcp] ${connection.serverName} 工具调用失败，丢弃这台连接以便下次重连: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        void this.drop(keys[index]);
-      },
-    }));
-    const toolNames = await this.toolNamesFor(options, connections);
-    return {
-      tools,
-      toolNames,
-      release: () => {
-        for (const key of keys) this.touch(key);
-      },
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      for (const key of keys) this.release(key);
     };
+    try {
+      await this.rememberToolLists(options, connections.map((connection) => connection.toolList));
+      // 逐台包工具，这样某台调用出错时能精确丢掉那一台，不误伤别的服务器。
+      const tools = connections.flatMap((connection, index) => buildMcpTools([connection], {
+        policy: options.policy,
+        policyContext: options.policyContext,
+        executeEffect: options.executeEffect,
+        onInvocationError: (error) => {
+          this.log(
+            `[mcp] ${connection.serverName} 工具调用失败，丢弃这台连接以便下次重连: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          void this.drop(keys[index]);
+        },
+      }));
+      const toolNames = await this.toolNamesFor(options, connections);
+      return { tools, toolNames, release };
+    } catch (error) {
+      // 借连接后任何一步失败都必须归还，否则清掉的 idle timer 永远不会恢复。
+      release();
+      throw error;
+    }
   }
 
   async dispose(): Promise<void> {
@@ -188,7 +203,11 @@ export class McpConnectionPool {
     key: string,
     server: McpServerConfig,
     reserved: Set<string>,
+    scopeKey: string,
   ): Promise<McpServerConnection | undefined> {
+    // 同名服务换了配置时，旧连接不能一直留到 idle timeout。正在使用的旧租约
+    // 先标为过期，等归还后立即关闭；空闲的直接回收。
+    this.retireObsoleteEntries(key, server.name, scopeKey);
     const existing = this.entries.get(key);
     if (existing) {
       // 复用的那台：它上次占住的名字要重新占位，后面的服务器才不会撞名。
@@ -207,7 +226,12 @@ export class McpConnectionPool {
           void connection.server.close();
           return connection;
         }
-        this.entries.set(key, { connection });
+        this.entries.set(key, {
+          connection,
+          serverName: server.name,
+          scopeKey,
+          leases: 0,
+        });
         return connection;
       })
       .catch((error: unknown) => {
@@ -234,6 +258,39 @@ export class McpConnectionPool {
       void this.drop(key);
     }, this.idleTimeoutMs);
     entry.timer.unref?.();
+  }
+
+  private release(key: string): void {
+    const entry = this.entries.get(key);
+    if (!entry) return;
+    entry.leases = Math.max(0, entry.leases - 1);
+    if (entry.stale && entry.leases === 0) {
+      void this.drop(key);
+      return;
+    }
+    this.touch(key);
+  }
+
+  private retireObsoleteEntries(activeKey: string, serverName: string, scopeKey: string): void {
+    for (const [key, entry] of this.entries) {
+      if (
+        key === activeKey
+        || entry.serverName !== serverName
+        || entry.scopeKey !== scopeKey
+      ) continue;
+      entry.stale = true;
+      this.clearTimer(entry);
+      if (entry.leases === 0) void this.drop(key);
+    }
+  }
+
+  private retireMissingEntries(scopeKey: string, activeNames: ReadonlySet<string>): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.scopeKey !== scopeKey || activeNames.has(entry.serverName)) continue;
+      entry.stale = true;
+      this.clearTimer(entry);
+      if (entry.leases === 0) void this.drop(key);
+    }
   }
 
   private clearTimer(entry: PoolEntry): void {
@@ -267,7 +324,14 @@ function mcpServerKey(
 ): string {
   return hashContent(JSON.stringify({
     fingerprint: mcpServerFingerprint(server),
+    timeoutMs: server.timeoutMs ?? null,
     roots: options.policyContext.workspaceRoots ?? [options.policyContext.workspaceRoot],
     reserved: options.reservedToolNames ?? [],
   }));
+}
+
+function mcpScopeKey(options: AcquireMcpSessionOptions): string {
+  return hashContent(JSON.stringify(
+    options.policyContext.workspaceRoots ?? [options.policyContext.workspaceRoot],
+  ));
 }

@@ -129,6 +129,31 @@ const allowed = wrapMcpFunctionTool(
 assert.equal(await allowed.invoke({}, '{}'), 'ok');
 assert.equal(invoked, true);
 
+// effect/recovery 自己失败时不代表 MCP server 断了，不能触发连接丢弃回调。
+let effectFailureReported = 0;
+const effectFailure = wrapMcpFunctionTool(
+  {
+    type: 'function',
+    name: 'mcp_files_list',
+    description: 'list files',
+    parameters: { type: 'object', properties: {} },
+    strict: false,
+    needsApproval: async () => false,
+    invoke: async () => 'should not run',
+  },
+  {
+    serverName: 'files',
+    policy: new DefaultToolPolicy(),
+    policyContext: { workspaceRoot: '.' },
+    executeEffect: async () => {
+      throw new Error('effect bookkeeping failed');
+    },
+    onInvocationError: () => { effectFailureReported += 1; },
+  },
+);
+await assert.rejects(effectFailure.invoke({}, '{}'), /effect bookkeeping failed/);
+assert.equal(effectFailureReported, 0);
+
 const idle = await openMcpSession({
   settings: { enabled: false, servers: [] },
   policyContext: { workspaceRoot: '.' },
@@ -352,6 +377,49 @@ const waitForExit = async (pids) => {
   }
   return false;
 };
+
+// 改配置（这里只改 timeoutMs）会立即淘汰旧连接，不等十分钟 idle timeout。
+const retireServer = makeServer('retire', 'e');
+const retirePool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+const oldLease = await retirePool.acquire({
+  settings: { enabled: true, servers: [retireServer] },
+  policyContext: { workspaceRoot: stubDir },
+});
+oldLease.release();
+const oldPids = [];
+try {
+  const raw = await fs.readFile(markerOf('e'), 'utf8');
+  oldPids.push(...raw.split('\n')
+    .filter((line) => line.startsWith('init '))
+    .map((line) => Number(/pid=(\d+)/.exec(line)?.[1] ?? 0))
+    .filter(Boolean));
+} catch {
+  // 下面的 acquire 会给出明确失败。
+}
+const changedLease = await retirePool.acquire({
+  settings: { enabled: true, servers: [{ ...retireServer, timeoutMs: 12_345 }] },
+  policyContext: { workspaceRoot: stubDir },
+});
+assert.equal(await handshakesOf('e'), 2);
+assert.equal(await waitForExit(oldPids), true);
+const changedPids = [];
+try {
+  const raw = await fs.readFile(markerOf('e'), 'utf8');
+  changedPids.push(...raw.split('\n')
+    .filter((line) => line.startsWith('init '))
+    .map((line) => Number(/pid=(\d+)/.exec(line)?.[1] ?? 0))
+    .filter(Boolean));
+} catch {
+  // 下面的 acquire 会给出明确失败。
+}
+changedLease.release();
+const disabledLease = await retirePool.acquire({
+  settings: { enabled: false, servers: [] },
+  policyContext: { workspaceRoot: stubDir },
+});
+disabledLease.release();
+assert.equal(await waitForExit(changedPids), true);
+await retirePool.dispose();
 
 const connectedPids = await initPids();
 assert.equal(connectedPids.length, 4);
