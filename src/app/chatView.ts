@@ -45,6 +45,7 @@ import {
   type McpSettings,
 } from '../runtime/mcp/mcpConfig';
 import { probeMcpServer } from '../runtime/mcp/mcpSession';
+import { McpConnectionPool } from '../runtime/mcp/mcpConnectionPool';
 import {
   API_SETTINGS_STATE_KEY,
   LEGACY_API_KEY_SECRET_KEY,
@@ -105,6 +106,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly decisionService: AgentDecisionService;
   private readonly workflowRegistry = createAppWorkflowRegistry();
   private readonly toolRegistry = createAppToolRegistry();
+  /**
+   * MCP 连接池归窗口，不归会话。
+   *
+   * 会话切换只是换一个运行对象，池子留在这儿，连接就跟着留下来——不然每切一次
+   * 都要把所有服务器重新拉起来一遍（Java 那种冷启动接近三秒）。收尾挂到
+   * context.subscriptions 上，扩展停用时自动关。
+   */
+  private readonly mcpPool: McpConnectionPool;
   private mcpProbeGeneration = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -116,6 +125,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
+    this.mcpPool = new McpConnectionPool({ log: (line) => this.log.appendLine(line) });
+    this.context.subscriptions.push({
+      dispose: () => void this.mcpPool.dispose(),
+    });
     this.decisionService = new AgentDecisionService((line) => this.log.appendLine(line));
     this.context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (
@@ -222,9 +235,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private activateRuntime(sessionId: string): void {
-    // 换运行对象之前，先把上一条会话留下的 MCP 连接收掉。池子挂在运行对象上，
-    // 不主动关就只能等它闲够十分钟自己回收，来回切会话会叠出好几份服务器进程。
-    void this.coordinator?.releaseMcpConnections();
     const paths = this.sessionCatalog.pathsFor(sessionId);
     const session = new JsonFileSession(paths.sessionFile);
     const runStore = new JsonRunStore(paths.runStoreFile);
@@ -240,6 +250,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       decisionService: this.decisionService,
       workflowRegistry: this.workflowRegistry,
       toolRegistry: this.toolRegistry,
+      mcpPool: this.mcpPool,
       planTask,
       classifyWorkflowDecision,
       classifyDeliveryContract,

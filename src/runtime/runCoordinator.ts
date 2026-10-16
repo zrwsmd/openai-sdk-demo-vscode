@@ -293,6 +293,11 @@ export interface RunCoordinatorDependencies {
   workflowRegistry?: WorkflowRegistry;
   /** Tool providers supplied by the host composition root. */
   toolRegistry?: ToolRegistry;
+  /**
+   * 窗口级的 MCP 连接池。宿主传进来，连接就能跨会话复用（换会话不再冷启动一次）；
+   * 不传就自己新建一个，只在本运行对象活着的时候有效——测试和嵌入方走这条路。
+   */
+  mcpPool?: McpConnectionPool;
   /** Optional Team collaborators. Omit all four to retain the pre-V3 runtime path. */
   routeTeamTask?: typeof routeTeamTask;
   planTeamTask?: typeof planTeamTask;
@@ -418,10 +423,14 @@ export class RunCoordinator {
   private protocolRun?: DurableRunRecord;
   private transitionController?: AbortController;
   private readonly pendingClarifications = new Map<string, PendingClarification>();
-  /** MCP 连接跨轮复用；空闲超时后自动回收，避免每轮重付一次冷启动。 */
-  private readonly mcpPool = new McpConnectionPool({
-    log: (line) => this.writeLog(line),
-  });
+  /**
+   * MCP 连接跨轮复用；空闲超时后自动回收，避免每轮重付一次冷启动。
+   *
+   * 池子属于"窗口"而不是"这条会话"：它由宿主建好传进来，于是换会话、新建会话、
+   * 删会话都只是换了个运行对象，连接照旧热着。谁建的谁负责收——本类**不**关它，
+   * 因为 dispose() 是单向开关，关掉之后这个池子对所有人都废了。
+   */
+  private readonly mcpPool: McpConnectionPool;
 
   constructor(dependencies: RunCoordinatorDependencies) {
     this.session = dependencies.session;
@@ -442,6 +451,9 @@ export class RunCoordinator {
     this.decisionService = dependencies.decisionService ?? new AgentDecisionService(this.writeLog);
     this.workflowRegistry = dependencies.workflowRegistry ?? getDefaultWorkflowRegistry();
     this.toolRegistry = dependencies.toolRegistry ?? getDefaultToolRegistry();
+    this.mcpPool = dependencies.mcpPool ?? new McpConnectionPool({
+      log: (line) => this.writeLog(line),
+    });
     this.workflowDecisionService = new WorkflowDecisionService(
       this.writeLog,
       this.decisionService,
@@ -489,21 +501,6 @@ export class RunCoordinator {
 
   private mcpToolsFor(run: DurableRunRecord, session: McpSessionLease): McpSessionLease['tools'] {
     return shouldExposeMcpTools(run) ? session.tools : [];
-  }
-
-  /**
-   * 收掉这条会话留下的 MCP 连接。
-   *
-   * 连接池是挂在运行对象上的，而运行对象一条会话一个。换会话时旧对象被丢掉，
-   * 如果没人主动关，它的连接就只能等闲够十分钟自己回收——来回切几次会话，
-   * 会同时挂着好几份服务器进程。所以换之前先来这里收一次。
-   *
-   * 有轮次在跑时不关：那一轮手上的工具正指着这条连接，关掉会把调用打断。
-   * 那种情况仍旧交给空闲回收，最多多挂十分钟。
-   */
-  async releaseMcpConnections(): Promise<void> {
-    if (this.busy || this.transitioning) return;
-    await this.mcpPool.dispose();
   }
 
   private compactContextForAgent(

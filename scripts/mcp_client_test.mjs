@@ -26,6 +26,9 @@ import {
   mcpToolCachePath,
   parseMcpToolCache,
   readMcpToolCache,
+  JsonFileSession,
+  JsonRunStore,
+  RunCoordinator,
 } from './agent.testbundle.mjs';
 
 assert.deepEqual(parseMcpSettings(undefined), { enabled: false, servers: [] });
@@ -339,5 +342,66 @@ assert.equal(connectedPids.length, 4);
 await pool.dispose();
 assert.equal(await handshakesOf('a') + await handshakesOf('b'), 4);
 assert.equal(await waitForExit(connectedPids), true);
+
+// 池子归窗口，不归会话：换会话只是换一个运行对象，宿主把同一个池子交下去，连接留着。
+//
+// 这里跑两轮，分别落在两个不同的协调器上（也就是两条会话）。共用池子的话只该握手
+// 一次；老做法是每个协调器自带一个池子，第二轮会再连一遍——所以"只握手一次"就是
+// 这条改动的判据。顺带钉住"协调器不会把别人给的池子关掉"：dispose() 是单向开关，
+// 一旦被某条会话顺手关掉，整个窗口的池子对所有人都废了，之后每轮都重连。
+{
+  const sharedServer = makeServer('shared', 'c');
+  const sharedSettings = { enabled: true, servers: [sharedServer] };
+  const sharedPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-sessions-'));
+  const runConfig = {
+    baseUrl: 'http://mock/v1',
+    model: 'mock',
+    exportDir: '',
+    workspaceRoot: stubDir,
+    jev: { enabled: false },
+    mcp: sharedSettings,
+  };
+  const seenByAgent = [];
+  for (const name of ['session-a', 'session-b']) {
+    const store = new JsonRunStore(path.join(sessionDir, `${name}-runs.json`));
+    const coordinator = new RunCoordinator({
+      session: new JsonFileSession(path.join(sessionDir, `${name}.json`)),
+      store,
+      emit: () => undefined,
+      mcpPool: sharedPool,
+      executeAgent: async (_cfg, _session, _userText, options) => {
+        seenByAgent.push({
+          tools: (options.extraBusinessTools ?? []).map((tool) => tool.name),
+          allowed: options.allowedToolNames ?? [],
+        });
+        return {
+          status: 'completed',
+          output: 'ok',
+          usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
+          result: {
+            protocolVersion: 1,
+            status: 'completed',
+            output: { message: 'ok', diagnostics: [], artifacts: [], data: null },
+            diagnostics: [],
+            artifacts: [],
+            usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
+          },
+        };
+      },
+    });
+    await coordinator.initialize();
+    await coordinator.start('你好', runConfig, 'key');
+  }
+  // 两轮都真把 MCP 工具发给了模型，说明借的就是给下去那个池子。
+  assert.equal(seenByAgent.length, 2);
+  for (const seen of seenByAgent) {
+    assert.ok(seen.tools.includes('mcp_shared_stub_ping'));
+    assert.ok(seen.allowed.includes('mcp_shared_stub_ping'));
+  }
+  // 换了会话、换了运行对象，连接还是原来那条：全程只握了一次手。
+  assert.equal(await handshakesOf('c'), 1);
+  await sharedPool.dispose();
+}
 
 console.log('mcp client tests passed');
