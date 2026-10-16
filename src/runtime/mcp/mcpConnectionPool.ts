@@ -32,6 +32,18 @@ export interface McpSessionLease {
   release(): void;
 }
 
+/**
+ * 空租约：这一轮压根不需要 MCP 工具时用它。
+ *
+ * 形状跟真租约一样（工具空、名字空、归还是空操作），调用方不用到处判空，
+ * 也就不会因为"这次没连"而在别处多出一个分支。
+ */
+export const EMPTY_MCP_SESSION_LEASE: McpSessionLease = {
+  tools: [],
+  toolNames: [],
+  release: () => undefined,
+};
+
 export interface AcquireMcpSessionOptions {
   settings: McpSettings | undefined;
   reservedToolNames?: readonly string[];

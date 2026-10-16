@@ -229,6 +229,22 @@ const handshakesOf = async (tag) => {
   }
 };
 
+// 跑一轮用的 agent 桩。注意 output 必须是字符串、对象放进 result：落盘校验
+// 要求 run.output 是字符串，写反了会抛 "invalid last run record"。
+const completedAgentResult = () => ({
+  status: 'completed',
+  output: 'ok',
+  usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
+  result: {
+    protocolVersion: 1,
+    status: 'completed',
+    output: { message: 'ok', diagnostics: [], artifacts: [], data: null },
+    diagnostics: [],
+    artifacts: [],
+    usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
+  },
+});
+
 const pool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
 const noServers = await pool.acquire({
   settings: { enabled: false, servers: [] },
@@ -375,19 +391,7 @@ assert.equal(await waitForExit(connectedPids), true);
           tools: (options.extraBusinessTools ?? []).map((tool) => tool.name),
           allowed: options.allowedToolNames ?? [],
         });
-        return {
-          status: 'completed',
-          output: 'ok',
-          usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
-          result: {
-            protocolVersion: 1,
-            status: 'completed',
-            output: { message: 'ok', diagnostics: [], artifacts: [], data: null },
-            diagnostics: [],
-            artifacts: [],
-            usage: { inputTokens: 1, outputTokens: 2, requests: 1 },
-          },
-        };
+        return completedAgentResult();
       },
     });
     await coordinator.initialize();
@@ -402,6 +406,43 @@ assert.equal(await waitForExit(connectedPids), true);
   // 换了会话、换了运行对象，连接还是原来那条：全程只握了一次手。
   assert.equal(await handshakesOf('c'), 1);
   await sharedPool.dispose();
+}
+
+// 按需连接：档位和工作流定下来之后才决定连不连。
+// 走工作流那几档时 MCP 工具本来就到不了模型手里，不该为它们把服务器拉起来。
+{
+  const lazyServer = makeServer('lazy', 'd');
+  const lazyPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const lazyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-lazy-'));
+  const seenByAgent = [];
+  const coordinator = new RunCoordinator({
+    session: new JsonFileSession(path.join(lazyDir, 'session.json')),
+    store: new JsonRunStore(path.join(lazyDir, 'runs.json')),
+    emit: () => undefined,
+    mcpPool: lazyPool,
+    executeAgent: async (_cfg, _session, _userText, options) => {
+      seenByAgent.push({
+        workflowId: options.workflowId,
+        tools: (options.extraBusinessTools ?? []).map((tool) => tool.name),
+      });
+      return completedAgentResult();
+    },
+  });
+  await coordinator.initialize();
+  // 这句话靠本地正则就能归到 ST 交付，不需要模型参与，所以结果稳定。
+  await coordinator.start('生成一个 ST 程序', {
+    baseUrl: 'http://mock/v1',
+    model: 'mock',
+    exportDir: '',
+    workspaceRoot: stubDir,
+    jev: { enabled: false },
+    mcp: { enabled: true, servers: [lazyServer] },
+  }, 'key');
+  // 先确认这一轮真归了工作流，否则下面的"没连"说明不了问题。
+  assert.deepEqual(seenByAgent.map((seen) => seen.workflowId), ['st_workspace_delivery']);
+  assert.deepEqual(seenByAgent[0].tools, []);
+  assert.equal(await handshakesOf('d'), 0);
+  await lazyPool.dispose();
 }
 
 console.log('mcp client tests passed');

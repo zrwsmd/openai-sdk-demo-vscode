@@ -76,7 +76,11 @@ import {
 import type { CommandRunner } from '../tools/commandRunner';
 import { LocalCommandRunner } from '../tools/localCommandRunner';
 import { mcpAllowlist, shouldExposeMcpTools } from './mcp/mcpConfig';
-import { McpConnectionPool, type McpSessionLease } from './mcp/mcpConnectionPool';
+import {
+  EMPTY_MCP_SESSION_LEASE,
+  McpConnectionPool,
+  type McpSessionLease,
+} from './mcp/mcpConnectionPool';
 import type {
   ClarificationAnswer,
   ClarificationRequest,
@@ -1962,7 +1966,22 @@ export class RunCoordinator {
           this.writeLog(`[context] 执行前历史检查失败，继续使用当前历史: ${initialCompaction.error}`);
         }
       }
-      const mcpSession = await this.acquireRunMcpSession(run, apiKey);
+      // 按需连接：只有"这一轮真能把 MCP 工具递给模型"时才去借连接。
+      //
+      // 判据跟 mcpToolsFor/mcpAllowlist 用的是同一个 shouldExposeMcpTools——工作流那几档
+      // （ST 交付、建工程）以及需要澄清/高风险拦截，MCP 工具本来就到不了模型手里，
+      // 为它们把配置里所有服务器拉起来纯属白付：一台 Java 服务器冷启动接近三秒。
+      // 档位和工作流到这里已经定死了（下面几行就在用），所以判得准。
+      // 将来若要改"让 MCP 一直可见"，这三处必须一起改。
+      const mcpNeeded = shouldExposeMcpTools(run);
+      if (!mcpNeeded) {
+        this.writeLog(
+          `[mcp] 本轮(${run.workflowId ?? run.fallbackMode ?? '未定档'})用不到 MCP 工具，跳过连接`,
+        );
+      }
+      const mcpSession = mcpNeeded
+        ? await this.acquireRunMcpSession(run, apiKey)
+        : EMPTY_MCP_SESSION_LEASE;
       const executeSingleAgent = (
         agentOptions: Pick<
         AgentRunOptions,
