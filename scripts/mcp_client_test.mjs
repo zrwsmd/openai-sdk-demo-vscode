@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DefaultToolPolicy,
+  McpConnectionPool,
   loadMcpSettings,
   mcpAllowlist,
   mcpFunctionToolName,
@@ -189,5 +191,58 @@ const reread = await readMcpConfigFile([ws2]);
 assert.equal(reread.exists, true);
 assert.equal(reread.settings.servers[2]?.name, 'docs');
 assert.equal(reread.settings.servers[0]?.args?.[2], '${workspaceFolder}');
+
+// 连接复用：同一份配置连续借两次，服务器进程只应该被拉起一次。
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-stub-'));
+const markerPath = path.join(stubDir, 'starts.log');
+const stubServer = {
+  name: 'stub',
+  transport: 'stdio',
+  command: process.execPath,
+  args: [path.join(scriptDir, 'mcp_stub_server.mjs'), markerPath],
+};
+const stubSettings = { enabled: true, servers: [stubServer] };
+// 数"握手"而不是数"进程"：SDK 每次 connect 会多拉一个随即被丢弃的进程，
+// 那是它自己的行为，跟连接是否被复用无关。
+const handshakeCount = async () => {
+  try {
+    const raw = await fs.readFile(markerPath, 'utf8');
+    return raw.split('\n').filter((line) => line.startsWith('init ')).length;
+  } catch {
+    return 0;
+  }
+};
+
+const pool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+const noServers = await pool.acquire({
+  settings: { enabled: false, servers: [] },
+  policyContext: { workspaceRoot: '.' },
+});
+assert.equal(noServers.tools.length, 0);
+noServers.release();
+
+const leaseA = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: '.' } });
+assert.deepEqual(leaseA.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+leaseA.release();
+assert.equal(await handshakeCount(), 1);
+
+const leaseB = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: '.' } });
+assert.deepEqual(leaseB.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+// 复用同一条连接：工具照样能调通，进程没有被重新拉起。
+assert.match(JSON.stringify(await leaseB.tools[0].invoke({}, '{}')), /pong/);
+leaseB.release();
+assert.equal(await handshakeCount(), 1);
+
+const leaseC = await pool.acquire({
+  settings: { enabled: true, servers: [{ ...stubServer, args: [...stubServer.args, '--changed'] }] },
+  policyContext: { workspaceRoot: '.' },
+});
+assert.equal(leaseC.tools.length, 1);
+leaseC.release();
+assert.equal(await handshakeCount(), 2);
+
+await pool.dispose();
+assert.equal(await handshakeCount(), 2);
 
 console.log('mcp client tests passed');

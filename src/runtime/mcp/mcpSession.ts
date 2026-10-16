@@ -43,16 +43,45 @@ export interface OpenMcpSessionOptions {
   log?: (line: string) => void;
 }
 
-export async function openMcpSession(options: OpenMcpSessionOptions): Promise<McpSession> {
+/** `listTools()` 返回的单条工具定义。 */
+type McpToolDefinition = Awaited<ReturnType<MCPServer['listTools']>>[number];
+
+export interface McpConnectedTool {
+  /** 暴露给模型的工具名，形如 mcp_<server>_<tool>。 */
+  readonly name: string;
+  readonly serverName: string;
+  readonly server: MCPServer;
+  readonly definition: McpToolDefinition;
+}
+
+export interface McpConnection {
+  readonly tools: readonly McpConnectedTool[];
+  close(): Promise<void>;
+}
+
+export interface OpenMcpConnectionOptions {
+  settings: McpSettings | undefined;
+  reservedToolNames?: readonly string[];
+  log?: (line: string) => void;
+}
+
+/**
+ * 建立连接并取回工具清单，不包装工具。
+ *
+ * 与工具包装拆开，是为了让连接能跨轮复用：连接和清单与轮次无关，
+ * 而工具对象要绑定本轮的策略上下文、审批和效果台账，必须每轮重造。
+ */
+export async function openMcpConnection(
+  options: OpenMcpConnectionOptions,
+): Promise<McpConnection> {
   const settings = options.settings;
   if (!settings?.enabled || settings.servers.length === 0) {
     return { tools: [], close: async () => undefined };
   }
   const log = options.log ?? (() => undefined);
-  const policy = options.policy ?? new DefaultToolPolicy();
   const reserved = new Set(options.reservedToolNames ?? []);
   const servers: MCPServer[] = [];
-  const tools: FunctionTool<any, any, any>[] = [];
+  const tools: McpConnectedTool[] = [];
 
   for (const spec of settings.servers.filter(isMcpServerEnabled)) {
     try {
@@ -67,13 +96,7 @@ export async function openMcpSession(options: OpenMcpSessionOptions): Promise<Mc
           continue;
         }
         reserved.add(name);
-        const fnTool = mcpToFunctionTool(mcpTool, server, false, { toolNameOverride: name });
-        tools.push(wrapMcpFunctionTool(fnTool, {
-          serverName: spec.name,
-          policy,
-          policyContext: options.policyContext,
-          executeEffect: options.executeEffect,
-        }));
+        tools.push({ name, serverName: spec.name, server, definition: mcpTool });
       }
       log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
     } catch (error) {
@@ -92,6 +115,42 @@ export async function openMcpSession(options: OpenMcpSessionOptions): Promise<Mc
         }
       }));
     },
+  };
+}
+
+export interface BuildMcpToolsOptions {
+  policy?: ToolPolicy;
+  policyContext: ToolPolicyContext;
+  executeEffect?: AgentConfig['executeEffect'];
+  /** 调用抛错时回调，供连接池判定这条连接已不可用。 */
+  onInvocationError?: (error: unknown) => void;
+}
+
+export function buildMcpTools(
+  connection: McpConnection,
+  options: BuildMcpToolsOptions,
+): FunctionTool<any, any, any>[] {
+  const policy = options.policy ?? new DefaultToolPolicy();
+  return connection.tools.map((entry) => {
+    const fnTool = mcpToFunctionTool(entry.definition, entry.server, false, {
+      toolNameOverride: entry.name,
+    });
+    return wrapMcpFunctionTool(fnTool, {
+      serverName: entry.serverName,
+      policy,
+      policyContext: options.policyContext,
+      executeEffect: options.executeEffect,
+      onInvocationError: options.onInvocationError,
+    });
+  });
+}
+
+/** 单轮用法：连上、包装、用完关闭。跨轮复用走 openMcpConnection + buildMcpTools。 */
+export async function openMcpSession(options: OpenMcpSessionOptions): Promise<McpSession> {
+  const connection = await openMcpConnection(options);
+  return {
+    tools: buildMcpTools(connection, options),
+    close: () => connection.close(),
   };
 }
 
@@ -149,6 +208,7 @@ export function wrapMcpFunctionTool(
     policy: ToolPolicy;
     policyContext: ToolPolicyContext;
     executeEffect?: AgentConfig['executeEffect'];
+    onInvocationError?: (error: unknown) => void;
   },
 ): FunctionTool<any, any, any> {
   const originalInvoke = fnTool.invoke.bind(fnTool);
@@ -176,9 +236,16 @@ export function wrapMcpFunctionTool(
         });
       }
       const run = () => originalInvoke(runContext, input, details);
-      return options.executeEffect
-        ? options.executeEffect(fnTool.name, parsed, run)
-        : run();
+      try {
+        return await (options.executeEffect
+          ? options.executeEffect(fnTool.name, parsed, run)
+          : run());
+      } catch (error) {
+        // 连接复用之后进程可能已经死了。报错一次就让调用方丢掉这条连接，
+        // 否则后面每一轮都会打在一条死连接上。
+        options.onInvocationError?.(error);
+        throw error;
+      }
     },
   };
 }

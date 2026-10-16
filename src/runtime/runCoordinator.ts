@@ -76,7 +76,7 @@ import {
 import type { CommandRunner } from '../tools/commandRunner';
 import { LocalCommandRunner } from '../tools/localCommandRunner';
 import { mcpAllowlist, shouldExposeMcpTools } from './mcp/mcpConfig';
-import { openMcpSession, type McpSession } from './mcp/mcpSession';
+import { McpConnectionPool, type McpSessionLease } from './mcp/mcpConnectionPool';
 import type {
   ClarificationAnswer,
   ClarificationRequest,
@@ -412,6 +412,10 @@ export class RunCoordinator {
   private protocolRun?: DurableRunRecord;
   private transitionController?: AbortController;
   private readonly pendingClarifications = new Map<string, PendingClarification>();
+  /** MCP 连接跨轮复用；空闲超时后自动回收，避免每轮重付一次冷启动。 */
+  private readonly mcpPool = new McpConnectionPool({
+    log: (line) => this.writeLog(line),
+  });
 
   constructor(dependencies: RunCoordinatorDependencies) {
     this.session = dependencies.session;
@@ -457,9 +461,9 @@ export class RunCoordinator {
     };
   }
 
-  private async openRunMcpSession(run: DurableRunRecord, apiKey: string): Promise<McpSession> {
+  private acquireRunMcpSession(run: DurableRunRecord, apiKey: string): Promise<McpSessionLease> {
     const cfg = this.agentConfig(run.config, apiKey);
-    return openMcpSession({
+    return this.mcpPool.acquire({
       settings: run.config.mcp,
       reservedToolNames: [
         ...this.toolRegistry.getToolCatalog().list().map((capability) => capability.name),
@@ -474,11 +478,10 @@ export class RunCoordinator {
       },
       executeEffect: (toolName, input, invoke) =>
         this.store.executeEffect(run.id, run.operationId, toolName, input, invoke),
-      log: this.writeLog,
     });
   }
 
-  private mcpToolsFor(run: DurableRunRecord, session: McpSession): McpSession['tools'] {
+  private mcpToolsFor(run: DurableRunRecord, session: McpSessionLease): McpSessionLease['tools'] {
     return shouldExposeMcpTools(run) ? session.tools : [];
   }
 
@@ -1941,7 +1944,7 @@ export class RunCoordinator {
           this.writeLog(`[context] 执行前历史检查失败，继续使用当前历史: ${initialCompaction.error}`);
         }
       }
-      const mcpSession = await this.openRunMcpSession(run, apiKey);
+      const mcpSession = await this.acquireRunMcpSession(run, apiKey);
       const executeSingleAgent = (
         agentOptions: Pick<
         AgentRunOptions,
@@ -2056,7 +2059,8 @@ export class RunCoordinator {
         }
       }
       } finally {
-        await mcpSession.close();
+        // 只归还，不关闭：连接留在池里给下一轮复用，闲置超时后才真正回收。
+        mcpSession.release();
       }
 
       // clear() may have invalidated this run while the SDK was settling its
@@ -2328,7 +2332,7 @@ export class RunCoordinator {
     signal: AbortSignal,
     generation: number,
     options: Pick<AgentRunOptions, 'initialState' | 'decisions' | 'preserveToolHistory' | 'continueTurnBudget'>,
-    mcpSession?: McpSession,
+    mcpSession?: McpSessionLease,
   ): Promise<AgentRunResult> {
     if (!run.teamTask?.executionGraph) throw new Error('Team 执行图不存在');
     let graph = run.teamTask.executionGraph;
