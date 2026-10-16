@@ -133,6 +133,12 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
   'clarification.requested',
   'clarification.resolved',
   'run.progress',
+  // 失败和取消也要留档:工具已经做完的那一轮,界面靠"工具完成事件"重建那一行动作,
+  // 而失败/取消的轮次里模型那段总结通常没落盘,回放时凑不齐,行就没了。
+  // 这两个类型同时管写入和读取(recordReplayableProtocolEvent 与 replayableHistoryEvents
+  // 用的是同一份名单),所以加进来之后新产生的轮次才会带上,改动前的历史仍然没有。
+  'run.failed',
+  'run.cancelled',
 ]);
 
 interface PendingClarification {
