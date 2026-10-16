@@ -1984,7 +1984,7 @@ export class RunCoordinator {
             workflowRegistry: this.workflowRegistry,
             toolRegistry: this.toolRegistry,
             extraBusinessTools: this.mcpToolsFor(run, mcpSession),
-            allowedToolNames: mcpAllowlist(run, mcpSession.tools.map((tool) => tool.name)),
+            allowedToolNames: mcpAllowlist(run, mcpSession.toolNames),
             signal: controller.signal,
             protocol: {
               runId: run.id,

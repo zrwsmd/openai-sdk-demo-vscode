@@ -4,6 +4,12 @@ import type { AgentConfig } from '../agentConfig';
 import { hashContent } from '../contentHash';
 import { isMcpServerEnabled, type McpSettings } from './mcpConfig';
 import { buildMcpTools, openMcpConnection, type McpConnection } from './mcpSession';
+import {
+  cachedToolsByServer,
+  readMcpToolCache,
+  writeMcpToolCache,
+  type McpServerToolList,
+} from './mcpToolCache';
 
 /**
  * 连接空闲多久后回收。
@@ -16,6 +22,11 @@ export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface McpSessionLease {
   readonly tools: readonly FunctionTool<any, any, any>[];
+  /**
+   * 这一轮"有哪些 MCP 工具"的名字：本次连上的取真清单，
+   * 本次没连上的服务器用缓存里那份补。名单因此不再吊在连接上。
+   */
+  readonly toolNames: readonly string[];
   /** 本轮用完归还：连接留在池里，只重置空闲计时。 */
   release(): void;
 }
@@ -61,10 +72,11 @@ export class McpConnectionPool {
    */
   async acquire(options: AcquireMcpSessionOptions): Promise<McpSessionLease> {
     const key = mcpConnectionKey(options);
-    if (!key) return { tools: [], release: () => undefined };
+    if (!key) return { tools: [], toolNames: [], release: () => undefined };
     const connection = await this.connectionFor(key, options);
     const entry = this.entries.get(key);
     if (entry) this.clearTimer(entry);
+    void this.rememberToolLists(options, connection.toolLists);
     const tools = buildMcpTools(connection, {
       policy: options.policy,
       policyContext: options.policyContext,
@@ -76,13 +88,49 @@ export class McpConnectionPool {
         void this.drop(key);
       },
     });
-    return { tools, release: () => this.touch(key) };
+    const toolNames = await this.toolNamesFor(options, connection);
+    return { tools, toolNames, release: () => this.touch(key) };
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
     const keys = [...this.entries.keys()];
     await Promise.all(keys.map(async (key) => this.drop(key)));
+  }
+
+  /**
+   * 这一轮"有哪些 MCP 工具"的名字。
+   *
+   * 本次连上的服务器取真清单；本次没连上的（服务器挂了、超时了），
+   * 用缓存里那份补上。补的意义是让名单不再依赖"这次一定连得上"——
+   * 将来改成按需连接时，名字也有出处。
+   */
+  private async toolNamesFor(
+    options: AcquireMcpSessionOptions,
+    connection: McpConnection,
+  ): Promise<string[]> {
+    const names = connection.tools.map((entry) => entry.name);
+    const live = new Set(connection.toolLists.map((list) => list.serverName));
+    const cache = await readMcpToolCache(options.policyContext.workspaceRoot);
+    for (const [serverName, cached] of cachedToolsByServer(cache, options.settings)) {
+      if (live.has(serverName)) continue;
+      this.log(`[mcp] ${serverName} 本次没连上，用缓存里的 ${cached.length} 个工具名兜底`);
+      names.push(...cached.map((tool) => tool.name));
+    }
+    return names;
+  }
+
+  /** 把这次真拿到的清单落盘。写不进去只记一行，不影响这一轮。 */
+  private async rememberToolLists(
+    options: AcquireMcpSessionOptions,
+    lists: readonly McpServerToolList[],
+  ): Promise<void> {
+    if (!lists.length) return;
+    try {
+      await writeMcpToolCache(options.policyContext.workspaceRoot, lists);
+    } catch (error) {
+      this.log(`[mcp] 工具清单缓存写入失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async connectionFor(

@@ -21,6 +21,11 @@ import {
   probeMcpServer,
   shouldExposeMcpTools,
   wrapMcpFunctionTool,
+  cachedToolsByServer,
+  mcpServerFingerprint,
+  mcpToolCachePath,
+  parseMcpToolCache,
+  readMcpToolCache,
 } from './agent.testbundle.mjs';
 
 assert.deepEqual(parseMcpSettings(undefined), { enabled: false, servers: [] });
@@ -196,11 +201,14 @@ assert.equal(reread.settings.servers[0]?.args?.[2], '${workspaceFolder}');
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-stub-'));
 const markerPath = path.join(stubDir, 'starts.log');
+// 这个文件一出现，stub 就立刻退出：用来模拟"配置没变、服务器起不来"。
+// 参数位置固定，所以前后两次连接的配置指纹是一样的。
+const downSentinel = path.join(stubDir, 'down');
 const stubServer = {
   name: 'stub',
   transport: 'stdio',
   command: process.execPath,
-  args: [path.join(scriptDir, 'mcp_stub_server.mjs'), markerPath],
+  args: [path.join(scriptDir, 'mcp_stub_server.mjs'), markerPath, downSentinel],
 };
 const stubSettings = { enabled: true, servers: [stubServer] };
 // 数"握手"而不是数"进程"：SDK 每次 connect 会多拉一个随即被丢弃的进程，
@@ -217,26 +225,65 @@ const handshakeCount = async () => {
 const pool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
 const noServers = await pool.acquire({
   settings: { enabled: false, servers: [] },
-  policyContext: { workspaceRoot: '.' },
+  policyContext: { workspaceRoot: stubDir },
 });
 assert.equal(noServers.tools.length, 0);
+assert.deepEqual(noServers.toolNames, []);
 noServers.release();
 
-const leaseA = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: '.' } });
+const leaseA = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: stubDir } });
 assert.deepEqual(leaseA.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.deepEqual(leaseA.toolNames, ['mcp_stub_stub_ping']);
 leaseA.release();
 assert.equal(await handshakeCount(), 1);
 
-const leaseB = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: '.' } });
+const leaseB = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: stubDir } });
 assert.deepEqual(leaseB.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
 // 复用同一条连接：工具照样能调通，进程没有被重新拉起。
 assert.match(JSON.stringify(await leaseB.tools[0].invoke({}, '{}')), /pong/);
 leaseB.release();
 assert.equal(await handshakeCount(), 1);
 
+// 清单落盘：连上一次之后，不用连也知道这个服务器有哪些工具。
+const cache = await readMcpToolCache(stubDir);
+assert.deepEqual(cache.servers.stub?.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.equal(cache.servers.stub?.fingerprint, mcpServerFingerprint(stubServer));
+assert.deepEqual(
+  [...cachedToolsByServer(cache, stubSettings).keys()],
+  ['stub'],
+);
+// 配置改了（指纹对不上），缓存那份就不算数。
+assert.equal(
+  cachedToolsByServer(cache, {
+    enabled: true,
+    servers: [{ ...stubServer, args: [...stubServer.args, '--other'] }],
+  }).size,
+  0,
+);
+// 缓存文件坏掉、或者根本不存在，一律当没有，不抛错。
+assert.deepEqual(parseMcpToolCache({ version: 1, servers: 'nope' }).servers, {});
+assert.deepEqual(parseMcpToolCache(null).servers, {});
+assert.deepEqual((await readMcpToolCache(path.join(stubDir, 'not-there'))).servers, {});
+assert.equal(path.basename(mcpToolCachePath(stubDir)), 'mcp-tools-cache.json');
+
+// 服务器起不来的时候，工具名单从缓存里补：可见性不再吊在连接上。
+await fs.writeFile(downSentinel, '');
+const offlinePool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+const offlineLease = await offlinePool.acquire({
+  settings: stubSettings,
+  policyContext: { workspaceRoot: stubDir },
+});
+assert.deepEqual(offlineLease.tools.map((tool) => tool.name), []);
+assert.deepEqual(offlineLease.toolNames, ['mcp_stub_stub_ping']);
+offlineLease.release();
+await offlinePool.dispose();
+// 服务器压根没握上手（进程起来就退了），所以握手计数不变。
+assert.equal(await handshakeCount(), 1);
+await fs.rm(downSentinel, { force: true });
+
 const leaseC = await pool.acquire({
   settings: { enabled: true, servers: [{ ...stubServer, args: [...stubServer.args, '--changed'] }] },
-  policyContext: { workspaceRoot: '.' },
+  policyContext: { workspaceRoot: stubDir },
 });
 assert.equal(leaseC.tools.length, 1);
 leaseC.release();

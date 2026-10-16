@@ -19,6 +19,7 @@ import {
   type McpServerConfig,
   type McpSettings,
 } from './mcpConfig';
+import { mcpServerFingerprint, type McpCachedTool, type McpServerToolList } from './mcpToolCache';
 
 export interface McpSession {
   readonly tools: readonly FunctionTool<any, any, any>[];
@@ -56,6 +57,11 @@ export interface McpConnectedTool {
 
 export interface McpConnection {
   readonly tools: readonly McpConnectedTool[];
+  /**
+   * 这次连上时每个服务器给出的工具清单（工具名用的是发出去的那个名字）。
+   * 调用方拿去落盘，下次连接不在时仍然知道有哪些工具。
+   */
+  readonly toolLists: readonly McpServerToolList[];
   close(): Promise<void>;
 }
 
@@ -76,12 +82,13 @@ export async function openMcpConnection(
 ): Promise<McpConnection> {
   const settings = options.settings;
   if (!settings?.enabled || settings.servers.length === 0) {
-    return { tools: [], close: async () => undefined };
+    return { tools: [], toolLists: [], close: async () => undefined };
   }
   const log = options.log ?? (() => undefined);
   const reserved = new Set(options.reservedToolNames ?? []);
   const servers: MCPServer[] = [];
   const tools: McpConnectedTool[] = [];
+  const toolLists: McpServerToolList[] = [];
 
   for (const spec of settings.servers.filter(isMcpServerEnabled)) {
     try {
@@ -89,6 +96,7 @@ export async function openMcpConnection(
       await server.connect();
       servers.push(server);
       const listed = await server.listTools();
+      const accepted: McpCachedTool[] = [];
       for (const mcpTool of listed) {
         const name = mcpFunctionToolName(spec.name, mcpTool.name);
         if (reserved.has(name)) {
@@ -97,7 +105,14 @@ export async function openMcpConnection(
         }
         reserved.add(name);
         tools.push({ name, serverName: spec.name, server, definition: mcpTool });
+        accepted.push(mcpTool.description ? { name, description: mcpTool.description } : { name });
       }
+      toolLists.push({
+        serverName: spec.name,
+        fingerprint: mcpServerFingerprint(spec),
+        fetchedAt: new Date().toISOString(),
+        tools: accepted,
+      });
       log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
     } catch (error) {
       log(`[mcp] 连接 ${spec.name} 失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -106,6 +121,7 @@ export async function openMcpConnection(
 
   return {
     tools,
+    toolLists,
     close: async () => {
       await Promise.all(servers.map(async (server) => {
         try {
