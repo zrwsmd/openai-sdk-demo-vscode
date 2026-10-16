@@ -3090,6 +3090,10 @@ function handleProtocolEvent(event) {
       addThinkingUpdate(event);
       break;
     case 'run.started':
+      // 动作去重只针对当前运行。上一轮留下的动作行仍保留在时间线里,
+      // 但同一个动作在新一轮里也必须重新显示。
+      flushToolActions();
+      renderedToolActions.clear();
       toolRuns.clear();
       anonymousToolRuns.clear();
       resetThinkingTracking(event.runId || currentRunId);
@@ -3326,6 +3330,9 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
+      pendingToolActions.length = 0;
+      toolActionLines.clear();
+      renderedToolActions.clear();
       currentRunId = null;
       canRetry = false;
       canContinue = false;
