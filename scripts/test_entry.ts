@@ -21,7 +21,7 @@ export * from '../src/runtime/mcp/mcpConfig';
 export {
   wrapMcpFunctionTool,
   openMcpSession,
-  openMcpConnection,
+  openMcpServerConnection,
   buildMcpTools,
   probeMcpServer,
 } from '../src/runtime/mcp/mcpSession';

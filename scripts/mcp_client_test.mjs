@@ -197,25 +197,29 @@ assert.equal(reread.exists, true);
 assert.equal(reread.settings.servers[2]?.name, 'docs');
 assert.equal(reread.settings.servers[0]?.args?.[2], '${workspaceFolder}');
 
-// 连接复用：同一份配置连续借两次，服务器进程只应该被拉起一次。
+// 连接复用：池子按"每台服务器一条"管。这里配两台，用来验证
+// 一台出事不牵动另一台、改一台的配置也只让那一台重连。
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const stubDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-stub-'));
-const markerPath = path.join(stubDir, 'starts.log');
-// 这个文件一出现，stub 就立刻退出：用来模拟"配置没变、服务器起不来"。
+const stubScript = path.join(scriptDir, 'mcp_stub_server.mjs');
+const markerOf = (tag) => path.join(stubDir, `starts-${tag}.log`);
+// 这个文件一出现，对应那台就立刻退出：用来模拟"配置没变、服务器起不来"。
 // 参数位置固定，所以前后两次连接的配置指纹是一样的。
-const downSentinel = path.join(stubDir, 'down');
-const stubServer = {
-  name: 'stub',
+const sentinelOf = (tag) => path.join(stubDir, `down-${tag}`);
+const makeServer = (name, tag) => ({
+  name,
   transport: 'stdio',
   command: process.execPath,
-  args: [path.join(scriptDir, 'mcp_stub_server.mjs'), markerPath, downSentinel],
-};
-const stubSettings = { enabled: true, servers: [stubServer] };
+  args: [stubScript, markerOf(tag), sentinelOf(tag)],
+});
+const stubServer = makeServer('stub', 'a');
+const otherServer = makeServer('other', 'b');
+const twoServers = { enabled: true, servers: [stubServer, otherServer] };
 // 数"握手"而不是数"进程"：SDK 每次 connect 会多拉一个随即被丢弃的进程，
 // 那是它自己的行为，跟连接是否被复用无关。
-const handshakeCount = async () => {
+const handshakesOf = async (tag) => {
   try {
-    const raw = await fs.readFile(markerPath, 'utf8');
+    const raw = await fs.readFile(markerOf(tag), 'utf8');
     return raw.split('\n').filter((line) => line.startsWith('init ')).length;
   } catch {
     return 0;
@@ -231,27 +235,27 @@ assert.equal(noServers.tools.length, 0);
 assert.deepEqual(noServers.toolNames, []);
 noServers.release();
 
-const leaseA = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: stubDir } });
-assert.deepEqual(leaseA.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
-assert.deepEqual(leaseA.toolNames, ['mcp_stub_stub_ping']);
+const leaseA = await pool.acquire({ settings: twoServers, policyContext: { workspaceRoot: stubDir } });
+assert.deepEqual(leaseA.tools.map((tool) => tool.name), ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
+assert.deepEqual(leaseA.toolNames, ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
 leaseA.release();
-assert.equal(await handshakeCount(), 1);
+assert.equal(await handshakesOf('a'), 1);
+assert.equal(await handshakesOf('b'), 1);
 
-const leaseB = await pool.acquire({ settings: stubSettings, policyContext: { workspaceRoot: stubDir } });
-assert.deepEqual(leaseB.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+const leaseB = await pool.acquire({ settings: twoServers, policyContext: { workspaceRoot: stubDir } });
+assert.deepEqual(leaseB.tools.map((tool) => tool.name), ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
 // 复用同一条连接：工具照样能调通，进程没有被重新拉起。
 assert.match(JSON.stringify(await leaseB.tools[0].invoke({}, '{}')), /pong/);
 leaseB.release();
-assert.equal(await handshakeCount(), 1);
+assert.equal(await handshakesOf('a'), 1);
+assert.equal(await handshakesOf('b'), 1);
 
-// 清单落盘：连上一次之后，不用连也知道这个服务器有哪些工具。
+// 清单落盘：连上一次之后，不用连也知道每台有哪些工具。
 const cache = await readMcpToolCache(stubDir);
 assert.deepEqual(cache.servers.stub?.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.deepEqual(cache.servers.other?.tools.map((tool) => tool.name), ['mcp_other_stub_ping']);
 assert.equal(cache.servers.stub?.fingerprint, mcpServerFingerprint(stubServer));
-assert.deepEqual(
-  [...cachedToolsByServer(cache, stubSettings).keys()],
-  ['stub'],
-);
+assert.deepEqual([...cachedToolsByServer(cache, twoServers).keys()], ['stub', 'other']);
 // 配置改了（指纹对不上），缓存那份就不算数。
 assert.equal(
   cachedToolsByServer(cache, {
@@ -266,41 +270,53 @@ assert.deepEqual(parseMcpToolCache(null).servers, {});
 assert.deepEqual((await readMcpToolCache(path.join(stubDir, 'not-there'))).servers, {});
 assert.equal(path.basename(mcpToolCachePath(stubDir)), 'mcp-tools-cache.json');
 
-// 服务器起不来的时候，工具名单从缓存里补：可见性不再吊在连接上。
-await fs.writeFile(downSentinel, '');
+// 一台起不来：只有那一台的名单从缓存补，另一台照常在。
+// 这段必须排在下面前面——缓存是按服务器名合并的，改了配置的那台一旦连上，
+// 它的旧条目就被新指纹盖掉，再想验"从缓存兜底"就取不到了。
+await fs.writeFile(sentinelOf('b'), '');
 const offlinePool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
 const offlineLease = await offlinePool.acquire({
-  settings: stubSettings,
+  settings: twoServers,
   policyContext: { workspaceRoot: stubDir },
 });
-assert.deepEqual(offlineLease.tools.map((tool) => tool.name), []);
-assert.deepEqual(offlineLease.toolNames, ['mcp_stub_stub_ping']);
+assert.deepEqual(offlineLease.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.deepEqual(offlineLease.toolNames, ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
 offlineLease.release();
 await offlinePool.dispose();
-// 服务器压根没握上手（进程起来就退了），所以握手计数不变。
-assert.equal(await handshakeCount(), 1);
-await fs.rm(downSentinel, { force: true });
+// 起不来那台压根没握上手（进程起来就退了），另一台在新池子里重新连了一次。
+assert.equal(await handshakesOf('b'), 1);
+assert.equal(await handshakesOf('a'), 2);
+await fs.rm(sentinelOf('b'), { force: true });
 
+// 只改一台的配置：只有那一台重连，另一台照旧热着（复用第一条连接，不再握手）。
 const leaseC = await pool.acquire({
-  settings: { enabled: true, servers: [{ ...stubServer, args: [...stubServer.args, '--changed'] }] },
+  settings: {
+    enabled: true,
+    servers: [stubServer, { ...otherServer, args: [...otherServer.args, '--changed'] }],
+  },
   policyContext: { workspaceRoot: stubDir },
 });
-assert.equal(leaseC.tools.length, 1);
+assert.equal(leaseC.tools.length, 2);
 leaseC.release();
-assert.equal(await handshakeCount(), 2);
+assert.equal(await handshakesOf('a'), 2);
+assert.equal(await handshakesOf('b'), 2);
 
 // 关掉之后服务器进程要真的退出，不能只是把引用丢掉。
 // 换会话时旧连接池就是靠这一步收尾的，收不掉就会叠进程。
 const initPids = async () => {
-  try {
-    const raw = await fs.readFile(markerPath, 'utf8');
-    return raw.split('\n')
-      .filter((line) => line.startsWith('init '))
-      .map((line) => Number(/pid=(\d+)/.exec(line)?.[1] ?? 0))
-      .filter(Boolean);
-  } catch {
-    return [];
+  const pids = [];
+  for (const tag of ['a', 'b']) {
+    try {
+      const raw = await fs.readFile(markerOf(tag), 'utf8');
+      pids.push(...raw.split('\n')
+        .filter((line) => line.startsWith('init '))
+        .map((line) => Number(/pid=(\d+)/.exec(line)?.[1] ?? 0))
+        .filter(Boolean));
+    } catch {
+      // 没有这个文件就是这台压根没握过手。
+    }
   }
+  return pids;
 };
 const alivePids = (pids) => pids.filter((pid) => {
   try {
@@ -319,9 +335,9 @@ const waitForExit = async (pids) => {
 };
 
 const connectedPids = await initPids();
-assert.equal(connectedPids.length, 2);
+assert.equal(connectedPids.length, 4);
 await pool.dispose();
-assert.equal(await handshakeCount(), 2);
+assert.equal(await handshakesOf('a') + await handshakesOf('b'), 4);
 assert.equal(await waitForExit(connectedPids), true);
 
 console.log('mcp client tests passed');

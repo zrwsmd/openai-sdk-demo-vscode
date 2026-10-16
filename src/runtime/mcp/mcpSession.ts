@@ -55,83 +55,76 @@ export interface McpConnectedTool {
   readonly definition: McpToolDefinition;
 }
 
-export interface McpConnection {
+/**
+ * 一台服务器连上之后的样子。
+ *
+ * 连接池是按"每台一条"管的，所以这里是单台的单位。拆到单台有两个直接好处：
+ * 某台调用出错只丢这一台；改一台的配置也只让这一台重连。
+ */
+export interface McpServerConnection {
+  readonly serverName: string;
+  readonly server: MCPServer;
+  /** 这台这次被接受暴露的工具（跨服务器重名被跳过的那些不在里面）。 */
   readonly tools: readonly McpConnectedTool[];
   /**
-   * 这次连上时每个服务器给出的工具清单（工具名用的是发出去的那个名字）。
-   * 调用方拿去落盘，下次连接不在时仍然知道有哪些工具。
+   * 这台的清单（工具名用的是发出去的那个名字）。调用方拿去落盘，
+   * 下次这台连不上时仍然知道它有哪些工具。
    */
-  readonly toolLists: readonly McpServerToolList[];
-  close(): Promise<void>;
-}
-
-export interface OpenMcpConnectionOptions {
-  settings: McpSettings | undefined;
-  reservedToolNames?: readonly string[];
-  log?: (line: string) => void;
+  readonly toolList: McpServerToolList;
 }
 
 /**
- * 建立连接并取回工具清单，不包装工具。
+ * 连上一台服务器并取回它的工具清单，不包装工具。
  *
  * 与工具包装拆开，是为了让连接能跨轮复用：连接和清单与轮次无关，
  * 而工具对象要绑定本轮的策略上下文、审批和效果台账，必须每轮重造。
+ *
+ * `reserved` 是跨服务器的重名占位：被接受的名字会加进这个集合，
+ * 交给后面几台避让。连不上就抛，由调用方决定是记一行跳过（单轮用法）
+ * 还是当成"这台没连上"（连接池）。
  */
-export async function openMcpConnection(
-  options: OpenMcpConnectionOptions,
-): Promise<McpConnection> {
-  const settings = options.settings;
-  if (!settings?.enabled || settings.servers.length === 0) {
-    return { tools: [], toolLists: [], close: async () => undefined };
-  }
-  const log = options.log ?? (() => undefined);
-  const reserved = new Set(options.reservedToolNames ?? []);
-  const servers: MCPServer[] = [];
-  const tools: McpConnectedTool[] = [];
-  const toolLists: McpServerToolList[] = [];
-
-  for (const spec of settings.servers.filter(isMcpServerEnabled)) {
-    try {
-      const server = createMcpServer(spec);
-      await server.connect();
-      servers.push(server);
-      const listed = await server.listTools();
-      const accepted: McpCachedTool[] = [];
-      for (const mcpTool of listed) {
-        const name = mcpFunctionToolName(spec.name, mcpTool.name);
-        if (reserved.has(name)) {
-          log(`[mcp] 跳过重名工具 ${name}`);
-          continue;
-        }
-        reserved.add(name);
-        tools.push({ name, serverName: spec.name, server, definition: mcpTool });
-        accepted.push(mcpTool.description ? { name, description: mcpTool.description } : { name });
+export async function openMcpServerConnection(
+  spec: McpServerConfig,
+  reserved: Set<string>,
+  log: (line: string) => void = () => undefined,
+): Promise<McpServerConnection> {
+  const server = createMcpServer(spec);
+  try {
+    await server.connect();
+    const listed = await server.listTools();
+    const tools: McpConnectedTool[] = [];
+    const accepted: McpCachedTool[] = [];
+    for (const mcpTool of listed) {
+      const name = mcpFunctionToolName(spec.name, mcpTool.name);
+      if (reserved.has(name)) {
+        log(`[mcp] 跳过重名工具 ${name}`);
+        continue;
       }
-      toolLists.push({
+      reserved.add(name);
+      tools.push({ name, serverName: spec.name, server, definition: mcpTool });
+      accepted.push(mcpTool.description ? { name, description: mcpTool.description } : { name });
+    }
+    log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
+    return {
+      serverName: spec.name,
+      server,
+      tools,
+      toolList: {
         serverName: spec.name,
         fingerprint: mcpServerFingerprint(spec),
         fetchedAt: new Date().toISOString(),
         tools: accepted,
-      });
-      log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
-    } catch (error) {
-      log(`[mcp] 连接 ${spec.name} 失败: ${error instanceof Error ? error.message : String(error)}`);
+      },
+    };
+  } catch (error) {
+    // 连上了但取清单失败也要收干净，否则会留下一个没人管的进程。
+    try {
+      await server.close();
+    } catch {
+      // 本来就没连上，收尾失败无所谓。
     }
+    throw error;
   }
-
-  return {
-    tools,
-    toolLists,
-    close: async () => {
-      await Promise.all(servers.map(async (server) => {
-        try {
-          await server.close();
-        } catch {
-          // Ignore teardown failures; the run has already finished.
-        }
-      }));
-    },
-  };
 }
 
 export interface BuildMcpToolsOptions {
@@ -143,11 +136,11 @@ export interface BuildMcpToolsOptions {
 }
 
 export function buildMcpTools(
-  connection: McpConnection,
+  connections: readonly McpServerConnection[],
   options: BuildMcpToolsOptions,
 ): FunctionTool<any, any, any>[] {
   const policy = options.policy ?? new DefaultToolPolicy();
-  return connection.tools.map((entry) => {
+  return connections.flatMap((connection) => connection.tools.map((entry) => {
     const fnTool = mcpToFunctionTool(entry.definition, entry.server, false, {
       toolNameOverride: entry.name,
     });
@@ -158,15 +151,34 @@ export function buildMcpTools(
       executeEffect: options.executeEffect,
       onInvocationError: options.onInvocationError,
     });
-  });
+  }));
 }
 
-/** 单轮用法：连上、包装、用完关闭。跨轮复用走 openMcpConnection + buildMcpTools。 */
+/** 单轮用法：连上所有服务器、包装、用完关闭。跨轮复用走连接池。 */
 export async function openMcpSession(options: OpenMcpSessionOptions): Promise<McpSession> {
-  const connection = await openMcpConnection(options);
+  const settings = options.settings;
+  const log = options.log ?? (() => undefined);
+  const reserved = new Set(options.reservedToolNames ?? []);
+  const connections: McpServerConnection[] = [];
+  const specs = settings?.enabled ? settings.servers.filter(isMcpServerEnabled) : [];
+  for (const spec of specs) {
+    try {
+      connections.push(await openMcpServerConnection(spec, reserved, log));
+    } catch (error) {
+      log(`[mcp] 连接 ${spec.name} 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   return {
-    tools: buildMcpTools(connection, options),
-    close: () => connection.close(),
+    tools: buildMcpTools(connections, options),
+    close: async () => {
+      await Promise.all(connections.map(async (connection) => {
+        try {
+          await connection.server.close();
+        } catch {
+          // 收尾失败不影响调用方：这一轮已经跑完了。
+        }
+      }));
+    },
   };
 }
 
