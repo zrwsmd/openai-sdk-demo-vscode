@@ -1478,7 +1478,11 @@ function addDiagnosticReport(report) {
 // 界面上渲染成一行说明加一个可点的名字,点一下就把命令发给扩展去执行。
 // 它不是工具卡——工具卡是"已经做完"的记录,点了没反应;这里点一下是发起动作,
 // 由界面直接发给扩展,不经过模型。界面不认识具体是哪个工具,声明里写什么就照着做什么。
-function toolActionKey(action) {
+//
+// 这份指纹只用来判断"同一条是不是已经渲染过"。它中间夹着不可见的 NUL,塞进
+// CSS 选择器会被替换成别的字符,拿它当元素标识就永远找不回那一行 —— 所以元素
+// 标识另外发流水号:标签上存号,回执也按号认,跟内容无关。
+function toolActionFingerprint(action) {
   return `${action.command}\u0000${JSON.stringify(action.args ?? [])}`;
 }
 
@@ -1496,6 +1500,12 @@ function toolActionsOf(result) {
 // 在工具卡那一步就插会先露一次,答复渲染完又挪一次,看起来像渲染了两遍。
 const pendingToolActions = [];
 
+// 每渲染一行就发一个流水号。工具动作行的元素标识和回执标识都用它,
+// 不用内容指纹(原因见上面 toolActionFingerprint 那段注释)。
+let toolActionSeq = 0;
+const toolActionLines = new Map();
+const renderedToolActions = new Set();
+
 function flushToolActions() {
   if (!pendingToolActions.length) return;
   for (const action of pendingToolActions.splice(0, pendingToolActions.length)) {
@@ -1504,12 +1514,15 @@ function flushToolActions() {
 }
 
 function addToolActionLine(action) {
-  const key = toolActionKey(action);
-  if (messagesEl.querySelector(`[data-tool-action="${CSS.escape(key)}"]`)) return null;
+  const fingerprint = toolActionFingerprint(action);
+  if (renderedToolActions.has(fingerprint)) return null;
+  renderedToolActions.add(fingerprint);
+
+  const actionKey = `tool-action-${++toolActionSeq}`;
 
   const line = document.createElement('div');
   line.className = 'tool-action-line';
-  line.dataset.toolAction = key;
+  line.dataset.toolAction = actionKey;
 
   const label = document.createElement('span');
   label.className = 'tool-action-label';
@@ -1534,12 +1547,13 @@ function addToolActionLine(action) {
       type: 'pluginCommand',
       command: action.command,
       args: Array.isArray(action.args) ? action.args : [],
-      actionKey: key,
+      actionKey,
     });
   });
 
   line.append(label, link, status);
   messagesEl.appendChild(line);
+  toolActionLines.set(actionKey, line);
   scrollBottom();
   return line;
 }
@@ -1547,7 +1561,7 @@ function addToolActionLine(action) {
 function markToolActionLine(actionKey, ok, error) {
   const key = String(actionKey ?? '');
   if (!key) return;
-  const line = messagesEl.querySelector(`[data-tool-action="${CSS.escape(key)}"]`);
+  const line = toolActionLines.get(key);
   if (!line) return;
   const link = line.querySelector('.tool-action-link');
   const status = line.querySelector('.tool-action-status');
@@ -3343,6 +3357,8 @@ window.addEventListener('message', (event) => {
       pendingToolCount = 0;
       hadToolThisTurn = false;
       pendingToolActions.length = 0;
+      toolActionLines.clear();
+      renderedToolActions.clear();
       const messages = msg.messages || [];
       const events = Array.isArray(msg.events) ? msg.events : [];
       const { groups, legacy } = groupHistoryEvents(events);
