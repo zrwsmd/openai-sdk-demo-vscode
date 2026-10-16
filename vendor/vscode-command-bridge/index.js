@@ -28,6 +28,14 @@ const COMMAND_REGISTRY = {
   bridgeCreateProject: {
     extensionId: EXTENSION_ID,
     commandId: 'devUni.prjView.bridgeCreateProject'
+  },
+  closePrj: {
+    extensionId: EXTENSION_ID,
+    commandId: 'devUni.prjView.closePrj'
+  },
+  bridgeOpenPrj: {
+    extensionId: EXTENSION_ID,
+    commandId: 'devUni.prjView.bridgeOpenPrj'
   }
 };
 

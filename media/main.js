@@ -1474,6 +1474,80 @@ function addDiagnosticReport(report) {
   scrollBottom();
 }
 
+// 工程创建成功后补的那张卡:点工程名就去把工程打开。
+// 它不是工具卡——工具卡是"已经做完"的记录,点了没反应;这张的点击是发起动作,
+// 由界面直接发给扩展,不经过模型。
+function projectNameOf(workspaceFile) {
+  const base = String(workspaceFile ?? '').replace(/\\/g, '/').split('/').pop() || '';
+  return base.replace(/\.code-workspace$/i, '') || base || '工程';
+}
+
+// devuni 工具的返回值形状是 { ok, data: { summary, result } }(通用工厂把
+// toOutcome 的 data 塞在 data.result 里),工程路径在 result.workspaceFile。
+function createdWorkspaceFile(result) {
+  if (!result || typeof result !== 'object') return undefined;
+  const data = result.data && typeof result.data === 'object' ? result.data : undefined;
+  const inner = data && data.result && typeof data.result === 'object' ? data.result : undefined;
+  const file = inner ? inner.workspaceFile : undefined;
+  return typeof file === 'string' && file.trim() ? file.trim() : undefined;
+}
+
+function addProjectOpenCard(workspaceFile) {
+  const file = String(workspaceFile ?? '').trim();
+  if (!file) return null;
+  if (messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`)) return null;
+
+  const card = document.createElement('div');
+  card.className = 'project-open-card';
+  card.dataset.projectOpen = file;
+
+  const title = document.createElement('div');
+  title.className = 'project-open-title';
+  title.textContent = '工程已创建，需要打开吗';
+
+  const name = document.createElement('button');
+  name.type = 'button';
+  name.className = 'project-open-name';
+  name.textContent = projectNameOf(file);
+  name.title = `在新窗口打开 ${file}`;
+
+  const hint = document.createElement('div');
+  hint.className = 'project-open-hint';
+  hint.textContent = '点工程名在新窗口打开（当前窗口打开会重启扩展宿主，本会话会中断）';
+
+  name.addEventListener('click', () => {
+    if (card.classList.contains('pending') || card.classList.contains('opened')) return;
+    card.classList.add('pending');
+    name.disabled = true;
+    hint.textContent = '正在请求打开…';
+    vscode.postMessage({ type: 'openProject', workspaceFile: file, newWindow: true });
+  });
+
+  card.append(title, name, hint);
+  messagesEl.appendChild(card);
+  scrollBottom();
+  return card;
+}
+
+function markProjectOpenCard(workspaceFile, ok, error) {
+  const file = String(workspaceFile ?? '').trim();
+  if (!file) return;
+  const card = messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`);
+  if (!card) return;
+  const name = card.querySelector('.project-open-name');
+  const hint = card.querySelector('.project-open-hint');
+  card.classList.remove('pending');
+  if (ok) {
+    card.classList.add('opened');
+    if (name) name.disabled = true;
+    if (hint) hint.textContent = '已请求在新窗口打开';
+    return;
+  }
+  card.classList.add('failed');
+  if (name) name.disabled = false;
+  if (hint) hint.textContent = `打开失败：${error || '未知原因'}（可以再点一次重试）`;
+}
+
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
 function showUsage(usage) {
   if (!usage) return;
@@ -2912,6 +2986,10 @@ function handleProtocolEvent(event) {
         break;
       }
       addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
+      if (name === 'devuni_create_project' && payload.ok === true) {
+        const created = createdWorkspaceFile(payload.result);
+        if (created) addProjectOpenCard(created);
+      }
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
       flushPendingAgentText();
@@ -3472,6 +3550,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'mcpStatus':
       applyMcpStatus(msg);
+      break;
+    case 'projectOpenRequested':
+      markProjectOpenCard(msg.workspaceFile, msg.ok === true, msg.error);
       break;
   }
 });

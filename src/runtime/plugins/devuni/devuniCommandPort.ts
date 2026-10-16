@@ -15,6 +15,10 @@ export interface DevuniCommandPort {
    *
    * @param command 命令短名,例如 "bridgeCreateProject"。
    * @param args 原样透传给对方命令处理器的参数。
+   *
+   * 参数是逐个位置传的,跟对方命令签名对齐:只收一个对象的命令(如
+   * bridgeCreateProject)传一个,收多个位置参数的命令(如 bridgeOpenPrj
+   * 要「工作区文件路径 + 是否在新窗口打开」两个)就传两个。
    */
-  invoke(command: string, args?: unknown): Promise<unknown>;
+  invoke(command: string, ...args: unknown[]): Promise<unknown>;
 }

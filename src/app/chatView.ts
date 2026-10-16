@@ -84,6 +84,7 @@ import {
  *                   {type:'saveMcpServer', name, originalName?, transport, command?, args?, url?, cwd?, env?}
  *                   {type:'deleteMcpServer', name}
  *                   {type:'openMcpConfig'}
+ *                   {type:'openProject', workspaceFile, newWindow?}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
@@ -92,6 +93,7 @@ import {
  *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
  *                   {type:'mcpStatus', name, status, error?, toolCount?}
+ *                   {type:'projectOpenRequested', workspaceFile, newWindow}(工程卡片点了之后回执)
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -179,6 +181,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.setMcpEnabled(msg.name, msg.enabled);
       } else if (msg.type === 'probeMcpServers') {
         void this.probeMcpServers();
+      } else if (msg.type === 'openProject' && typeof msg.workspaceFile === 'string') {
+        void this.openProject(msg.workspaceFile, msg.newWindow !== false);
       }
     });
 
@@ -889,6 +893,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         exists: true,
         settings: emptyMcpSettings(),
       };
+    }
+  }
+
+  /**
+   * 用户在聊天里点「打开工程」卡片时走这里。
+   *
+   * 这条路径不经过模型:界面点一下,这里直接打桥的开工程命令。
+   * 默认新窗口——在当前窗口打开会重启扩展宿主,把正在进行的会话一起带走。
+   */
+  private async openProject(workspaceFile: string, newWindow: boolean): Promise<void> {
+    const file = workspaceFile.trim();
+    if (!file) return;
+    const label = newWindow ? '新窗口' : '当前窗口';
+    try {
+      const port = createDevuniCommandPort();
+      await port.invoke('bridgeOpenPrj', file, newWindow);
+      this.log.appendLine(`[devuni] 打开工程 ${file}(${label})`);
+      this.post({ type: 'projectOpenRequested', workspaceFile: file, newWindow, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.appendLine(`[devuni] 打开工程失败 ${file}: ${message}`);
+      this.post({
+        type: 'projectOpenRequested',
+        workspaceFile: file,
+        newWindow,
+        ok: false,
+        error: message,
+      });
     }
   }
 

@@ -25,9 +25,9 @@ function ensureBridgeReady(): void {
 
 export function createDevuniCommandPort(): DevuniCommandPort {
   return {
-    async invoke(command: string, args?: unknown): Promise<unknown> {
+    async invoke(command: string, ...args: unknown[]): Promise<unknown> {
       ensureBridgeReady();
-      return bridge.invokeExtensionCommand(command, args);
+      return bridge.invokeExtensionCommand(command, ...args);
     },
   };
 }

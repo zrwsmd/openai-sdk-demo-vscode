@@ -27,6 +27,14 @@ const COMMAND_REGISTRY = {
   bridgeCreateProject: {
     extensionId: 'ytak.devuni-ide-vscode',
     commandId: 'devUni.prjView.bridgeCreateProject'
+  },
+  closePrj: {
+    extensionId: 'ytak.devuni-ide-vscode',
+    commandId: 'devUni.prjView.closePrj'
+  },
+  bridgeOpenPrj: {
+    extensionId: 'ytak.devuni-ide-vscode',
+    commandId: 'devUni.prjView.bridgeOpenPrj'
   }
 };
 ```

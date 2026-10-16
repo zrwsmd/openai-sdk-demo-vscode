@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "registry": "unpublished",
   "note": "该包未发布到任何 npm registry，随仓库自带，避免依赖开发机上的 node_modules。",
-  "vendoredAt": "2026-10-12T08:55:16.000Z",
+  "vendoredAt": "2026-10-16T01:43:12.000Z",
   "sha256": {
-    "index": "5dd300df9c6d95c9cf0c41922aa376be451ea384547272af48b43eeaaacf5e3e",
+    "index": "f157d029c6b6385339dd4aabd91adea62f03649214346c38cb884800d61c71f7",
     "types": "75b27a37f95164441398a27f8d5ba5cdb1e6b3372aad64758d2406553cbe9c98",
     "package": "8bef48608f30f30750620c4dd5f904e0d5d5199fc7806727ca520da2b38f7172"
   }
