@@ -1492,60 +1492,71 @@ function createdWorkspaceFile(result) {
   return typeof file === 'string' && file.trim() ? file.trim() : undefined;
 }
 
+// 本轮新插进来的工程入口。它先落在工具卡后面,等这一轮的答复文本渲染完,
+// 再整体挪到答复下面 —— 用户要的是"先看结果,最后才是这行入口"。
+const pendingProjectLines = [];
+
+function settleProjectOpenLines() {
+  if (!pendingProjectLines.length) return;
+  for (const line of pendingProjectLines) {
+    if (line.isConnected) messagesEl.appendChild(line);
+  }
+  pendingProjectLines.length = 0;
+  scrollBottom();
+}
+
 function addProjectOpenCard(workspaceFile) {
   const file = String(workspaceFile ?? '').trim();
   if (!file) return null;
   if (messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`)) return null;
 
-  const card = document.createElement('div');
-  card.className = 'project-open-card';
-  card.dataset.projectOpen = file;
+  const line = document.createElement('div');
+  line.className = 'project-open-line';
+  line.dataset.projectOpen = file;
 
-  const title = document.createElement('div');
-  title.className = 'project-open-title';
-  title.textContent = '工程已创建，需要打开吗';
+  const label = document.createElement('span');
+  label.className = 'project-open-label';
+  label.textContent = '项目已创建，可以在新窗口打开 ';
 
-  const name = document.createElement('button');
-  name.type = 'button';
-  name.className = 'project-open-name';
-  name.textContent = projectNameOf(file);
-  name.title = `在新窗口打开 ${file}`;
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'project-open-link';
+  link.textContent = projectNameOf(file);
+  link.title = `在新窗口打开 ${file}（在当前窗口打开会重启扩展宿主，本会话会中断）`;
 
-  const hint = document.createElement('div');
-  hint.className = 'project-open-hint';
-  hint.textContent = '点工程名在新窗口打开（当前窗口打开会重启扩展宿主，本会话会中断）';
-
-  name.addEventListener('click', () => {
-    if (card.classList.contains('pending') || card.classList.contains('opened')) return;
-    card.classList.add('pending');
-    name.disabled = true;
-    hint.textContent = '正在请求打开…';
+  link.addEventListener('click', () => {
+    if (line.classList.contains('pending') || line.classList.contains('opened')) return;
+    line.classList.remove('failed');
+    line.classList.add('pending');
+    link.disabled = true;
+    label.textContent = '项目已创建，正在打开 ';
     vscode.postMessage({ type: 'openProject', workspaceFile: file, newWindow: true });
   });
 
-  card.append(title, name, hint);
-  messagesEl.appendChild(card);
+  line.append(label, link);
+  messagesEl.appendChild(line);
+  pendingProjectLines.push(line);
   scrollBottom();
-  return card;
+  return line;
 }
 
 function markProjectOpenCard(workspaceFile, ok, error) {
   const file = String(workspaceFile ?? '').trim();
   if (!file) return;
-  const card = messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`);
-  if (!card) return;
-  const name = card.querySelector('.project-open-name');
-  const hint = card.querySelector('.project-open-hint');
-  card.classList.remove('pending');
+  const line = messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`);
+  if (!line) return;
+  const label = line.querySelector('.project-open-label');
+  const link = line.querySelector('.project-open-link');
+  line.classList.remove('pending');
   if (ok) {
-    card.classList.add('opened');
-    if (name) name.disabled = true;
-    if (hint) hint.textContent = '已请求在新窗口打开';
+    line.classList.add('opened');
+    if (link) link.disabled = true;
+    if (label) label.textContent = '项目已创建，已在新窗口打开 ';
     return;
   }
-  card.classList.add('failed');
-  if (name) name.disabled = false;
-  if (hint) hint.textContent = `打开失败：${error || '未知原因'}（可以再点一次重试）`;
+  line.classList.add('failed');
+  if (link) link.disabled = false;
+  if (label) label.textContent = `项目已创建，打开失败（${error || '未知原因'}），再点一次 `;
 }
 
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
@@ -3111,12 +3122,13 @@ function renderAgentText(text) {
       agentBubble.classList.remove('streaming');
       detachAgentBubbleFromTimeline();
       agentBubble = null;
-      return;
+    } else {
+      if (hadToolThisTurn) appendAgentBubbleToTimelineEnd();
+      renderRich(agentBubble, agentText);
+      agentBubble.classList.remove('streaming');
     }
-    if (hadToolThisTurn) appendAgentBubbleToTimelineEnd();
-    renderRich(agentBubble, agentText);
-    agentBubble.classList.remove('streaming');
   }
+  settleProjectOpenLines();
 }
 
 function flushPendingAgentText() {
@@ -3139,9 +3151,11 @@ function renderHistoryMessage(m) {
     return;
   }
   const text = sanitizeAssistantText(m.text);
-  if (!text.trim()) return;
-  const b = addMessage('agent', '');
-  renderRich(b, text);
+  if (text.trim()) {
+    const b = addMessage('agent', '');
+    renderRich(b, text);
+  }
+  settleProjectOpenLines();
 }
 
 function replayHistoryEvents(events) {
@@ -3323,6 +3337,7 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
+      pendingProjectLines.length = 0;
       const messages = msg.messages || [];
       const events = Array.isArray(msg.events) ? msg.events : [];
       const { groups, legacy } = groupHistoryEvents(events);
