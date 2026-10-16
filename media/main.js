@@ -1492,17 +1492,15 @@ function createdWorkspaceFile(result) {
   return typeof file === 'string' && file.trim() ? file.trim() : undefined;
 }
 
-// 本轮新插进来的工程入口。它先落在工具卡后面,等这一轮的答复文本渲染完,
-// 再整体挪到答复下面 —— 用户要的是"先看结果,最后才是这行入口"。
-const pendingProjectLines = [];
+// 本轮建出来的工程。先只把路径记下来,等这一轮的答复文本渲染完,再把入口追加到答复下面。
+// 不在工具卡那一步就直接插 DOM —— 那样会先露一次,答复渲染完又挪一次,看起来像渲染了两遍。
+const pendingProjectFiles = [];
 
-function settleProjectOpenLines() {
-  if (!pendingProjectLines.length) return;
-  for (const line of pendingProjectLines) {
-    if (line.isConnected) messagesEl.appendChild(line);
+function flushProjectOpenLines() {
+  if (!pendingProjectFiles.length) return;
+  for (const file of pendingProjectFiles.splice(0, pendingProjectFiles.length)) {
+    addProjectOpenCard(file);
   }
-  pendingProjectLines.length = 0;
-  scrollBottom();
 }
 
 function addProjectOpenCard(workspaceFile) {
@@ -1535,7 +1533,6 @@ function addProjectOpenCard(workspaceFile) {
 
   line.append(label, link);
   messagesEl.appendChild(line);
-  pendingProjectLines.push(line);
   scrollBottom();
   return line;
 }
@@ -2999,7 +2996,7 @@ function handleProtocolEvent(event) {
       addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
       if (name === 'devuni_create_project' && payload.ok === true) {
         const created = createdWorkspaceFile(payload.result);
-        if (created) addProjectOpenCard(created);
+        if (created && !pendingProjectFiles.includes(created)) pendingProjectFiles.push(created);
       }
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
@@ -3035,11 +3032,13 @@ function handleProtocolEvent(event) {
       // The host error control message owns the detailed error bubble.
       closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'failed');
+      flushProjectOpenLines();
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
       closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'cancelled');
+      flushProjectOpenLines();
       break;
     case 'approval.requested':
       closeThinkingAtBoundary(event.runId || currentRunId);
@@ -3128,7 +3127,7 @@ function renderAgentText(text) {
       agentBubble.classList.remove('streaming');
     }
   }
-  settleProjectOpenLines();
+  flushProjectOpenLines();
 }
 
 function flushPendingAgentText() {
@@ -3155,7 +3154,7 @@ function renderHistoryMessage(m) {
     const b = addMessage('agent', '');
     renderRich(b, text);
   }
-  settleProjectOpenLines();
+  flushProjectOpenLines();
 }
 
 function replayHistoryEvents(events) {
@@ -3337,7 +3336,7 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
-      pendingProjectLines.length = 0;
+      pendingProjectFiles.length = 0;
       const messages = msg.messages || [];
       const events = Array.isArray(msg.events) ? msg.events : [];
       const { groups, legacy } = groupHistoryEvents(events);
