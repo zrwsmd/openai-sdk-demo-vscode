@@ -1538,7 +1538,7 @@ function addToolActionLine(action) {
   status.className = 'tool-action-status';
 
   link.addEventListener('click', () => {
-    if (line.classList.contains('pending') || line.classList.contains('done')) return;
+    if (line.classList.contains('pending')) return;
     line.classList.remove('failed');
     line.classList.add('pending');
     link.disabled = true;
@@ -1567,9 +1567,9 @@ function markToolActionLine(actionKey, ok, error) {
   const status = line.querySelector('.tool-action-status');
   line.classList.remove('pending');
   if (ok) {
-    line.classList.add('done');
-    if (link) link.disabled = true;
-    if (status) status.textContent = ' 已完成';
+    // 打开工程这类动作,执行成功本身就是结果,不用再补一句状态。
+    // 名字保持可点(想再开一个窗口还能点),状态位留空。
+    if (status) status.textContent = '';
     return;
   }
   line.classList.add('failed');
