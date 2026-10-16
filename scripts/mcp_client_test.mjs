@@ -289,7 +289,39 @@ assert.equal(leaseC.tools.length, 1);
 leaseC.release();
 assert.equal(await handshakeCount(), 2);
 
+// 关掉之后服务器进程要真的退出，不能只是把引用丢掉。
+// 换会话时旧连接池就是靠这一步收尾的，收不掉就会叠进程。
+const initPids = async () => {
+  try {
+    const raw = await fs.readFile(markerPath, 'utf8');
+    return raw.split('\n')
+      .filter((line) => line.startsWith('init '))
+      .map((line) => Number(/pid=(\d+)/.exec(line)?.[1] ?? 0))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+};
+const alivePids = (pids) => pids.filter((pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+});
+const waitForExit = async (pids) => {
+  for (let i = 0; i < 60; i += 1) {
+    if (!alivePids(pids).length) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+};
+
+const connectedPids = await initPids();
+assert.equal(connectedPids.length, 2);
 await pool.dispose();
 assert.equal(await handshakeCount(), 2);
+assert.equal(await waitForExit(connectedPids), true);
 
 console.log('mcp client tests passed');

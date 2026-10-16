@@ -222,6 +222,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private activateRuntime(sessionId: string): void {
+    // 换运行对象之前，先把上一条会话留下的 MCP 连接收掉。池子挂在运行对象上，
+    // 不主动关就只能等它闲够十分钟自己回收，来回切会话会叠出好几份服务器进程。
+    void this.coordinator?.releaseMcpConnections();
     const paths = this.sessionCatalog.pathsFor(sessionId);
     const session = new JsonFileSession(paths.sessionFile);
     const runStore = new JsonRunStore(paths.runStoreFile);

@@ -491,6 +491,21 @@ export class RunCoordinator {
     return shouldExposeMcpTools(run) ? session.tools : [];
   }
 
+  /**
+   * 收掉这条会话留下的 MCP 连接。
+   *
+   * 连接池是挂在运行对象上的，而运行对象一条会话一个。换会话时旧对象被丢掉，
+   * 如果没人主动关，它的连接就只能等闲够十分钟自己回收——来回切几次会话，
+   * 会同时挂着好几份服务器进程。所以换之前先来这里收一次。
+   *
+   * 有轮次在跑时不关：那一轮手上的工具正指着这条连接，关掉会把调用打断。
+   * 那种情况仍旧交给空闲回收，最多多挂十分钟。
+   */
+  async releaseMcpConnections(): Promise<void> {
+    if (this.busy || this.transitioning) return;
+    await this.mcpPool.dispose();
+  }
+
   private compactContextForAgent(
     session: RecoverableContextSession,
     config: AgentConfig,
