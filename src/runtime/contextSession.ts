@@ -288,8 +288,9 @@ function shouldTriggerContextCompaction(
   if (policy.inputBudgetTokens !== undefined) {
     return estimateItemsTokens(items, profile?.tokenCalibration) > policy.inputBudgetTokens;
   }
-  return items.length > policy.legacy.maxItems ||
-    estimateItemsCharacters(items) > policy.legacy.maxCharacters;
+  const tooManyCharacters = estimateItemsCharacters(items) > policy.legacy.maxCharacters;
+  if (profile !== undefined) return tooManyCharacters;
+  return items.length > policy.legacy.maxItems || tooManyCharacters;
 }
 
 function emptyCheckpointResult(

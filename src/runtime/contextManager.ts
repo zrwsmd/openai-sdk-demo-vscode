@@ -126,9 +126,7 @@ export interface ContextCompactionResult {
 }
 
 export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
-  // Keep the compatibility fallback from compacting ordinary short turns.
-  // Configured model token budgets take precedence whenever available.
-  maxItems: 96,
+  maxItems: 48,
   maxCharacters: 80_000,
   recentItems: 16,
   maxSummaryInputCharacters: 60_000,
@@ -148,7 +146,11 @@ export async function ensureContextCompacted(
     ? undefined
     : estimateItemsTokens(items, modelContext?.tokenCalibration);
   const { maxItems, maxCharacters } = policy.legacy;
-  const tooManyItems = items.length > maxItems;
+  // A modern modelContext profile uses context length as the fallback signal
+  // even when its exact model window is unknown. Item count is retained only
+  // for legacy callers that never supplied a modelContext profile.
+  const useLegacyItemThreshold = modelContext === undefined;
+  const tooManyItems = useLegacyItemThreshold && items.length > maxItems;
   const tooManyCharacters = beforeCharacters > maxCharacters;
   const tooManyTokens =
     inputBudgetTokens !== undefined &&

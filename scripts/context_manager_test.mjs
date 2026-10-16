@@ -151,7 +151,7 @@ try {
     );
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
-      maxItems: 96,
+      maxItems: 48,
       maxCharacters: 80_000,
       recentItems: 16,
       maxSummaryInputCharacters: 60_000,
@@ -463,6 +463,7 @@ try {
       modelContext: {
         compaction: {
           maxItems: 3,
+          maxCharacters: 1,
           recentItems: 2,
         },
       },
@@ -478,7 +479,32 @@ try {
     assert.equal(result.compacted, true);
     assert.equal(result.triggerMode, 'legacy_threshold');
     assert.equal(result.beforeTokens, undefined);
-    assert.match(result.reason, /items>3/);
+    assert.match(result.reason, /chars>1/);
+  }
+
+  {
+    const session = new JsonFileSession(path.join(dir, 'length-profile-session.json'));
+    await session.addItems(Array.from({ length: 52 }, (_, index) => ({
+      type: 'message',
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `短消息 ${index + 1}`,
+    })));
+    let called = false;
+    const result = await ensureContextCompacted(session, cfg, {
+      modelContext: {
+        compaction: {
+          maxItems: 1,
+          maxCharacters: 100_000,
+          recentItems: 16,
+        },
+      },
+      summarize: async () => {
+        called = true;
+        throw new Error('item count must not trigger a modern length profile');
+      },
+    });
+    assert.equal(result.compacted, false);
+    assert.equal(called, false);
   }
 
   {
