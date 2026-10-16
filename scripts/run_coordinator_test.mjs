@@ -2397,6 +2397,76 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
   await fs.rm(test.dir, { recursive: true, force: true });
 }
 
+// A top-level option list must not leak into steps that do not define their
+// own options. This is common when a model puts project type choices on the
+// request and asks for the path/name in later steps.
+{
+  let releaseClarification;
+  const clarificationStarted = new Promise((resolve) => {
+    releaseClarification = resolve;
+  });
+  const test = await fixture(async (cfg, session, userText) => {
+    await session.addItems([{ type: 'message', role: 'user', content: userText }]);
+    releaseClarification();
+    const response = await cfg.clarification.request({
+      kind: 'plc_task_configuration',
+      title: '创建工程',
+      question: '请选择工程类型。',
+      options: [
+        { id: 'standard', label: '标准 PLC 工程' },
+        { id: 'hmi', label: '人机界面工程' },
+      ],
+      steps: [
+        {
+          id: 'projectType',
+          question: '请选择工程类型。',
+          options: [
+            { id: 'standard', label: '标准 PLC 工程' },
+            { id: 'hmi', label: '人机界面工程' },
+          ],
+        },
+        { id: 'language', question: '请选择工程语言。' },
+        { id: 'deviceModel', question: '请选择设备型号。' },
+        { id: 'projectPath', question: '工程创建在哪个父目录下？' },
+        { id: 'projectName', question: '工程名称是什么？' },
+      ],
+    });
+    return {
+      status: 'completed',
+      output: Object.keys(response.answers ?? {}).join(','),
+      usage,
+      result: completedAgentResult('multi-step clarified'),
+    };
+  });
+  const running = test.coordinator.start('创建工程', config, 'key');
+  await clarificationStarted;
+  const requests = [];
+  for (let index = 0; index < 5; index += 1) {
+    for (let attempt = 0; attempt < 100 && requests.length <= index; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const requested = test.events
+        .filter((event) => event.type === 'agentEvent' && event.event.type === 'clarification.requested')
+        .map((event) => event.event);
+      if (requested.length > requests.length) requests.push(requested[requests.length]);
+    }
+    if (!requests[index]) throw new Error(`multi-step clarification step ${index + 1} was not requested`);
+    await test.coordinator.resolveClarification(
+      requests[index].runId,
+      requests[index].payload.requestId,
+      { cancelled: false, customText: `answer-${index + 1}` },
+    );
+  }
+  await running;
+  if (
+    requests[0].payload.options.length !== 2 ||
+    requests[3].payload.options.length !== 0 ||
+    requests[4].payload.options.length !== 0
+  ) {
+    throw new Error('multi-step clarification leaked top-level options into later steps');
+  }
+  await fs.rm(test.dir, { recursive: true, force: true });
+}
+
 // Clear owns the final boundary: a late run completion cannot restore the old
 // session or leave a retryable run behind after the user starts a new session.
 {

@@ -34,7 +34,8 @@ export function createClarificationTool(ctx: ToolBuildContext) {
       '只用于补齐需求，不用于审批写文件、运行命令或设备操作。' +
       '如果只是能合理默认的普通细节，不要打断用户。' +
       '只有一个问题时使用 title/question/options；有多个彼此独立且都需要用户确认的问题时，' +
-      '使用 steps 一次性提交步骤数组，运行时会逐步弹窗，每步只问一个问题，最终返回按 id 整理的 answers。',
+      '使用 steps 一次性提交步骤数组，运行时会逐步弹窗，每步只问一个问题，最终返回按 id 整理的 answers。' +
+      '使用 steps 时，候选 options 必须放在对应步骤内；顶层 options 只用于单步骤请求。',
     parameters: z.object({
       kind: z.string().optional().describe('澄清类型，例如 general 或 plc_task_configuration'),
       title: z.string().optional().describe('单步骤弹窗标题；多步骤时可作为默认总标题'),
@@ -75,7 +76,7 @@ export function createClarificationTool(ctx: ToolBuildContext) {
             title: input.title ?? steps[0]?.title ?? '需要补充信息',
             question: input.question ?? steps[0]?.question ?? '请补充必要信息。',
             ...(input.details ? { details: input.details } : {}),
-            ...(input.options?.length ? { options: input.options } : {}),
+            ...(!steps.length && input.options?.length ? { options: input.options } : {}),
             allowCustom: input.allowCustom !== false,
             ...(input.customPlaceholder ? { customPlaceholder: input.customPlaceholder } : {}),
             required: input.required !== false,

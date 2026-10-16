@@ -603,14 +603,15 @@ export class RunCoordinator {
             : request.details !== undefined
               ? { details: request.details }
               : {}),
-          ...(step.options !== undefined ? { options: step.options } : {}),
-          ...(step.allowCustom !== undefined
-            ? { allowCustom: step.allowCustom }
-            : {}),
-          ...(step.customPlaceholder !== undefined
-            ? { customPlaceholder: step.customPlaceholder }
-            : {}),
-          ...(step.required !== undefined ? { required: step.required } : {}),
+          // Step-scoped fields must not fall back to the top-level request.
+          // A model may provide top-level options together with `steps`; if
+          // we leave these properties untouched, every step inherits the
+          // first step's options (for example project type options showing
+          // up on the project path/name steps).
+          options: step.options,
+          allowCustom: step.allowCustom,
+          customPlaceholder: step.customPlaceholder,
+          required: step.required,
           steps: undefined,
         },
         signal,
