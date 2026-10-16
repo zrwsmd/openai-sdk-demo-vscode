@@ -993,9 +993,9 @@ body.settings-open { overflow: hidden; }
 .approval-actions .btn { min-width: 76px; min-height: 30px; }
 .approval-actions .btn:disabled { opacity: 0.6; cursor: default; }
 
-/* ---------- 工程打开入口(行内代码样式的可点名字) ---------- */
-.project-open-line { margin: 8px 0; font-size: 14px; color: var(--muted); }
-.project-open-link {
+/* ---------- 工具动作(行内代码样式的可点名字) ---------- */
+.tool-action-line { margin: 8px 0; font-size: 14px; color: var(--muted); }
+.tool-action-link {
   display: inline;
   padding: 3px 8px;
   border: 1px solid color-mix(in srgb, var(--border) 88%, var(--accent));
@@ -1007,15 +1007,17 @@ body.settings-open { overflow: hidden; }
   font-weight: 600;
   cursor: pointer;
 }
-.project-open-link:hover:not(:disabled) {
+.tool-action-link:hover:not(:disabled) {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--box) 72%, var(--accent));
 }
-.project-open-link:disabled { color: var(--muted); cursor: default; }
-.project-open-line.failed .project-open-link {
+.tool-action-link:disabled { color: var(--muted); cursor: default; }
+.tool-action-status { font-size: 12px; }
+.tool-action-line.failed .tool-action-link {
   border-color: var(--vscode-errorForeground, #f66);
   color: var(--vscode-errorForeground, #f66);
 }
+.tool-action-line.failed .tool-action-status { color: var(--vscode-errorForeground, #f66); }
 
 /* ---------- 澄清弹窗 ---------- */
 .clarification-card {

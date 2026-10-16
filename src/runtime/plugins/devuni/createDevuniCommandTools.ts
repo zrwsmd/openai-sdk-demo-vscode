@@ -78,6 +78,7 @@ export function createDevuniCommandTool(
             { summary: outcome.summary, result: outcome.data },
             risk,
             effect,
+            outcome.actions,
           );
         },
         risk,

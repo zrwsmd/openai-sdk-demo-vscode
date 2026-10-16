@@ -11,12 +11,13 @@
  *   4. 返回怎么翻译      —— toOutcome(对方返回值 → 给模型看的结论)
  */
 import { z } from "zod";
+import type { ToolResultAction } from "../../../protocol/results";
 import type { ToolCapability } from "../../toolCatalog";
 import type { DevuniCommandPort } from "./devuniCommandPort";
 
 /** 桥命令返回值归一化之后的样子。 */
 export type DevuniCommandOutcome =
-  | { ok: true; data: unknown; summary: string }
+  | { ok: true; data: unknown; summary: string; actions?: ToolResultAction[] }
   | { ok: false; error: string; data?: unknown };
 
 /**
@@ -95,6 +96,12 @@ function readOptionList(value: unknown): DevuniOption[] {
     options.push({ id, name });
   }
   return options;
+}
+
+/** 从工作区文件路径取工程名:去掉目录和 .code-workspace 后缀。 */
+function projectNameFromWorkspaceFile(workspaceFile: string): string {
+  const base = workspaceFile.replace(/\\/g, "/").split("/").pop() ?? "";
+  return base.replace(/\.code-workspace$/i, "") || base || workspaceFile;
 }
 
 export interface DevuniProjectOptions {
@@ -304,6 +311,23 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
         ? `工程已创建:${workspaceFile}` +
           (opened ? "(已切换到新工程窗口)" : "(当前窗口保持不动)")
         : "工程已创建。",
+      // 界面上那行「点工程名打开」由这条声明驱动:界面只认这份清单的形状,
+      // 不知道是谁给的、也不用知道 bridgeOpenPrj 是什么。
+      actions: workspaceFile
+        ? [
+            {
+              label: "项目已创建，可以在新窗口打开",
+              text: projectNameFromWorkspaceFile(workspaceFile),
+              title:
+                `在新窗口打开 ${workspaceFile}` +
+                "(在当前窗口打开会重启扩展宿主，本会话会中断)",
+              command: "bridgeOpenPrj",
+              // 第二个参数是"是否在新窗口打开"。当前窗口会重启扩展宿主、断掉本会话,
+              // 所以默认固定新窗口。
+              args: [workspaceFile, true],
+            },
+          ]
+        : [],
     };
   },
 });

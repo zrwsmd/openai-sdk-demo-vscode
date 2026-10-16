@@ -84,7 +84,7 @@ import {
  *                   {type:'saveMcpServer', name, originalName?, transport, command?, args?, url?, cwd?, env?}
  *                   {type:'deleteMcpServer', name}
  *                   {type:'openMcpConfig'}
- *                   {type:'openProject', workspaceFile, newWindow?}
+ *                   {type:'pluginCommand', command, args?, actionKey?}
  *   host → webview: {type:'user'|'done'|'error'|'busy'|'idle'|'cleared'}
  *                   {type:'sessions', sessions, activeSessionId}
  *                   {type:'agentEvent', event: AgentProtocolEvent} (stable SDK-independent stream)
@@ -93,7 +93,7 @@ import {
  *                   {type:'settingsSaved', model, apiFormat, vendorId} / {type:'settingsError', message}
  *                   {type:'permissionModeSaved', permissionMode}
  *                   {type:'mcpStatus', name, status, error?, toolCount?}
- *                   {type:'projectOpenRequested', workspaceFile, newWindow}(工程卡片点了之后回执)
+ *                   {type:'pluginCommandResult', actionKey, ok, error?}(工具动作执行回执)
  */
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -181,8 +181,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.setMcpEnabled(msg.name, msg.enabled);
       } else if (msg.type === 'probeMcpServers') {
         void this.probeMcpServers();
-      } else if (msg.type === 'openProject' && typeof msg.workspaceFile === 'string') {
-        void this.openProject(msg.workspaceFile, msg.newWindow !== false);
+      } else if (msg.type === 'pluginCommand' && typeof msg.command === 'string') {
+        void this.runPluginCommand(
+          msg.command,
+          Array.isArray(msg.args) ? msg.args : [],
+          typeof msg.actionKey === 'string' ? msg.actionKey : '',
+        );
       }
     });
 
@@ -897,30 +901,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * 用户在聊天里点「打开工程」卡片时走这里。
+   * 界面上的工具动作被点了。工具结果里声明了什么命令,这里就原样打给外部插件。
    *
-   * 这条路径不经过模型:界面点一下,这里直接打桥的开工程命令。
-   * 默认新窗口——在当前窗口打开会重启扩展宿主,把正在进行的会话一起带走。
+   * 这条路径不经过模型:界面点一下,这里直接调桥。chatView 只负责把命令转发出去,
+   * 具体是哪个工具、调哪条命令、参数是什么,全在工具结果那份声明里,这里不判断。
    */
-  private async openProject(workspaceFile: string, newWindow: boolean): Promise<void> {
-    const file = workspaceFile.trim();
-    if (!file) return;
-    const label = newWindow ? '新窗口' : '当前窗口';
+  private async runPluginCommand(
+    command: string,
+    args: unknown[],
+    actionKey: string,
+  ): Promise<void> {
+    const name = command.trim();
+    if (!name) return;
     try {
       const port = createDevuniCommandPort();
-      await port.invoke('bridgeOpenPrj', file, newWindow);
-      this.log.appendLine(`[devuni] 打开工程 ${file}(${label})`);
-      this.post({ type: 'projectOpenRequested', workspaceFile: file, newWindow, ok: true });
+      await port.invoke(name, ...args);
+      this.log.appendLine(`[devuni] 执行 ${name} ${JSON.stringify(args)}`);
+      this.post({ type: 'pluginCommandResult', actionKey, ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.log.appendLine(`[devuni] 打开工程失败 ${file}: ${message}`);
-      this.post({
-        type: 'projectOpenRequested',
-        workspaceFile: file,
-        newWindow,
-        ok: false,
-        error: message,
-      });
+      this.log.appendLine(`[devuni] 执行 ${name} 失败: ${message}`);
+      this.post({ type: 'pluginCommandResult', actionKey, ok: false, error: message });
     }
   }
 

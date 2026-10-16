@@ -15,7 +15,7 @@ import type { AuditEvent } from "../../observability/audit";
 import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/workspaceScope";
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
 import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
-import type { Diagnostic } from "../../protocol/results";
+import type { Diagnostic, ToolResultAction } from "../../protocol/results";
 import type { CommandRunner } from "../../tools/commandRunner";
 import { LocalCommandRunner } from "../../tools/localCommandRunner";
 import {
@@ -159,7 +159,12 @@ export interface ToolBuildContext {
     risk: ToolRisk,
     execute: () => Promise<T>,
   ) => Promise<T>;
-  contract: <T>(data: T, risk: ToolRisk, effect?: ToolEffect) => string;
+  contract: <T>(
+    data: T,
+    risk: ToolRisk,
+    effect?: ToolEffect,
+    actions?: ToolResultAction[],
+  ) => string;
   failed: (error: unknown, risk: ToolRisk, effect?: ToolEffect) => string;
   guard: <T>(
     fn: () => Promise<T>,
@@ -361,8 +366,19 @@ export function createToolBuildContext(
     const run = () => execute();
     return cfg.executeEffect ? cfg.executeEffect(toolName, input, run) : run();
   };
-  const contract = <T>(data: T, risk: ToolRisk, effect: ToolEffect = "none") =>
-    toolResult({ ok: true, data, effect, risk });
+  const contract = <T>(
+    data: T,
+    risk: ToolRisk,
+    effect: ToolEffect = "none",
+    actions?: ToolResultAction[],
+  ) =>
+    toolResult({
+      ok: true,
+      data,
+      effect,
+      risk,
+      ...(actions?.length ? { actions } : {}),
+    });
   const failed = (
     error: unknown,
     risk: ToolRisk,

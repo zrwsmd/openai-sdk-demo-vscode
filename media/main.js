@@ -1474,86 +1474,93 @@ function addDiagnosticReport(report) {
   scrollBottom();
 }
 
-// 工程创建成功后补的那张卡:点工程名就去把工程打开。
-// 它不是工具卡——工具卡是"已经做完"的记录,点了没反应;这张的点击是发起动作,
-// 由界面直接发给扩展,不经过模型。
-function projectNameOf(workspaceFile) {
-  const base = String(workspaceFile ?? '').replace(/\\/g, '/').split('/').pop() || '';
-  return base.replace(/\.code-workspace$/i, '') || base || '工程';
+// 工具结果里可以带一份「动作」清单(形状见 src/protocol/results.ts 的 toolResultActionSchema):
+// 界面上渲染成一行说明加一个可点的名字,点一下就把命令发给扩展去执行。
+// 它不是工具卡——工具卡是"已经做完"的记录,点了没反应;这里点一下是发起动作,
+// 由界面直接发给扩展,不经过模型。界面不认识具体是哪个工具,声明里写什么就照着做什么。
+function toolActionKey(action) {
+  return `${action.command}\u0000${JSON.stringify(action.args ?? [])}`;
 }
 
-// devuni 工具的返回值形状是 { ok, data: { summary, result } }(通用工厂把
-// toOutcome 的 data 塞在 data.result 里),工程路径在 result.workspaceFile。
-function createdWorkspaceFile(result) {
-  if (!result || typeof result !== 'object') return undefined;
-  const data = result.data && typeof result.data === 'object' ? result.data : undefined;
-  const inner = data && data.result && typeof data.result === 'object' ? data.result : undefined;
-  const file = inner ? inner.workspaceFile : undefined;
-  return typeof file === 'string' && file.trim() ? file.trim() : undefined;
+function toolActionsOf(result) {
+  const actions = result && typeof result === 'object' ? result.actions : undefined;
+  if (!Array.isArray(actions)) return [];
+  return actions.filter((action) => !!action
+    && typeof action === 'object'
+    && typeof action.label === 'string' && action.label.trim()
+    && typeof action.text === 'string' && action.text.trim()
+    && typeof action.command === 'string' && action.command.trim());
 }
 
-// 本轮建出来的工程。先只把路径记下来,等这一轮的答复文本渲染完,再把入口追加到答复下面。
-// 不在工具卡那一步就直接插 DOM —— 那样会先露一次,答复渲染完又挪一次,看起来像渲染了两遍。
-const pendingProjectFiles = [];
+// 本轮新冒出来的动作。先只把声明记下来,等这一轮的答复文本渲染完再建 DOM ——
+// 在工具卡那一步就插会先露一次,答复渲染完又挪一次,看起来像渲染了两遍。
+const pendingToolActions = [];
 
-function flushProjectOpenLines() {
-  if (!pendingProjectFiles.length) return;
-  for (const file of pendingProjectFiles.splice(0, pendingProjectFiles.length)) {
-    addProjectOpenCard(file);
+function flushToolActions() {
+  if (!pendingToolActions.length) return;
+  for (const action of pendingToolActions.splice(0, pendingToolActions.length)) {
+    addToolActionLine(action);
   }
 }
 
-function addProjectOpenCard(workspaceFile) {
-  const file = String(workspaceFile ?? '').trim();
-  if (!file) return null;
-  if (messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`)) return null;
+function addToolActionLine(action) {
+  const key = toolActionKey(action);
+  if (messagesEl.querySelector(`[data-tool-action="${CSS.escape(key)}"]`)) return null;
 
   const line = document.createElement('div');
-  line.className = 'project-open-line';
-  line.dataset.projectOpen = file;
+  line.className = 'tool-action-line';
+  line.dataset.toolAction = key;
 
   const label = document.createElement('span');
-  label.className = 'project-open-label';
-  label.textContent = '项目已创建，可以在新窗口打开 ';
+  label.className = 'tool-action-label';
+  label.textContent = `${action.label.trim()} `;
 
   const link = document.createElement('button');
   link.type = 'button';
-  link.className = 'project-open-link';
-  link.textContent = projectNameOf(file);
-  link.title = `在新窗口打开 ${file}（在当前窗口打开会重启扩展宿主，本会话会中断）`;
+  link.className = 'tool-action-link';
+  link.textContent = action.text.trim();
+  if (typeof action.title === 'string' && action.title) link.title = action.title;
+
+  const status = document.createElement('span');
+  status.className = 'tool-action-status';
 
   link.addEventListener('click', () => {
-    if (line.classList.contains('pending') || line.classList.contains('opened')) return;
+    if (line.classList.contains('pending') || line.classList.contains('done')) return;
     line.classList.remove('failed');
     line.classList.add('pending');
     link.disabled = true;
-    label.textContent = '项目已创建，正在打开 ';
-    vscode.postMessage({ type: 'openProject', workspaceFile: file, newWindow: true });
+    status.textContent = ' 执行中…';
+    vscode.postMessage({
+      type: 'pluginCommand',
+      command: action.command,
+      args: Array.isArray(action.args) ? action.args : [],
+      actionKey: key,
+    });
   });
 
-  line.append(label, link);
+  line.append(label, link, status);
   messagesEl.appendChild(line);
   scrollBottom();
   return line;
 }
 
-function markProjectOpenCard(workspaceFile, ok, error) {
-  const file = String(workspaceFile ?? '').trim();
-  if (!file) return;
-  const line = messagesEl.querySelector(`[data-project-open="${CSS.escape(file)}"]`);
+function markToolActionLine(actionKey, ok, error) {
+  const key = String(actionKey ?? '');
+  if (!key) return;
+  const line = messagesEl.querySelector(`[data-tool-action="${CSS.escape(key)}"]`);
   if (!line) return;
-  const label = line.querySelector('.project-open-label');
-  const link = line.querySelector('.project-open-link');
+  const link = line.querySelector('.tool-action-link');
+  const status = line.querySelector('.tool-action-status');
   line.classList.remove('pending');
   if (ok) {
-    line.classList.add('opened');
+    line.classList.add('done');
     if (link) link.disabled = true;
-    if (label) label.textContent = '项目已创建，已在新窗口打开 ';
+    if (status) status.textContent = ' 已完成';
     return;
   }
   line.classList.add('failed');
   if (link) link.disabled = false;
-  if (label) label.textContent = `项目已创建，打开失败（${error || '未知原因'}），再点一次 `;
+  if (status) status.textContent = ` 失败：${error || '未知原因'}（可以再点一次）`;
 }
 
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
@@ -2994,9 +3001,8 @@ function handleProtocolEvent(event) {
         break;
       }
       addToolResult(name, payload.ok === true, summary, payload.result, run, durationMs);
-      if (name === 'devuni_create_project' && payload.ok === true) {
-        const created = createdWorkspaceFile(payload.result);
-        if (created && !pendingProjectFiles.includes(created)) pendingProjectFiles.push(created);
+      if (payload.ok === true) {
+        for (const action of toolActionsOf(payload.result)) pendingToolActions.push(action);
       }
       updateWorkflowStage(event.runId, name, payload.ok === true ? 'completed' : 'failed', payload.result);
       pendingToolCount = Math.max(0, pendingToolCount - 1);
@@ -3032,13 +3038,13 @@ function handleProtocolEvent(event) {
       // The host error control message owns the detailed error bubble.
       closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'failed');
-      flushProjectOpenLines();
+      flushToolActions();
       break;
     case 'run.cancelled':
       // The host cancelled control message owns the retry state and controls.
       closeThinkingAtBoundary(event.runId || currentRunId);
       finishWorkflowView(event.runId, 'cancelled');
-      flushProjectOpenLines();
+      flushToolActions();
       break;
     case 'approval.requested':
       closeThinkingAtBoundary(event.runId || currentRunId);
@@ -3127,7 +3133,7 @@ function renderAgentText(text) {
       agentBubble.classList.remove('streaming');
     }
   }
-  flushProjectOpenLines();
+  flushToolActions();
 }
 
 function flushPendingAgentText() {
@@ -3154,7 +3160,7 @@ function renderHistoryMessage(m) {
     const b = addMessage('agent', '');
     renderRich(b, text);
   }
-  flushProjectOpenLines();
+  flushToolActions();
 }
 
 function replayHistoryEvents(events) {
@@ -3336,7 +3342,7 @@ window.addEventListener('message', (event) => {
       pendingFinalText = null;
       pendingToolCount = 0;
       hadToolThisTurn = false;
-      pendingProjectFiles.length = 0;
+      pendingToolActions.length = 0;
       const messages = msg.messages || [];
       const events = Array.isArray(msg.events) ? msg.events : [];
       const { groups, legacy } = groupHistoryEvents(events);
@@ -3565,8 +3571,8 @@ window.addEventListener('message', (event) => {
     case 'mcpStatus':
       applyMcpStatus(msg);
       break;
-    case 'projectOpenRequested':
-      markProjectOpenCard(msg.workspaceFile, msg.ok === true, msg.error);
+    case 'pluginCommandResult':
+      markToolActionLine(msg.actionKey, msg.ok === true, msg.error);
       break;
   }
 });

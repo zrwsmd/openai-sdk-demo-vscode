@@ -31,6 +31,27 @@ export const artifactSchema = z.object({
 }).passthrough();
 export type Artifact = z.infer<typeof artifactSchema>;
 
+/**
+ * 工具结果里可以附带的一份「动作」清单。
+ *
+ * 界面上渲染成一行说明加一个可点的名字;点一下就把 command 发给扩展去执行。
+ * 声明由工具自己给(写在结果里),界面不认识具体是哪个工具、也不需要认识——
+ * 以后新增同类入口(关闭工程、重启设备……)只加声明,界面一个字不用改。
+ */
+export const toolResultActionSchema = z.object({
+  /** 动作前面那句说明,例如 "项目已创建,可以在新窗口打开"。 */
+  label: z.string().min(1),
+  /** 可点的名字,例如工程名。 */
+  text: z.string().min(1),
+  /** 鼠标悬停提示。 */
+  title: z.string().optional(),
+  /** 点了要调的外部插件命令短名,见 vscode-command-bridge 的 COMMAND_REGISTRY。 */
+  command: z.string().min(1),
+  /** 传给该命令的位置参数。 */
+  args: z.array(z.unknown()).optional(),
+}).passthrough();
+export type ToolResultAction = z.infer<typeof toolResultActionSchema>;
+
 export const approvalRequestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -56,6 +77,7 @@ export const toolResultSchema = z.object({
   effect: toolEffectSchema,
   risk: toolRiskSchema,
   metadata: z.record(z.string(), z.unknown()).optional(),
+  actions: z.array(toolResultActionSchema).optional(),
 }).passthrough();
 export type ToolResult<T = unknown> = Omit<z.infer<typeof toolResultSchema>, 'data'> & { data?: T };
 
@@ -67,6 +89,7 @@ export interface ToolResultInput<T = unknown> {
   effect: ToolEffect;
   risk: ToolRisk;
   metadata?: Record<string, unknown>;
+  actions?: ToolResultAction[];
 }
 
 const agentResultCommon = {
