@@ -878,6 +878,8 @@ export class RunCoordinator {
               compact: (session, contextConfig, options) =>
                 this.compactContextForAgent(session, contextConfig, options),
               log: this.writeLog,
+              onCompactionState: (state, result) =>
+                this.emitContextCompactionState(run, state, result),
             },
           );
           const compaction = await managedContext.runInitialCheckpoint();
@@ -912,6 +914,8 @@ export class RunCoordinator {
           {
             signal: compactionController.signal,
             modelContext: config.modelContext,
+            onCompactionState: (state, result) =>
+              this.emitContextCompactionState(run, state, result),
           },
         );
         if (this.transitionController === compactionController) this.transitionController = undefined;
@@ -1952,6 +1956,8 @@ export class RunCoordinator {
             compact: (session, contextConfig, options) =>
               this.compactContextForAgent(session, contextConfig, options),
             log: this.writeLog,
+            onCompactionState: (state, result) =>
+              this.emitContextCompactionState(run, state, result),
           },
         );
         const initialCompaction = await managedContextSession.runInitialCheckpoint();
@@ -2898,6 +2904,36 @@ export class RunCoordinator {
       status,
       ...(message ? { message } : {}),
     });
+  }
+
+  private emitContextCompactionState(
+    run: DurableRunRecord,
+    state: 'started' | 'completed' | 'failed',
+    result?: ContextCompactionResult,
+  ): void {
+    this.ensureProtocolFactory(run);
+    const message = state === 'started'
+      ? '正在压缩上下文…'
+      : state === 'completed'
+        ? result?.error
+          ? '上下文压缩完成，摘要服务异常，已使用保守保底记录'
+          : '上下文压缩完成'
+        : '上下文压缩失败，继续使用当前历史';
+    this.emitProtocol(this.protocolFactory!.next({
+      type: 'run.progress',
+      payload: {
+        stage: `context.compaction.${state}`,
+        message,
+        ...(result ? {
+          beforeItems: result.beforeItems,
+          afterItems: result.afterItems,
+          beforeCharacters: result.beforeCharacters,
+          afterCharacters: result.afterCharacters,
+          ...(result.beforeTokens === undefined ? {} : { beforeTokens: result.beforeTokens }),
+          ...(result.afterTokens === undefined ? {} : { afterTokens: result.afterTokens }),
+        } : {}),
+      },
+    }));
   }
 
   private emitProtocol(event: AgentProtocolEvent): void {

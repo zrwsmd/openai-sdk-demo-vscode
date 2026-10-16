@@ -173,7 +173,7 @@
         "plcAgent.context.compaction.maxItems": {
           "type": "integer",
           "minimum": 1,
-          "default": 48,
+          "default": 96,
           "description": "兼容旧配置：仅在未配置有效模型上下文预算时作为条数兜底；token 预算有效时忽略"
         },
         "plcAgent.context.compaction.maxCharacters": {

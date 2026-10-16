@@ -98,6 +98,11 @@ export interface ContextManagerOptions {
   maxSummaryInputCharacters?: number;
   signal?: AbortSignal;
   summarize?: ContextSummarizer;
+  /** Notifies the host when an actual compaction request starts or finishes. */
+  onCompactionState?: (
+    state: 'started' | 'completed' | 'failed',
+    result?: ContextCompactionResult,
+  ) => void;
 }
 
 export interface ResolvedContextCompactionPolicy {
@@ -121,7 +126,9 @@ export interface ContextCompactionResult {
 }
 
 export const LEGACY_CONTEXT_COMPACTION_DEFAULTS: Required<LegacyContextCompactionBudget> = {
-  maxItems: 48,
+  // Keep the compatibility fallback from compacting ordinary short turns.
+  // Configured model token budgets take precedence whenever available.
+  maxItems: 96,
   maxCharacters: 80_000,
   recentItems: 16,
   maxSummaryInputCharacters: 60_000,
@@ -186,6 +193,8 @@ export async function ensureContextCompacted(
     };
   }
 
+  notifyCompactionState(options, 'started');
+
   const priorSummaryItems = [...olderItems, ...recentItems].filter(isContextSummaryItem);
   const olderContentItems = olderItems.filter((item) => !isContextSummaryItem(item));
   const recentContentItems = recentItems.filter((item) => !isContextSummaryItem(item));
@@ -214,7 +223,7 @@ export async function ensureContextCompacted(
     const afterTokens = inputBudgetTokens === undefined
       ? undefined
       : estimateItemsTokens(compactedItems, modelContext?.tokenCalibration);
-    return {
+    const result = {
       compacted: true,
       beforeItems: items.length,
       afterItems: compactedItems.length,
@@ -231,9 +240,11 @@ export async function ensureContextCompacted(
         ].filter(Boolean).join(',')
         : `tokens>${inputBudgetTokens}`,
     };
+    notifyCompactionState(options, 'completed', result);
+    return result;
   } catch (error) {
     if (isAbortError(error) || options.signal?.aborted) {
-      return {
+      const result = {
         compacted: false,
         beforeItems: items.length,
         afterItems: items.length,
@@ -245,6 +256,8 @@ export async function ensureContextCompacted(
         triggerMode,
         reason: 'aborted',
       };
+      notifyCompactionState(options, 'failed', result);
+      return result;
     }
     const originalError = error instanceof Error
       ? `${error.name}: ${error.message}`
@@ -261,7 +274,7 @@ export async function ensureContextCompacted(
       const afterTokens = inputBudgetTokens === undefined
         ? undefined
         : estimateItemsTokens(fallbackItems, modelContext?.tokenCalibration);
-      return {
+      const result = {
         compacted: true,
         beforeItems: items.length,
         afterItems: fallbackItems.length,
@@ -274,11 +287,13 @@ export async function ensureContextCompacted(
         reason: 'summary_failed_emergency_fallback',
         error: originalError,
       };
+      notifyCompactionState(options, 'completed', result);
+      return result;
     } catch (fallbackError) {
       const fallbackErrorText = fallbackError instanceof Error
         ? `${fallbackError.name}: ${fallbackError.message}`
         : String(fallbackError);
-      return {
+      const result = {
         compacted: false,
         beforeItems: items.length,
         afterItems: items.length,
@@ -290,7 +305,21 @@ export async function ensureContextCompacted(
         triggerMode,
         error: `${originalError}; emergency fallback failed: ${fallbackErrorText}`,
       };
+      notifyCompactionState(options, 'failed', result);
+      return result;
     }
+  }
+}
+
+function notifyCompactionState(
+  options: ContextManagerOptions,
+  state: 'started' | 'completed' | 'failed',
+  result?: ContextCompactionResult,
+): void {
+  try {
+    options.onCompactionState?.(state, result);
+  } catch {
+    // A UI/telemetry observer must never change the compaction result.
   }
 }
 

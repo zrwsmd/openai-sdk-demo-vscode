@@ -36,6 +36,7 @@ export type ContextSessionMode = 'local' | 'official_responses';
 export interface ContextSessionOptions {
   getSignal?: () => AbortSignal | undefined;
   log?: (line: string) => void;
+  onCompactionState?: ContextManagerOptions['onCompactionState'];
   /**
    * The coordinator injects its compactor so tests and hosts can retain their
    * existing summary policy without coupling this decorator to RunCoordinator.
@@ -217,19 +218,44 @@ class ResponsesCompactionInputSession implements Session {
 }
 
 class BestEffortOpenAIResponsesCompactionSession extends OpenAIResponsesCompactionSession {
+  private compactionStarted = false;
+  private markCompactionStarted = (): void => {
+    if (this.compactionStarted) return;
+    this.compactionStarted = true;
+    this.onCompactionState?.('started');
+  };
+
   constructor(
     options: OpenAIResponsesCompactionSessionOptions,
     private readonly log: (line: string) => void,
+    private readonly onCompactionState?: ContextManagerOptions['onCompactionState'],
   ) {
-    super(options);
+    let markCompactionStarted = (): void => {};
+    const decision = options.shouldTriggerCompaction;
+    super({
+      ...options,
+      ...(decision ? {
+        shouldTriggerCompaction: async (context) => {
+          const shouldCompact = await decision(context);
+          if (shouldCompact) markCompactionStarted();
+          return shouldCompact;
+        },
+      } : {}),
+    });
+    markCompactionStarted = this.markCompactionStarted;
   }
 
   override async runCompaction(
     args?: OpenAIResponsesCompactionArgs,
   ): Promise<Awaited<ReturnType<OpenAIResponsesCompactionSession['runCompaction']>>> {
+    this.compactionStarted = false;
+    if (args?.force === true) this.markCompactionStarted();
     try {
-      return await super.runCompaction(args);
+      const result = await super.runCompaction(args);
+      if (this.compactionStarted) this.onCompactionState?.('completed');
+      return result;
     } catch (error) {
+      if (this.compactionStarted) this.onCompactionState?.('failed');
       this.log(
         `[context] 官方 Responses 压缩失败，保留本地历史继续: ${
           error instanceof Error ? `${error.name}: ${error.message}` : String(error)
@@ -310,6 +336,7 @@ export async function createManagedContextSession(
             shouldTriggerContextCompaction(sessionItems, config.modelContext),
         },
         log,
+        options.onCompactionState,
       );
       let turnBoundary = await underlying.getItems();
       return {
@@ -354,6 +381,7 @@ export async function createManagedContextSession(
       {
         modelContext: config.modelContext,
         signal: getSignal(),
+        onCompactionState: options.onCompactionState,
       },
     ),
     log,

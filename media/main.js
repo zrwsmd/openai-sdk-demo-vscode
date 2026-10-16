@@ -57,6 +57,7 @@ let canRetry = false;
 let canContinue = false;
 let pauseNoticeEl = null;
 let preflightNoteEl = null;
+let contextCompactionNoteEl = null;
 let settingsRequestId = 0;
 let settingsSavePending = false;
 let pendingLocalUserText = null;
@@ -472,6 +473,7 @@ function beginUserTurn(text, runId, reusePendingLocal = false) {
   const hint = messagesEl.querySelector('.hint');
   if (hint) hint.remove();
   clearPreflightNote();
+  clearContextCompactionNote();
   const reuseExisting = reusePendingLocal && pendingLocalUserText === displayText && agentBubble;
   if (!reuseExisting) addMessage('user', displayText);
   currentRunId = runId || null;
@@ -518,6 +520,25 @@ function addNote(className, text) {
 function clearPreflightNote() {
   if (preflightNoteEl?.isConnected) preflightNoteEl.remove();
   preflightNoteEl = null;
+}
+
+function clearContextCompactionNote() {
+  if (contextCompactionNoteEl?.isConnected) contextCompactionNoteEl.remove();
+  contextCompactionNoteEl = null;
+}
+
+function showContextCompactionState(message, runId, status = 'completed') {
+  if (currentRunId && runId && currentRunId !== runId) return;
+  if (!contextCompactionNoteEl || !contextCompactionNoteEl.isConnected) {
+    contextCompactionNoteEl = document.createElement('div');
+    contextCompactionNoteEl.className = 'tool-note context-compaction-note';
+    contextCompactionNoteEl.dataset.runId = runId || '';
+    insertBeforeFinalAnswer(contextCompactionNoteEl, runId);
+  }
+  contextCompactionNoteEl.textContent = String(message || '上下文压缩完成');
+  contextCompactionNoteEl.dataset.status = status;
+  contextCompactionNoteEl.classList.toggle('active', status === 'started');
+  scrollBottom();
 }
 
 function showPreflightStage(message) {
@@ -3092,6 +3113,19 @@ function handleProtocolEvent(event) {
       // the visible Thinking segment.
       break;
     case 'run.progress':
+      if (typeof payload.stage === 'string' && payload.stage.startsWith('context.compaction.')) {
+        const status = payload.stage.endsWith('.started')
+          ? 'started'
+          : payload.stage.endsWith('.failed')
+            ? 'failed'
+            : 'completed';
+        showContextCompactionState(
+          payload.message || (status === 'started' ? '正在压缩上下文…' : '上下文压缩完成'),
+          event.runId || currentRunId,
+          status,
+        );
+        break;
+      }
       if (payload.stage === 'diagnostics.report' && payload.report) {
         addDiagnosticReport(payload.report);
         break;
@@ -3109,6 +3143,9 @@ function handleProtocolEvent(event) {
           addNote('tool-note', `计划 ${payload.stepId || ''} ${phase}${payload.message ? `：${payload.message}` : ''}`);
         }
       }
+      break;
+    case 'context.compacted':
+      showContextCompactionState('上下文压缩完成', event.runId || currentRunId, 'completed');
       break;
   }
 }
@@ -3303,6 +3340,7 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       clearPauseNotice();
       clearPreflightNote();
+      clearContextCompactionNote();
       closeClarificationModal();
       clarificationRequests.clear();
       pendingLocalUserText = null;
@@ -3336,6 +3374,7 @@ window.addEventListener('message', (event) => {
       clearPendingRunAck();
       clearPauseNotice();
       clearPreflightNote();
+      clearContextCompactionNote();
       closeClarificationModal();
       clarificationRequests.clear();
       pendingLocalUserText = null;

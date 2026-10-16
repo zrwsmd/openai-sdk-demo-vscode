@@ -151,7 +151,7 @@ try {
     );
     assert.equal(resolveInputTokenBudget({ contextWindowTokens: 4_000, reservedOutputTokens: 4_096 }), undefined);
     assert.deepEqual(LEGACY_CONTEXT_COMPACTION_DEFAULTS, {
-      maxItems: 48,
+      maxItems: 96,
       maxCharacters: 80_000,
       recentItems: 16,
       maxSummaryInputCharacters: 60_000,
@@ -185,9 +185,11 @@ try {
     ]);
 
     let summarizedOlder = 0;
+    const compactionStates = [];
     const result = await ensureContextCompacted(session, cfg, {
       maxItems: 4,
       recentItems: 2,
+      onCompactionState: (state) => compactionStates.push(state),
       summarize: async (_config, older, recent) => {
         summarizedOlder = older.length;
         assert.equal(recent.length, 2);
@@ -203,6 +205,7 @@ try {
     });
 
     assert.equal(result.compacted, true);
+    assert.deepEqual(compactionStates, ['started', 'completed']);
     assert.equal(result.triggerMode, 'legacy_threshold');
     assert.equal(summarizedOlder, 4);
     const items = await session.getItems();

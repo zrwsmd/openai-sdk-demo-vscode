@@ -90,6 +90,7 @@ const baseConfig = {
     message('assistant', '旧工具结果'),
   ]);
   const compactCalls = [];
+  const compactionStates = [];
   const managed = await createManagedContextSession(
     session,
     {
@@ -118,12 +119,14 @@ const baseConfig = {
         },
       },
       log: (line) => console.log(line),
+      onCompactionState: (state) => compactionStates.push(state),
     },
   );
 
   assert.equal(managed.mode, 'official_responses');
   const initial = await managed.runInitialCheckpoint();
   assert.equal(initial.compacted, true);
+  assert.deepEqual(compactionStates, ['started', 'completed']);
   assert.equal(compactCalls.length, 1);
   assert.equal((await session.getItems())[0].type, 'compaction');
   const initialBoundary = await session.getItems();
@@ -131,6 +134,7 @@ const baseConfig = {
   await managed.session.addItems([message('user', '新的请求')]);
   await managed.session.runCompaction?.({ force: true });
   assert.equal(compactCalls.length, 2);
+  assert.deepEqual(compactionStates, ['started', 'completed', 'started', 'completed']);
   await managed.restoreTurnBoundary();
   assert.deepEqual(await session.getItems(), initialBoundary);
 }
