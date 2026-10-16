@@ -12,6 +12,7 @@ import {
 } from "./output";
 import type { AgentConfig } from "./agentConfig";
 import { AgentDecisionService } from "./decision/agentDecision";
+import { projectHistoryForClassifier } from "./agentHistory";
 import { agentLog, buildModelAdapter } from "./modelGateway";
 import type { WorkflowDecisionSignals } from "./workflow/types";
 import {
@@ -293,8 +294,9 @@ export async function routeTeamTask(
       verificationCriteria: ['最终结果满足用户目标并有可追溯的工具或交付证据'],
     }, userText);
   }
-  const input: string | AgentInputItem[] = history.length
-    ? [...history, { type: "message", role: "user", content: userText }]
+  const routerHistory = projectHistoryForClassifier(history);
+  const input: string | AgentInputItem[] = routerHistory.length
+    ? [...routerHistory, { type: "message", role: "user", content: userText }]
     : userText;
   const decision = await runTeamRole(
     cfg,

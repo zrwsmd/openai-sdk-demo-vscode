@@ -17,6 +17,7 @@ import {
   type DeliveryContract,
 } from "./deliveryContract";
 import { AgentDecisionService } from "./decision/agentDecision";
+import { projectHistoryForClassifier } from "./agentHistory";
 import type {
   WorkflowDecisionSignals,
   WorkflowDescriptor,
@@ -265,9 +266,10 @@ export async function planTask(
     adapter.apiFormat === "responses" &&
     !cfg.baseUrl.trim()
   );
-  const plannerInput: string | AgentInputItem[] = history.length
+  const plannerHistory = projectHistoryForClassifier(history);
+  const plannerInput: string | AgentInputItem[] = plannerHistory.length
     ? [
-        ...history,
+        ...plannerHistory,
         { type: "message", role: "user", content: userText },
       ]
     : userText;
@@ -365,8 +367,9 @@ export async function classifyDeliveryContract(
     adapter.apiFormat === "responses" &&
     !cfg.baseUrl.trim()
   );
-  const input: string | AgentInputItem[] = history.length
-    ? [...history, { type: "message", role: "user", content: userText }]
+  const classifierHistory = projectHistoryForClassifier(history);
+  const input: string | AgentInputItem[] = classifierHistory.length
+    ? [...classifierHistory, { type: "message", role: "user", content: userText }]
     : userText;
   try {
     const result = await new Runner({ tracingDisabled }).run(classifier, input, {
@@ -458,8 +461,9 @@ export async function classifyWorkflowDecision(
     adapter.apiFormat === "responses" &&
     !cfg.baseUrl.trim()
   );
-  const input: string | AgentInputItem[] = history.length
-    ? [...history, { type: "message", role: "user", content: userText }]
+  const classifierHistory = projectHistoryForClassifier(history);
+  const input: string | AgentInputItem[] = classifierHistory.length
+    ? [...classifierHistory, { type: "message", role: "user", content: userText }]
     : userText;
   try {
     const result = await new Runner({ tracingDisabled }).run(classifier, input, {

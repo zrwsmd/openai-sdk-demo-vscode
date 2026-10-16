@@ -535,3 +535,73 @@ export function projectNewTurnSessionHistory(
     ...newItems,
   ];
 }
+
+const MAX_STRUCTURED_UNWRAP_DEPTH = 4;
+
+/**
+ * Project history for the auxiliary classifiers (task plan, delivery contract,
+ * workflow route, team route).
+ *
+ * Those roles only pick a route; they must not imitate the main agent. Durable
+ * history stores each finished turn as the raw `IndustrialAgentOutput` JSON, so
+ * feeding it verbatim gives the model a much stronger pattern than the schema
+ * instruction in its prompt and it answers in the agent's shape instead — which
+ * then fails validation. Unwrapping it back to the plain message text keeps the
+ * conversation (so "it" still has a referent) without the format contamination.
+ */
+export function projectHistoryForClassifier(
+  items: readonly AgentInputItem[],
+): AgentInputItem[] {
+  return items.map(unwrapStructuredAssistantMessage);
+}
+
+function unwrapStructuredAssistantMessage(item: AgentInputItem): AgentInputItem {
+  const value = item as Record<string, unknown>;
+  if (value.role !== "assistant") return item;
+  if (typeof value.content === "string") {
+    const text = unwrapStructuredOutputText(value.content);
+    if (text === value.content) return item;
+    return { ...value, content: text } as unknown as AgentInputItem;
+  }
+  if (!Array.isArray(value.content)) return item;
+
+  let changed = false;
+  const content = value.content.map((part) => {
+    if (!part || typeof part !== "object") return part;
+    const record = part as Record<string, unknown>;
+    if (typeof record.text !== "string") return part;
+    const text = unwrapStructuredOutputText(record.text);
+    if (text === record.text) return part;
+    changed = true;
+    return { ...record, text };
+  });
+  if (!changed) return item;
+  return { ...value, content } as unknown as AgentInputItem;
+}
+
+function unwrapStructuredOutputText(text: string, depth = 0): string {
+  if (depth >= MAX_STRUCTURED_UNWRAP_DEPTH) return text;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return text;
+  }
+  if (Array.isArray(parsed)) {
+    // SDK content parts: pull the text out and unwrap whatever it holds.
+    const parts = parsed
+      .map((part) => (part && typeof part === "object"
+        ? (part as { text?: unknown }).text
+        : undefined))
+      .filter((entry): entry is string => typeof entry === "string");
+    if (!parts.length) return text;
+    return unwrapStructuredOutputText(parts.join(""), depth + 1);
+  }
+  const message = (parsed as { message?: unknown }).message;
+  if (typeof message === "string" && message.trim()) {
+    return unwrapStructuredOutputText(message, depth + 1);
+  }
+  return text;
+}
