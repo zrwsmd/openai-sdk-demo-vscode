@@ -357,6 +357,12 @@ function isWorkflowDecisionSignals(value: unknown): boolean {
       if (!isWorkflowBooleanSignal(value.toolNeeds[key])) return false;
     }
   }
+  if (value.mcpServerNeeds !== undefined) {
+    if (!isRecord(value.mcpServerNeeds)) return false;
+    if (Object.values(value.mcpServerNeeds).some((signal) => !isWorkflowBooleanSignal(signal))) {
+      return false;
+    }
+  }
   return true;
 }
 

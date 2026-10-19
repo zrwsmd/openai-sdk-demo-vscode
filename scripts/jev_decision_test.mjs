@@ -196,6 +196,45 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+// MCP intent questions are added to the shared triage request and normalized
+// back to per-server signals without requiring a second model call.
+const originalMcpIntentFetch = globalThis.fetch;
+let mcpIntentRequest;
+globalThis.fetch = async (_url, init) => {
+  mcpIntentRequest = JSON.parse(init?.body ?? '{}');
+  return response({
+    model: 'jev-test',
+    answers: {
+      needs_mcp_server_0: { type: 'noul', noul: 0.96 },
+      needs_mcp_server_1: { type: 'noul', noul: 0.03 },
+    },
+    usage: { input_tokens: 7, output_tokens: 3 },
+  });
+};
+try {
+  const mcpHint = await new AgentDecisionService().taskHint(
+    { apiKey: 'test-key', minConfidence: 0.78 },
+    '查询文件服务中的内容',
+    undefined,
+    {
+      mcpServerChoices: [
+        { name: 'files', description: 'read_file: read workspace files' },
+        { name: 'database', description: 'query_records: query database records' },
+      ],
+    },
+  );
+  if (
+    !mcpIntentRequest?.questions?.needs_mcp_server_0 ||
+    !mcpIntentRequest?.questions?.needs_mcp_server_1 ||
+    mcpHint.mcpServerNeeds?.files?.value !== 'yes' ||
+    mcpHint.mcpServerNeeds?.database?.value !== 'no'
+  ) {
+    throw new Error('MCP server intent was not included or normalized');
+  }
+} finally {
+  globalThis.fetch = originalMcpIntentFetch;
+}
+
 let deliveryClassifierCalls = 0;
 globalThis.fetch = async () => {
   deliveryClassifierCalls += 1;

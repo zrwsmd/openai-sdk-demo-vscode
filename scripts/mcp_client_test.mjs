@@ -429,6 +429,21 @@ await pool.dispose();
 assert.equal(await handshakesOf('a') + await handshakesOf('b'), 4);
 assert.equal(await waitForExit(connectedPids), true);
 
+// A semantic server selection must limit both live connections and cached
+// tool-name fallback to the selected server.
+const selectedPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+const otherBeforeSelection = await handshakesOf('b');
+const selectedLease = await selectedPool.acquire({
+  settings: twoServers,
+  serverNames: ['stub'],
+  policyContext: { workspaceRoot: stubDir },
+});
+assert.deepEqual(selectedLease.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.deepEqual(selectedLease.toolNames, ['mcp_stub_stub_ping']);
+selectedLease.release();
+assert.equal(await handshakesOf('b'), otherBeforeSelection);
+await selectedPool.dispose();
+
 // 池子归窗口，不归会话：换会话只是换一个运行对象，宿主把同一个池子交下去，连接留着。
 //
 // 这里跑两轮，分别落在两个不同的协调器上（也就是两条会话）。共用池子的话只该握手
@@ -513,6 +528,62 @@ assert.equal(await waitForExit(connectedPids), true);
   assert.deepEqual(seenByAgent[0].tools, []);
   assert.equal(await handshakesOf('d'), 0);
   await lazyPool.dispose();
+}
+
+// Jev's per-server intent signals are carried through workflow triage to the
+// pool. A confident yes/no result connects only the selected server.
+{
+  const intentServer = makeServer('intent', 'f');
+  const unusedServer = makeServer('unused', 'g');
+  const intentPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const intentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-intent-'));
+  const seen = [];
+  const coordinator = new RunCoordinator({
+    session: new JsonFileSession(path.join(intentDir, 'session.json')),
+    store: new JsonRunStore(path.join(intentDir, 'runs.json')),
+    emit: () => undefined,
+    mcpPool: intentPool,
+    decisionService: {
+      taskHint: async () => ({
+        delivery: 'not_required',
+        deliveryConfidence: 0.95,
+        orchestration: 'single',
+        orchestrationConfidence: 0.95,
+        workflow: 'general_chat',
+        workflowConfidence: 0.95,
+        toolNeeds: {
+          readFile: { value: 'no', confidence: 0.95 },
+          writeFile: { value: 'no', confidence: 0.95 },
+          runCommand: { value: 'no', confidence: 0.95 },
+        },
+        mcpServerNeeds: {
+          intent: { value: 'yes', confidence: 0.95 },
+          unused: { value: 'no', confidence: 0.95 },
+        },
+        riskLevel: 'low',
+        riskConfidence: 0.95,
+        needsApproval: { value: 'no', confidence: 0.95 },
+        evaluation: { status: 'ok', elapsedMs: 1 },
+      }),
+    },
+    executeAgent: async (_cfg, _session, _userText, options) => {
+      seen.push((options.extraBusinessTools ?? []).map((tool) => tool.name));
+      return completedAgentResult();
+    },
+  });
+  await coordinator.initialize();
+  await coordinator.start('查询 intent 服务里的信息', {
+    baseUrl: 'http://mock/v1',
+    model: 'mock',
+    exportDir: '',
+    workspaceRoot: intentDir,
+    jev: { enabled: false },
+    mcp: { enabled: true, servers: [intentServer, unusedServer] },
+  }, 'key');
+  assert.deepEqual(seen, [['mcp_intent_stub_ping']]);
+  assert.equal(await handshakesOf('g'), 0);
+  await intentPool.dispose();
+  await fs.rm(intentDir, { recursive: true, force: true });
 }
 
 console.log('mcp client tests passed');

@@ -240,6 +240,8 @@ export interface WorkflowDecisionSignals {
    */
   toolNeeds?: WorkflowToolNeedSignals;
   needsApproval?: WorkflowBooleanSignal;
+  /** Per-server MCP intent from semantic triage; unknown means keep all enabled servers. */
+  mcpServerNeeds?: Record<string, WorkflowBooleanSignal>;
 }
 
 export interface WorkflowDescriptor {

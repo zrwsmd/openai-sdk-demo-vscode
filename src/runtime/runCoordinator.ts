@@ -31,6 +31,7 @@ import { usesOfficialOpenAIResponses } from './modelAdapter';
 import { modelContextCalibrationRouteKey } from './contextTokenEstimator';
 import type { DeliveryContract } from './deliveryContract';
 import { AgentDecisionService } from './decision/agentDecision';
+import type { TaskMcpServerChoice } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import type { RuntimeServiceContainer } from './services';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
@@ -75,7 +76,12 @@ import {
 } from './toolRegistry';
 import type { CommandRunner } from '../tools/commandRunner';
 import { LocalCommandRunner } from '../tools/localCommandRunner';
-import { mcpAllowlist, shouldExposeMcpTools } from './mcp/mcpConfig';
+import {
+  isMcpServerEnabled,
+  mcpAllowlist,
+  shouldExposeMcpTools,
+} from './mcp/mcpConfig';
+import { cachedToolsByServer, readMcpToolCache } from './mcp/mcpToolCache';
 import {
   EMPTY_MCP_SESSION_LEASE,
   McpConnectionPool,
@@ -483,10 +489,56 @@ export class RunCoordinator {
     };
   }
 
-  private acquireRunMcpSession(run: DurableRunRecord, apiKey: string): Promise<McpSessionLease> {
+  /** Build semantic MCP candidates without starting any configured server. */
+  private async mcpServerChoices(
+    config: DurableRunConfig,
+  ): Promise<readonly TaskMcpServerChoice[]> {
+    const servers = config.mcp?.enabled
+      ? config.mcp.servers.filter(isMcpServerEnabled)
+      : [];
+    if (!servers.length) return [];
+    const cache = await readMcpToolCache(config.workspaceRoot);
+    const cachedByServer = cachedToolsByServer(cache, config.mcp);
+    return servers.map((server) => {
+      const cached = cachedByServer.get(server.name);
+      if (!cached?.length) return { name: server.name };
+      const description = cached
+        .slice(0, 24)
+        .map((tool) => tool.description ? `${tool.name}: ${tool.description}` : tool.name)
+        .join('; ')
+        .slice(0, 2_000);
+      return { name: server.name, description };
+    });
+  }
+
+  private selectedMcpServerNames(
+    run: DurableRunRecord,
+  ): readonly string[] | undefined {
+    const servers = run.config.mcp?.enabled
+      ? run.config.mcp.servers.filter(isMcpServerEnabled)
+      : [];
+    const needs = run.decisionSignals?.mcpServerNeeds;
+    if (!servers.length || !needs) return undefined;
+    // Only narrow the connection set when every enabled server has a
+    // confident yes/no result. An unknown result keeps the old all-server
+    // behavior so a semantic miss cannot hide a needed tool.
+    if (servers.some((server) => needs[server.name]?.value === 'unknown' || !needs[server.name])) {
+      return undefined;
+    }
+    return servers
+      .filter((server) => needs[server.name]?.value === 'yes')
+      .map((server) => server.name);
+  }
+
+  private acquireRunMcpSession(
+    run: DurableRunRecord,
+    apiKey: string,
+    serverNames?: readonly string[],
+  ): Promise<McpSessionLease> {
     const cfg = this.agentConfig(run.config, apiKey);
     return this.mcpPool.acquire({
       settings: run.config.mcp,
+      serverNames,
       reservedToolNames: [
         ...this.toolRegistry.getToolCatalog().list().map((capability) => capability.name),
         'deliver_artifact',
@@ -957,7 +1009,10 @@ export class RunCoordinator {
           userText,
           workflowController.signal,
           sessionItems,
-          { modelClassifier: this.classifyWorkflowDecision },
+          {
+            modelClassifier: this.classifyWorkflowDecision,
+            mcpServerChoices: await this.mcpServerChoices(config),
+          },
         );
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
@@ -1526,7 +1581,10 @@ export class RunCoordinator {
           run.userText,
           workflowController.signal,
           sessionItems,
-          { modelClassifier: this.classifyWorkflowDecision },
+          {
+            modelClassifier: this.classifyWorkflowDecision,
+            mcpServerChoices: await this.mcpServerChoices(run.config),
+          },
         );
         if (workflowDecision.kind === 'workflow') {
           run.workflowId = workflowDecision.workflow.id;
@@ -1981,13 +2039,18 @@ export class RunCoordinator {
       // 档位和工作流到这里已经定死了（下面几行就在用），所以判得准。
       // 将来若要改"让 MCP 一直可见"，这三处必须一起改。
       const mcpNeeded = shouldExposeMcpTools(run);
+      const selectedMcpServerNames = this.selectedMcpServerNames(run);
       if (!mcpNeeded) {
         this.writeLog(
           `[mcp] 本轮(${run.workflowId ?? run.fallbackMode ?? '未定档'})用不到 MCP 工具，跳过连接`,
         );
+      } else if (selectedMcpServerNames?.length === 0) {
+        this.writeLog('[mcp] 本轮分诊判定不需要 MCP 工具，跳过连接');
+      } else if (selectedMcpServerNames) {
+        this.writeLog(`[mcp] 本轮分诊只连接: ${selectedMcpServerNames.join(', ')}`);
       }
       const mcpSession = mcpNeeded
-        ? await this.acquireRunMcpSession(run, apiKey)
+        ? await this.acquireRunMcpSession(run, apiKey, selectedMcpServerNames)
         : EMPTY_MCP_SESSION_LEASE;
       const executeSingleAgent = (
         agentOptions: Pick<

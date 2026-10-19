@@ -46,6 +46,8 @@ export const EMPTY_MCP_SESSION_LEASE: McpSessionLease = {
 
 export interface AcquireMcpSessionOptions {
   settings: McpSettings | undefined;
+  /** Optional semantic selection. Omitted means all enabled servers; [] means none. */
+  serverNames?: readonly string[];
   reservedToolNames?: readonly string[];
   policy?: ToolPolicy;
   policyContext: ToolPolicyContext;
@@ -94,11 +96,17 @@ export class McpConnectionPool {
    * 工具对象每轮重新包装，审批上下文和效果台账因此仍然绑定在当前这一轮上。
    */
   async acquire(options: AcquireMcpSessionOptions): Promise<McpSessionLease> {
-    const servers = options.settings?.enabled
+    const configuredServers = options.settings?.enabled
       ? options.settings.servers.filter(isMcpServerEnabled)
       : [];
+    const selectedNames = options.serverNames === undefined
+      ? undefined
+      : new Set(options.serverNames);
+    const servers = selectedNames === undefined
+      ? configuredServers
+      : configuredServers.filter((server) => selectedNames.has(server.name));
     const scopeKey = mcpScopeKey(options);
-    this.retireMissingEntries(scopeKey, new Set(servers.map((server) => server.name)));
+    this.retireMissingEntries(scopeKey, new Set(configuredServers.map((server) => server.name)));
     if (!servers.length) return EMPTY_MCP_SESSION_LEASE;
 
     // 跨服务器的重名占位。按配置顺序逐台过：前面接受的名字让后面避让，
@@ -173,6 +181,7 @@ export class McpConnectionPool {
     const live = new Set(connections.map((connection) => connection.serverName));
     const cache = await readMcpToolCache(options.policyContext.workspaceRoot);
     for (const [serverName, cached] of cachedToolsByServer(cache, options.settings)) {
+      if (options.serverNames !== undefined && !options.serverNames.includes(serverName)) continue;
       if (live.has(serverName)) continue;
       this.log(`[mcp] ${serverName} 本次没连上，用缓存里的 ${cached.length} 个工具名兜底`);
       names.push(...cached.map((tool) => tool.name));

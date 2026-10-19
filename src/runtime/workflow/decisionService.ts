@@ -3,6 +3,7 @@ import type { AgentConfig } from "../agentConfig";
 import {
   AgentDecisionService,
   type TaskDecisionHint,
+  type TaskMcpServerChoice,
 } from "../decision/agentDecision";
 import {
   getDefaultWorkflowRegistry,
@@ -39,7 +40,10 @@ export class WorkflowDecisionService {
     userText: string,
     signal?: AbortSignal,
     history: AgentInputItem[] = [],
-    options: { modelClassifier?: WorkflowModelClassifier } = {},
+    options: {
+      modelClassifier?: WorkflowModelClassifier;
+      mcpServerChoices?: readonly TaskMcpServerChoice[];
+    } = {},
   ): Promise<WorkflowDecision> {
     const workflows = this.registry.list();
     const jevHint = await this.decisionService.taskHint(cfg.jev, userText, signal, {
@@ -49,6 +53,7 @@ export class WorkflowDecisionService {
           title: workflow.title,
           description: workflow.description,
         })),
+      mcpServerChoices: options.mcpServerChoices,
     });
     const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(jevHint);
     if (registeredWorkflowDecision) return registeredWorkflowDecision;
@@ -321,6 +326,9 @@ function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {
       value: hint.needsApproval.value,
       confidence: hint.needsApproval.confidence,
     },
+    ...(hint.mcpServerNeeds && Object.keys(hint.mcpServerNeeds).length
+      ? { mcpServerNeeds: hint.mcpServerNeeds }
+      : {}),
   };
 }
 

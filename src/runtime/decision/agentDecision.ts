@@ -361,6 +361,8 @@ export interface TaskDecisionHint {
   workflow: string;
   workflowConfidence: number;
   toolNeeds: ToolNeedDecisionHint;
+  /** Per-server MCP intent; unknown keeps the safe all-server fallback. */
+  mcpServerNeeds?: Record<string, BinaryDecisionHint>;
   riskLevel: AgentRiskLevel;
   riskConfidence: number;
   needsApproval: BinaryDecisionHint;
@@ -437,8 +439,15 @@ export interface TaskWorkflowChoice {
   description: string;
 }
 
+export interface TaskMcpServerChoice {
+  name: string;
+  /** Cached tool names/descriptions, when this server has been discovered before. */
+  description?: string;
+}
+
 export interface TaskHintOptions {
   workflowChoices?: readonly TaskWorkflowChoice[];
+  mcpServerChoices?: readonly TaskMcpServerChoice[];
 }
 
 interface CachedTaskDecision {
@@ -468,6 +477,21 @@ function taskQuestions(options: TaskHintOptions = {}): Record<string, JevQuestio
     if (!route || workflowCriteria[route]) continue;
     workflowCriteria[route] = `${workflow.title}: ${workflow.description}`;
   }
+  const mcpQuestions = Object.fromEntries(
+    (options.mcpServerChoices ?? []).map((server, index) => [
+      mcpServerQuestionKey(index),
+      {
+        type: 'noul',
+        instructions:
+          `Does satisfying this request require using the configured MCP server "${server.name}"?` +
+          (server.description ? ` Its cached capabilities are: ${server.description}` : ''),
+        criteria: {
+          true: 'The request explicitly needs a capability supplied by this server, or this server is the clear source for the requested data/action.',
+          false: 'The request can be completed without this server, or the request does not need any external MCP capability.',
+        },
+      } satisfies JevNoulQuestion,
+    ]),
+  );
   return {
   delivery: {
     type: 'noul',
@@ -533,7 +557,12 @@ function taskQuestions(options: TaskHintOptions = {}): Record<string, JevQuestio
       critical: 'Uploads to PLC, changes device/runtime state, deploys binaries, or affects industrial equipment.',
     },
   },
+  ...mcpQuestions,
 };
+}
+
+function mcpServerQuestionKey(index: number): string {
+  return `needs_mcp_server_${index}`;
 }
 
 const COMPLETION_GATE_QUESTIONS: Record<string, JevQuestion> = {
@@ -663,6 +692,7 @@ function buildTaskHint(
         writeFile: { value: 'unknown', confidence: 0 },
         runCommand: { value: 'unknown', confidence: 0 },
       },
+      mcpServerNeeds: mcpServerNeedsFromEvaluation(evaluation, minConfidence, options),
       riskLevel: 'unknown',
       riskConfidence: 0,
       needsApproval: { value: 'unknown', confidence: 0 },
@@ -714,11 +744,25 @@ function buildTaskHint(
       writeFile: binaryDecision(evaluation.answers?.needs_write_file, minConfidence),
       runCommand: binaryDecision(evaluation.answers?.needs_run_command, minConfidence),
     },
+    mcpServerNeeds: mcpServerNeedsFromEvaluation(evaluation, minConfidence, options),
     riskLevel: risk.value,
     riskConfidence: risk.confidence,
     needsApproval: binaryDecision(evaluation.answers?.needs_approval, minConfidence),
     evaluation,
   };
+}
+
+function mcpServerNeedsFromEvaluation(
+  evaluation: JevEvaluation,
+  minConfidence: number,
+  options: TaskHintOptions,
+): Record<string, BinaryDecisionHint> {
+  return Object.fromEntries(
+    (options.mcpServerChoices ?? []).map((server, index) => [
+      server.name,
+      binaryDecision(evaluation.answers?.[mcpServerQuestionKey(index)], minConfidence),
+    ]),
+  );
 }
 
 function buildCompletionGateHint(
@@ -813,7 +857,12 @@ export class AgentDecisionService {
     options: TaskHintOptions = {},
   ): Promise<TaskDecisionHint> {
     const { provider, normalized, key } = this.providerFor(settings);
-    const choicesKey = workflowChoiceNames(options).join(',');
+    const choicesKey = [
+      workflowChoiceNames(options).join(','),
+      (options.mcpServerChoices ?? [])
+        .map((server) => `${server.name}:${server.description ?? ''}`)
+        .join(','),
+    ].join('|');
     const cacheKey = `${key}|${choicesKey}|${userText}`;
     const cached = this.taskCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.promise;
@@ -906,6 +955,7 @@ export class AgentDecisionService {
       ` orchestration=${this.formatDecisionLabel(hint.orchestration)}(conf=${hint.orchestrationConfidence.toFixed(2)})` +
       ` workflow=${this.formatDecisionLabel(hint.workflow)}(conf=${hint.workflowConfidence.toFixed(2)})` +
       ` tools=${this.formatToolNeeds(hint.toolNeeds)}` +
+      this.formatMcpNeeds(hint.mcpServerNeeds) +
       ` risk=${this.formatDecisionLabel(hint.riskLevel)}(conf=${hint.riskConfidence.toFixed(2)})` +
       ` approval=${this.formatBinary(hint.needsApproval)}`,
     );
@@ -965,6 +1015,16 @@ export class AgentDecisionService {
       `write_file:${this.formatBinary(value.writeFile)}`,
       `run_command:${this.formatBinary(value.runCommand)}`,
     ].join(',');
+  }
+
+  private formatMcpNeeds(value: Record<string, BinaryDecisionHint> | undefined): string {
+    const entries = Object.entries(value ?? {});
+    if (!entries.length) return '';
+    const summary = entries
+      .slice(0, 12)
+      .map(([name, decision]) => `${name}:${this.formatBinary(decision)}`)
+      .join('|');
+    return ` mcp=${summary}${entries.length > 12 ? '|…' : ''}`;
   }
 
   private formatBinary(value: BinaryDecisionHint): string {
