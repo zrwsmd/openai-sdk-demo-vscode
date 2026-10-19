@@ -59,6 +59,11 @@ assert(
   JSON.stringify(storedProject?.workspaceRoots) === JSON.stringify([path.resolve(projectRoot)]),
   'project handoff session must authorize only the new project root',
 );
+const storedOldSession = index.sessions.find((session) => session.id === oldSession.id);
+assert(
+  JSON.stringify(storedOldSession?.workspaceRoots) === JSON.stringify([path.join(base, 'old-workspace')]),
+  'creating the project handoff session must not change another session authorization',
+);
 
 const projectHistory = new JsonFileSession(catalog.pathsFor(projectSession.id).sessionFile);
 const items = await projectHistory.getItems();

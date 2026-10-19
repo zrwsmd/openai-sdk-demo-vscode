@@ -210,7 +210,63 @@ async function buildTool(port) {
   );
 }
 
-// [3c] 对方返回 status:false 时,必须变成 ok:false 并带上排查提示
+// [3c] 创建工程只负责交接；同一 run 的相对路径仍使用原工作区
+{
+  const originalRoot = path.join(workspace, 'original-workspace');
+  const createdRoot = path.join(workspace, 'created-project', 'SC5100');
+  const workspaceFile = path.join(workspace, 'created-project', 'demo.code-workspace');
+  await fs.mkdir(originalRoot, { recursive: true });
+  await fs.mkdir(createdRoot, { recursive: true });
+  await fs.writeFile(
+    workspaceFile,
+    JSON.stringify({ folders: [{ path: 'SC5100' }] }),
+    'utf8',
+  );
+  const { port } = makePort((command) => {
+    if (command === 'bridgeCreateProject') return { status: true, wsUri: workspaceFile };
+    throw new Error(`不该调用 ${command}`);
+  });
+  const tools = createAppToolRegistry().createTools({
+    cfg: {
+      apiKey: 'test',
+      model: 'test',
+      workspaceRoot: originalRoot,
+      workspaceRoots: [originalRoot],
+      services: new Map([[DEVUNI_COMMAND_PORT_SERVICE, port]]),
+    },
+  });
+  const createTool = tools.find((candidate) => candidate.name === 'devuni_create_project');
+  const writeTool = tools.find((candidate) => candidate.name === 'write_file');
+  assert(!!createTool && !!writeTool, '创建工程或写文件工具没有注册');
+  const createRaw = await createTool.invoke(
+    {},
+    JSON.stringify({
+      projectName: 'demo',
+      projectPath: path.dirname(path.dirname(createdRoot)),
+      deviceModel: 'SC5100',
+      language: 'st',
+      projectType: 'standard',
+    }),
+    {},
+  );
+  assert(JSON.parse(createRaw).ok === true, `创建工程应成功: ${createRaw}`);
+  const writeRaw = await writeTool.invoke(
+    {},
+    JSON.stringify({ path: 'same-run.txt', content: 'original workspace' }),
+    {},
+  );
+  assert(JSON.parse(writeRaw).ok === true, `相对写入应成功: ${writeRaw}`);
+  assert(
+    await fs.readFile(path.join(originalRoot, 'same-run.txt'), 'utf8') === 'original workspace',
+    '创建工程后不应改变当前 run 的首选工作区',
+  );
+  const leakedIntoNewProject = await fs
+    .access(path.join(createdRoot, 'same-run.txt'))
+    .then(() => true, () => false);
+  assert(!leakedIntoNewProject, '旧窗口同一 run 的相对写入不应落入新工程');
+}
+
+// [3d] 对方返回 status:false 时,必须变成 ok:false 并带上排查提示
 {
   const { port } = makePort((command) => {
     if (command === 'bridgeProjectInitInfo') return initInfoReply;
@@ -234,7 +290,7 @@ async function buildTool(port) {
   );
 }
 
-// [3d] 拿不到可选项且语言/类型没给全:应当直接报错,不要继续创建
+// [3e] 拿不到可选项且语言/类型没给全:应当直接报错,不要继续创建
 {
   const { port, calls } = makePort(() => ({ status: false }));
   const tool = await buildTool(port);
@@ -255,7 +311,7 @@ async function buildTool(port) {
   );
 }
 
-// [3e] 没有注入命令端口时,应给出明确提示而不是抛异常
+// [3f] 没有注入命令端口时,应给出明确提示而不是抛异常
 {
   const registry = new ToolRegistry([createDevuniToolProvider()]);
   const tools = registry.createTools({

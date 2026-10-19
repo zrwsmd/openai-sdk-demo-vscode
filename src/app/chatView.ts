@@ -127,11 +127,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     string,
     { runId?: string; completed: boolean; input: ProjectWindowHandoffInput }
   >();
-  /**
-   * Project roots discovered during this chat. The newest created project is
-   * kept first so relative file operations naturally target it, while the
-   * VS Code folders remain authorized after it.
-   */
+  /** Session-specific roots restored from persisted chat or project handoff state. */
   private readonly sessionWorkspaceRoots = new Map<string, string[]>();
   private mcpProbeGeneration = 0;
 
@@ -313,22 +309,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             DEVUNI_COMMAND_PORT_SERVICE,
             createDevuniCommandPort({
               onProjectCreated: async (project) => {
-                const createdRoots = await this.registerCreatedProjectRoots(
-                  sessionId,
-                  project.workspaceFile,
-                );
-                if (!createdRoots.length) return;
-                const existingRoots = config.workspaceRoots?.length
-                  ? config.workspaceRoots
-                  : config.workspaceRoot
-                    ? [config.workspaceRoot]
-                    : [];
-                const mergedRoots = [...new Set([...createdRoots, ...existingRoots])];
-                // Persist the expanded scope into the active run as well, so
-                // an approval pause/resume cannot fall back to the old root.
-                config.workspaceRoot = mergedRoots[0] ?? '';
-                config.workspaceRoots = mergedRoots;
-                this.rememberProjectWindow(sessionId, project, createdRoots);
+                const projectRoots = await workspaceRootsFromWorkspaceFile(project.workspaceFile);
+                if (!projectRoots.length) return;
+                this.rememberProjectWindow(sessionId, project, projectRoots);
               },
             }),
           ] as const,
@@ -894,29 +877,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const current = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const created = this.sessionWorkspaceRoots.get(this.activeSessionId) ?? [];
     return [...new Set([...created, ...current])];
-  }
-
-  private async registerCreatedProjectRoots(
-    sessionId: string,
-    workspaceFile: string,
-  ): Promise<readonly string[]> {
-    const roots = await workspaceRootsFromWorkspaceFile(workspaceFile);
-    if (!roots.length) return [];
-    const previous = this.sessionWorkspaceRoots.get(sessionId) ?? [];
-    const merged = [...roots, ...previous];
-    const authorizedRoots = [...new Set(merged)];
-    this.sessionWorkspaceRoots.set(sessionId, authorizedRoots);
-    try {
-      await this.sessionCatalog.setWorkspaceRoots(sessionId, authorizedRoots);
-    } catch (error) {
-      this.log.appendLine(
-        `[workspace] 新工程根目录已在当前运行生效，但会话持久化失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    this.log.appendLine(
-      `[workspace] 已将新工程加入会话授权根目录并设为首选: ${roots.join('、')}`,
-    );
-    return authorizedRoots;
   }
 
   private async mcpSettingsPayload(): Promise<{
