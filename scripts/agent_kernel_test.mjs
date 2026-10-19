@@ -1387,24 +1387,28 @@ async function runTestTurn(
   if (gluedRejection.includes('读取yy.txt并总结')) {
     throw new Error('整句仍然被当成文件路径');
   }
-  // 中文文件名本身不能被削掉前缀：只有开头是请求动词时才削。
+  // 无空格的中文文件名也要能从开头的请求动词后拆出来，不能把整句吞成路径。
   const chineseNameGuard = createHistoricalToolArgumentGuard(
     [
       {
         type: 'message',
         role: 'user',
-        content: '读取 变量A.st 和 项目1.st 和 程序.st',
+        content: '读取日志.st 读取变量A.st 读取项目1.st',
       },
     ],
     '分析当前工作区的 ST 依赖关系',
   );
-  for (const name of ['变量A.st', '项目1.st', '程序.st']) {
+  for (const name of ['日志.st', '变量A.st', '项目1.st']) {
+    const gluedName = `读取${name}`;
     const rejection = chineseNameGuard?.('st_dependency_map', { path: name });
     if (rejection === undefined) {
-      throw new Error(`中文文件名被误削: ${name}`);
+      throw new Error(`无空格中文文件名没有被识别: ${name}`);
     }
     if (!rejection.includes(name)) {
-      throw new Error(`中文文件名前缀丢失: ${name}`);
+      throw new Error(`中文文件名没有出现在拒绝信息中: ${name}`);
+    }
+    if (rejection.includes(gluedName)) {
+      throw new Error(`请求动词仍被当成文件名: ${gluedName}`);
     }
   }
   // 纯数字目录也要认。

@@ -302,8 +302,8 @@ const IMPLICIT_FOLLOW_UP_PATTERN =
 const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
 
 /**
- * 只有这些词出现在开头时才当成“动词 + 文件名”。不能一律削中文——
- * “变量A.dat”“项目1.dat”都是正常的中文文件名，削了前缀就对不上了。
+ * 只有这些词出现在开头时才尝试拆成“动词 + 文件名”。是否真的削掉请求词，
+ * 由后半段是否像文件或目录路径决定，这样无空格的“读取日志.st”也能识别。
  */
 const LEADING_REQUEST_WORD_PATTERN =
   /^(?:(?:上一轮|上一次|刚才|之前|前面|上述|前述)的?)?(?:读取|查看|打开|列出|列一下|搜索|查找|分析|检查|总结|导入|导出|保存|加载|修改|编辑|写入|更新|确认|读一下|看一下|看看)/u;
@@ -339,15 +339,15 @@ function looksLikeResourceReference(value: string): boolean {
 
 /**
  * 正则片段允许中文（中文文件名很常见），代价是它会把紧挨着的中文句子一起吞进来：
- * “读取yy.txt并总结”整句会被当成一个路径。这里只削开头的请求动词，而且削完
- * 必须以英文或数字开头才采用——“读取日志.txt”这种中文文件名要原样保留。
+ * “读取yy.txt并总结”整句会被当成一个路径。这里先尝试削开头的请求动词，
+ * 只在剩余部分整体仍像资源引用时采用，再削掉尾部粘上的中文句子。
  */
 function trimResourceToken(token: string): string {
   let value = token;
   const requestWord = value.match(LEADING_REQUEST_WORD_PATTERN);
   if (requestWord) {
     const rest = value.slice(requestWord[0].length);
-    if (/^[a-z0-9_.]/iu.test(rest)) value = rest;
+    if (looksLikeResourceReference(rest)) value = rest;
   }
   const trailing = value.match(/[\u4e00-\u9fff]+$/u);
   if (trailing) {
