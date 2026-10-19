@@ -13,7 +13,7 @@ import {
 } from "./toolBuildContext";
 
 export function createWorkspaceReadTools(ctx: ToolBuildContext) {
-  const { contract, failed, guard, guardrails, plc, workspace } = ctx;
+  const { contract, failed, guard, guardrails, plc, workspace, resolveWorkspacePath } = ctx;
 
   const getIoTable = tool({
     name: "get_io_table",
@@ -65,11 +65,13 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
     outputGuardrails: guardrails.output,
     execute: ({ dir }) =>
       guard(
-        async () =>
-          contract(
-            { files: await listFiles(workspace.primaryRoot, dir ?? ".") },
+        async () => {
+          const target = await resolveWorkspacePath(dir ?? ".", { targetKind: "directory" });
+          return contract(
+            { files: await listFiles(target.root, target.relativePath) },
             "read",
-          ),
+          );
+        },
         "read",
       ),
   });
@@ -95,7 +97,7 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
     outputGuardrails: guardrails.output,
     execute: ({ path: p, startLine, endLine }) =>
       guard(async () => {
-        const target = workspace.resolve(p);
+        const target = await resolveWorkspacePath(p, { targetKind: "file" });
         const s = parseOptionalInt(startLine) ?? 1;
         const e = parseOptionalInt(endLine);
         const r = await readFileRange(target.root, target.relativePath, s, e);

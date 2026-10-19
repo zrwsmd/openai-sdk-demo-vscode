@@ -70,6 +70,7 @@ export * from '../src/app/toolRegistry';
 export * from '../src/runtime/tools/coreToolProvider';
 export * from '../src/runtime/plugins/st/stToolProvider';
 export * from '../src/runtime/plugins/devuni/devuniCommandPort';
+export * from '../src/runtime/plugins/devuni/devuniProjectRoots';
 export * from '../src/runtime/plugins/devuni/devuniCommands';
 export * from '../src/runtime/plugins/devuni/devuniToolProvider';
 export * from '../src/runtime/plugins/devuni/devuniProjectWorkflow';

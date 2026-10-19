@@ -2,6 +2,8 @@ import {
   defineToolInputGuardrail,
   ToolGuardrailFunctionOutputFactory,
 } from "@openai/agents";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 import { z } from "zod";
 import {
   DefaultToolPolicy,
@@ -12,7 +14,12 @@ import {
 import { EffectRecoveryRequiredError } from "../errors";
 import type { AgentConfig } from "../agentConfig";
 import type { AuditEvent } from "../../observability/audit";
-import { workspaceScopeFromRoots, type WorkspaceScope } from "../../workspace/workspaceScope";
+import {
+  WorkspaceScopeError,
+  workspaceScopeFromRoots,
+  type ResolvedWorkspacePath,
+  type WorkspaceScope,
+} from "../../workspace/workspaceScope";
 import { MockPlcAdapter, type PlcAdapter } from "../../plc/plcAdapter";
 import type { WorkflowContract, WorkflowRuntime } from "../workflow/types";
 import type { Diagnostic, ToolResultAction } from "../../protocol/results";
@@ -136,6 +143,11 @@ export interface ToolBuildContext {
   plc: PlcAdapter;
   commandRunner: CommandRunner;
   workspace: WorkspaceScope;
+  /** Resolve a file/directory and, when needed, ask to extend this turn's scope. */
+  resolveWorkspacePath: (
+    input: string,
+    options?: WorkspacePathResolutionOptions,
+  ) => Promise<ResolvedWorkspacePath>;
   guardrails: ToolGuardrails;
   workflowContract?: WorkflowContract;
   workflow?: WorkflowRuntime;
@@ -172,6 +184,14 @@ export interface ToolBuildContext {
     effect?: ToolEffect,
   ) => Promise<T | string>;
   audit: (event: Omit<AuditEvent, "id" | "timestamp">) => void;
+}
+
+export interface WorkspacePathResolutionOptions {
+  /** File targets authorize their parent directory; directory targets authorize themselves. */
+  targetKind?: "file" | "directory";
+  /** A write target must agree with an absolute directory explicitly named by the user. */
+  enforceUserTarget?: boolean;
+  signal?: AbortSignal;
 }
 
 export const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
@@ -250,6 +270,139 @@ export function commandToolResult(
     risk: "execute",
     metadata: { exitCode: result.exitCode },
   });
+}
+
+const ABSOLUTE_PATH_PATTERN = /(?:["'`]((?:[A-Za-z]:[\\/]|\\\\)[^"'`，。！？]+)["'`]|(?:[A-Za-z]:[\\/]|\\\\)[^\s"'`，。！？,;:]+)/gu;
+
+function trimTargetPathToken(value: string): string {
+  return value
+    .trim()
+    .replace(/[)}\],.;:!?，。！？]+$/gu, "")
+    .replace(/(?:下面|目录|路径|文件夹|中|内|下)$/u, "");
+}
+
+function targetRootsFromUserText(userText: string | undefined): readonly string[] {
+  if (!userText?.trim()) return [];
+  const roots: string[] = [];
+  for (const match of userText.matchAll(ABSOLUTE_PATH_PATTERN)) {
+    const raw = trimTargetPathToken(match[1] ?? match[0]);
+    if (!raw) continue;
+    const before = userText.slice(Math.max(0, (match.index ?? 0) - 48), match.index ?? 0);
+    // A path mentioned as the source of a read/copy is not the write target.
+    if (!/(?:写|保存|落盘|生成|创建|导出|放|目标|到|在)/u.test(before)) continue;
+    if (/(?:从|读取|读|查看|打开)\s*$/u.test(before)) continue;
+    const absolute = path.resolve(raw);
+    const root = path.extname(path.basename(absolute))
+      ? path.dirname(absolute)
+      : absolute;
+    if (!roots.includes(root)) roots.push(root);
+  }
+  return roots;
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function userTargetMismatch(
+  userText: string | undefined,
+  candidateAbsolutePath: string,
+): string | undefined {
+  const targets = targetRootsFromUserText(userText);
+  if (!targets.length || targets.some((root) => pathIsWithin(root, candidateAbsolutePath))) {
+    return undefined;
+  }
+  return targets.join("、");
+}
+
+async function authorizationRootForPath(
+  candidateAbsolutePath: string,
+  targetKind: WorkspacePathResolutionOptions["targetKind"],
+): Promise<string> {
+  if (targetKind === "directory") return candidateAbsolutePath;
+  const existing = await fs.stat(candidateAbsolutePath).catch(() => undefined);
+  if (existing?.isDirectory()) return candidateAbsolutePath;
+  return path.dirname(candidateAbsolutePath);
+}
+
+async function askForWorkspaceAuthorization(
+  cfg: AgentConfig,
+  root: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!cfg.clarification) return false;
+  const response = await cfg.clarification.request({
+    kind: "workspace_authorization",
+    title: "需要授权目标目录",
+    question: `目标目录 ${root} 尚未加入本轮授权，是否将该目录加入本轮授权？`,
+    details: "完全访问权限不会自动扩大工作区边界；只有明确同意后，本轮工具才能访问该目录。",
+    options: [
+      {
+        id: "authorize",
+        label: "加入本轮授权",
+        description: `允许本轮访问 ${root}`,
+        value: root,
+      },
+      {
+        id: "cancel",
+        label: "取消",
+        description: "保持当前授权范围，不执行本次访问",
+      },
+    ],
+    allowCustom: false,
+    required: true,
+  }, signal);
+  return !response.cancelled && response.selectedOptionId === "authorize";
+}
+
+async function resolveWorkspacePathWithAuthorization(
+  cfg: AgentConfig,
+  workspace: WorkspaceScope,
+  input: string,
+  userText: string | undefined,
+  options: WorkspacePathResolutionOptions = {},
+): Promise<ResolvedWorkspacePath> {
+  const candidateAbsolutePath = workspace.candidateAbsolutePath(input);
+  if (options.enforceUserTarget) {
+    const requestedRoot = userTargetMismatch(userText, candidateAbsolutePath);
+    if (requestedRoot) {
+      throw new WorkspaceScopeError(
+        `用户明确指定的写入目标是 ${requestedRoot}，但本次 write_file 参数解析为 ${candidateAbsolutePath}，已阻止写入。` +
+          "请先确认目标目录，再使用该目录下的绝对路径重试；不能静默改写到其他工作区。",
+      );
+    }
+  }
+  try {
+    return workspace.resolve(input);
+  } catch (error) {
+    if (!(error instanceof WorkspaceScopeError) || !candidateAbsolutePath || !workspace.roots.length) {
+      throw error;
+    }
+    if (workspace.isAuthorizedAbsolutePath(candidateAbsolutePath)) throw error;
+    const root = await authorizationRootForPath(candidateAbsolutePath, options.targetKind ?? "file");
+    const authorized = await askForWorkspaceAuthorization(cfg, root, options.signal);
+    if (!authorized) {
+      throw new WorkspaceScopeError(
+        `目标目录 ${root} 未获本轮授权，已阻止访问。请明确选择“加入本轮授权”后重试。`,
+      );
+    }
+    workspace.addRoot(root);
+    try {
+      return workspace.resolve(input);
+    } catch (error) {
+      // A relative traversal such as `../shared/file.txt` still resolves to
+      // the newly authorized root after the user explicitly approved it.
+      if (workspace.isAuthorizedAbsolutePath(candidateAbsolutePath)) {
+        return workspace.resolveAbsolutePath(candidateAbsolutePath);
+      }
+      throw error;
+    }
+  }
 }
 
 function toolArguments(raw: string | undefined): unknown {
@@ -350,6 +503,17 @@ export function createToolBuildContext(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
   );
+  const resolveWorkspacePath = (
+    input: string,
+    resolutionOptions?: WorkspacePathResolutionOptions,
+  ): Promise<ResolvedWorkspacePath> =>
+    resolveWorkspacePathWithAuthorization(
+      cfg,
+      workspace,
+      input,
+      options.userText,
+      resolutionOptions,
+    );
   const guardrails = buildToolGuardrails(
     cfg,
     policy,
@@ -441,6 +605,7 @@ export function createToolBuildContext(
     plc,
     commandRunner,
     workspace,
+    resolveWorkspacePath,
     guardrails,
     workflowContract: options.workflowContract,
     workflow: options.workflow,

@@ -7,6 +7,8 @@ export interface ChatSessionSummary {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /** Host-authorized roots discovered while creating projects in this session. */
+  workspaceRoots?: string[];
 }
 
 interface ChatSessionIndex {
@@ -143,6 +145,17 @@ export class ChatSessionCatalog {
     await this.writeIndex(index);
   }
 
+  async setWorkspaceRoots(sessionId: string, roots: readonly string[]): Promise<ChatSessionSummary> {
+    const index = await this.initialize();
+    const session = index.sessions.find((item) => item.id === sessionId);
+    if (!session) throw new Error(`会话不存在: ${sessionId}`);
+    session.workspaceRoots = [...new Set(roots.map((root) => root.trim()).filter(Boolean))];
+    session.updatedAt = new Date().toISOString();
+    index.sessions = sortSessions(index.sessions);
+    await this.writeIndex(index);
+    return session;
+  }
+
   pathsFor(sessionId: string): ChatSessionPaths {
     const dir = path.join(this.sessionsRoot(), sessionId);
     return {
@@ -264,6 +277,15 @@ function parseSessionSummary(value: unknown): ChatSessionSummary {
     title: normalizeTitle(record.title),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    ...(Array.isArray(record.workspaceRoots)
+      ? {
+          workspaceRoots: [...new Set(
+            record.workspaceRoots
+              .filter((root): root is string => typeof root === 'string' && !!root.trim())
+              .map((root) => root.trim()),
+          )],
+        }
+      : {}),
   };
 }
 

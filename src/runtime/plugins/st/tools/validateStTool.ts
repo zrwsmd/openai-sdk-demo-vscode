@@ -137,6 +137,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     validationService,
     validatedStContent,
     workspace,
+    resolveWorkspacePath,
     withEffect,
   } = ctx;
 
@@ -154,7 +155,7 @@ export function createValidateStTools(ctx: StToolBuildContext) {
     let totalBytes = code ? Buffer.byteLength(code, "utf8") : 0;
     let contentHash = "";
     if (filePath) {
-      const resolved = workspace.resolve(filePath);
+      const resolved = await resolveWorkspacePath(filePath, { targetKind: "file" });
       const read = await readFileRange(
         resolved.root,
         resolved.relativePath,

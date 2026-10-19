@@ -11,6 +11,11 @@ import * as vscode from "vscode";
 import * as bridge from "../../vendor/vscode-command-bridge";
 import type { DevuniCommandPort } from "../runtime/plugins/devuni/devuniCommandPort";
 
+export interface DevuniCommandPortOptions {
+  /** Called after a project was created successfully by the external plugin. */
+  onProjectCreated?: (workspaceFile: string) => Promise<void> | void;
+}
+
 /**
  * 桥需要拿到 vscode API 才能 executeCommand。扩展宿主里这一步是幂等的,
  * 但只在第一次真正用到时做,避免在扩展激活阶段就引入不必要的副作用。
@@ -23,11 +28,26 @@ function ensureBridgeReady(): void {
   bridgeReady = true;
 }
 
-export function createDevuniCommandPort(): DevuniCommandPort {
+export function createDevuniCommandPort(
+  options: DevuniCommandPortOptions = {},
+): DevuniCommandPort {
   return {
     async invoke(command: string, ...args: unknown[]): Promise<unknown> {
       ensureBridgeReady();
-      return bridge.invokeExtensionCommand(command, ...args);
+      const result = await bridge.invokeExtensionCommand(command, ...args);
+      if (
+        command === "bridgeCreateProject" &&
+        result &&
+        typeof result === "object" &&
+        !Array.isArray(result) &&
+        (result as { status?: unknown }).status === true
+      ) {
+        const workspaceFile = (result as { wsUri?: unknown }).wsUri;
+        if (typeof workspaceFile === "string" && workspaceFile.trim()) {
+          await options.onProjectCreated?.(workspaceFile.trim());
+        }
+      }
+      return result;
     },
   };
 }

@@ -12,6 +12,7 @@ import {
 } from './analyzerHost';
 import { createDevuniCommandPort } from './devuniHost';
 import { DEVUNI_COMMAND_PORT_SERVICE } from '../runtime/plugins/devuni/devuniCommandPort';
+import { workspaceRootsFromWorkspaceFile } from '../runtime/plugins/devuni/devuniProjectRoots';
 import { createRuntimeServiceContainer } from '../runtime/services';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
@@ -114,6 +115,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * context.subscriptions 上，扩展停用时自动关。
    */
   private readonly mcpPool: McpConnectionPool;
+  /**
+   * Project roots discovered during this chat. The newest created project is
+   * kept first so relative file operations naturally target it, while the
+   * VS Code folders remain authorized after it.
+   */
+  private readonly sessionWorkspaceRoots = new Map<string, string[]>();
   private mcpProbeGeneration = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -224,6 +231,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async initializeActiveSession(): Promise<void> {
     const index = await this.sessionCatalog.initialize();
+    const active = index.sessions.find((session) => session.id === index.activeSessionId);
+    this.sessionWorkspaceRoots.set(index.activeSessionId, [...(active?.workspaceRoots ?? [])]);
     this.activateRuntime(index.activeSessionId);
     await this.postSessions();
     await this.coordinator!.initialize();
@@ -262,7 +271,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         )(config);
         return createRuntimeServiceContainer([
           ...stServices,
-          [DEVUNI_COMMAND_PORT_SERVICE, createDevuniCommandPort()] as const,
+          [
+            DEVUNI_COMMAND_PORT_SERVICE,
+            createDevuniCommandPort({
+              onProjectCreated: async (workspaceFile) => {
+                const createdRoots = await this.registerCreatedProjectRoots(sessionId, workspaceFile);
+                if (!createdRoots.length) return;
+                const existingRoots = config.workspaceRoots?.length
+                  ? config.workspaceRoots
+                  : config.workspaceRoot
+                    ? [config.workspaceRoot]
+                    : [];
+                const mergedRoots = [...new Set([...createdRoots, ...existingRoots])];
+                // Persist the expanded scope into the active run as well, so
+                // an approval pause/resume cannot fall back to the old root.
+                config.workspaceRoot = mergedRoots[0] ?? '';
+                config.workspaceRoots = mergedRoots;
+              },
+            }),
+          ] as const,
         ]);
       },
       audit,
@@ -296,6 +323,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const session = await this.sessionCatalog.create();
+    this.sessionWorkspaceRoots.set(session.id, [...(session.workspaceRoots ?? [])]);
     this.activateRuntime(session.id);
     await this.postSessions();
     await this.coordinator!.initialize();
@@ -304,7 +332,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async switchSession(sessionId: string): Promise<void> {
     if (sessionId === this.activeSessionId) return;
     if (!(await this.canLeaveActiveSession())) return;
-    await this.sessionCatalog.setActive(sessionId);
+    const session = await this.sessionCatalog.setActive(sessionId);
+    this.sessionWorkspaceRoots.set(sessionId, [...(session.workspaceRoots ?? [])]);
     this.activateRuntime(sessionId);
     await this.postSessions();
     await this.coordinator!.initialize();
@@ -318,6 +347,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async deleteSession(sessionId: string): Promise<void> {
     if (sessionId === this.activeSessionId && !(await this.canLeaveActiveSession())) return;
     const index = await this.sessionCatalog.delete(sessionId);
+    this.sessionWorkspaceRoots.delete(sessionId);
+    const active = index.sessions.find((session) => session.id === index.activeSessionId);
+    if (active) this.sessionWorkspaceRoots.set(active.id, [...(active.workspaceRoots ?? [])]);
     if (this.activeSessionId !== index.activeSessionId) {
       this.activateRuntime(index.activeSessionId);
       await this.postSessions();
@@ -412,7 +444,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const permissionMode: PermissionMode = isPermissionMode(configuredPermissionMode)
       ? configuredPermissionMode
       : 'ask';
-    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const workspaceRoots = this.workspaceRoots();
     let mcp = emptyMcpSettings();
     try {
       mcp = await loadMcpSettings(workspaceRoots);
@@ -745,7 +777,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private workspaceRoots(): string[] {
-    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const current = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const created = this.sessionWorkspaceRoots.get(this.activeSessionId) ?? [];
+    return [...new Set([...created, ...current])];
+  }
+
+  private async registerCreatedProjectRoots(
+    sessionId: string,
+    workspaceFile: string,
+  ): Promise<readonly string[]> {
+    const roots = await workspaceRootsFromWorkspaceFile(workspaceFile);
+    if (!roots.length) return [];
+    const previous = this.sessionWorkspaceRoots.get(sessionId) ?? [];
+    const merged = [...roots, ...previous];
+    const authorizedRoots = [...new Set(merged)];
+    this.sessionWorkspaceRoots.set(sessionId, authorizedRoots);
+    try {
+      await this.sessionCatalog.setWorkspaceRoots(sessionId, authorizedRoots);
+    } catch (error) {
+      this.log.appendLine(
+        `[workspace] 新工程根目录已在当前运行生效，但会话持久化失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.log.appendLine(
+      `[workspace] 已将新工程加入会话授权根目录并设为首选: ${roots.join('、')}`,
+    );
+    return authorizedRoots;
   }
 
   private async mcpSettingsPayload(): Promise<{
@@ -951,7 +1008,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const live = await this.getConfig();
-    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const workspaceRoots = this.workspaceRoots();
     const paths = this.sessionCatalog.pathsFor(this.activeSessionId);
     const config: DurableRunConfig = {
       baseUrl: live.baseUrl,

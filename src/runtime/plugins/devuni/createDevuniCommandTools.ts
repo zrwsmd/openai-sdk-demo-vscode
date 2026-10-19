@@ -12,6 +12,7 @@ import {
   type DevuniCommandPort,
 } from "./devuniCommandPort";
 import type { DevuniCommandDescriptor } from "./devuniCommands";
+import { workspaceRootsFromWorkspaceFile } from "./devuniProjectRoots";
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -73,6 +74,23 @@ export function createDevuniCommandTool(
           const outcome = descriptor.toOutcome(raw, input);
           if (!outcome.ok) {
             return failed(new Error(outcome.error), risk, effect);
+          }
+          // A project may be created and then used later in the same agent run.
+          // Promote its actual folder immediately so the next relative file
+          // tool in this run sees the same authorization as the next chat turn.
+          if (descriptor.bridgeCommand === "bridgeCreateProject") {
+            const data = outcome.data;
+            const workspaceFile =
+              data && typeof data === "object" && !Array.isArray(data) &&
+              typeof (data as { workspaceFile?: unknown }).workspaceFile === "string"
+                ? (data as { workspaceFile: string }).workspaceFile
+                : undefined;
+            if (workspaceFile) {
+              const roots = await workspaceRootsFromWorkspaceFile(workspaceFile);
+              for (const root of [...roots].reverse()) {
+                context.workspace.addRoot(root, true);
+              }
+            }
           }
           return contract(
             { summary: outcome.summary, result: outcome.data },

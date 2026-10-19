@@ -18,6 +18,8 @@ import {
   toolResult,
   DefaultActionPolicy,
   WorkspaceScope,
+  ToolRegistry,
+  createCoreToolProvider,
   apiKeySecretKey,
   getStoredApiProfile,
   readStoredApiSettings,
@@ -31,6 +33,7 @@ import {
   officialResponsesCompactionSettings,
   usesOfficialOpenAIResponses,
   createModelAdapter,
+  workspaceRootsFromWorkspaceFile,
 } from './agent.testbundle.mjs';
 
 assert.equal(
@@ -482,6 +485,66 @@ try {
   await fs.writeFile(otherFile, 'remote', 'utf8');
   assert.equal(scope.resolve(otherFile).root, path.resolve(scopeOther));
   assert.throws(() => scope.resolve(path.join(scopeOutside, 'blocked.txt')), /不在已授权工作区内/);
+  scope.addRoot(scopeOutside);
+  assert.equal(scope.primaryRoot, path.resolve(scopeRoot));
+  assert.equal(scope.resolve(path.join(scopeOutside, 'allowed.txt')).root, path.resolve(scopeOutside));
+  const workspaceFile = path.join(scopeRoot, 'demo.code-workspace');
+  await fs.writeFile(workspaceFile, JSON.stringify({ folders: [{ name: 'project', path: 'project' }] }), 'utf8');
+  assert.deepEqual(
+    await workspaceRootsFromWorkspaceFile(workspaceFile),
+    [path.join(scopeRoot, 'project')],
+  );
+  const clarificationRequests = [];
+  const authTools = new ToolRegistry([createCoreToolProvider()]).createTools({
+    cfg: {
+      baseUrl: 'http://localhost/v1',
+      apiKey: 'test',
+      model: 'test',
+      exportDir: scopeRoot,
+      workspaceRoot: scopeRoot,
+      clarification: {
+        async request(request) {
+          clarificationRequests.push(request);
+          return { requestId: 'workspace-auth', cancelled: false, selectedOptionId: 'authorize' };
+        },
+      },
+    },
+    userText: `请写到 ${scopeOutside}`,
+  });
+  const writeTool = authTools.find((tool) => tool.name === 'write_file');
+  assert(writeTool);
+  const writeResult = JSON.parse(await writeTool.invoke({}, JSON.stringify({
+    path: path.join(scopeOutside, 'authorized.txt'),
+    content: 'authorized',
+  })));
+  assert.equal(writeResult.ok, true);
+  assert.equal(clarificationRequests.length, 1);
+  assert.match(clarificationRequests[0].question, /加入本轮授权/);
+  assert.equal(await fs.readFile(path.join(scopeOutside, 'authorized.txt'), 'utf8'), 'authorized');
+  const mismatchTools = new ToolRegistry([createCoreToolProvider()]).createTools({
+    cfg: {
+      baseUrl: 'http://localhost/v1',
+      apiKey: 'test',
+      model: 'test',
+      exportDir: scopeRoot,
+      workspaceRoot: scopeRoot,
+      clarification: {
+        async request() {
+          throw new Error('目标不一致时不应先请求越界目录授权');
+        },
+      },
+    },
+    userText: `请写到 ${scopeOutside}`,
+  });
+  const mismatchWrite = mismatchTools.find((tool) => tool.name === 'write_file');
+  assert(mismatchWrite);
+  const mismatchResult = JSON.parse(await mismatchWrite.invoke({}, JSON.stringify({
+    path: 'wrong-target.txt',
+    content: 'must not be written',
+  })));
+  assert.equal(mismatchResult.ok, false);
+  assert.match(mismatchResult.error, /明确指定的写入目标/);
+  assert.equal(await fs.access(path.join(scopeRoot, 'wrong-target.txt')).then(() => true, () => false), false);
   assert.equal(new DefaultActionPolicy().requiredToolFor('读取 lk.txt 文件里面的内容'), 'read_file');
 } finally {
   await fs.rm(scopeRoot, { recursive: true, force: true });

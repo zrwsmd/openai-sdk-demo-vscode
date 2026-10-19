@@ -42,10 +42,15 @@ assert(
   'empty placeholder session should not appear in chat history',
 );
 await catalog.touch(second.id, titleFromUserText('设计一个三台水泵自动手动冗余切换运行时间均衡故障保护液位控制完整 PLC 程序'));
+await catalog.setWorkspaceRoots(second.id, ['D:\\asdf\\SC5100', 'E:\\workspace']);
 const withSecond = await catalog.list();
 assert(withSecond.activeSessionId === second.id, 'new session should become active');
 assert(withSecond.sessions[0].id === second.id, 'touched session should sort first');
 assert(withSecond.sessions[0].title.endsWith('…'), 'long title should be compacted');
+assert(
+  JSON.stringify(withSecond.sessions[0].workspaceRoots) === JSON.stringify(['D:\\asdf\\SC5100', 'E:\\workspace']),
+  'workspace roots should persist with the session',
+);
 assert(!(await catalog.activeSessionIsEmpty()), 'touched session should no longer be treated as empty');
 const historyWithSecond = await catalog.listHistory();
 assert(

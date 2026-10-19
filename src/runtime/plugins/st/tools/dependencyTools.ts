@@ -24,7 +24,16 @@ function isPlaceholderText(value: string): boolean {
 }
 
 export function createStGraphTools(context: StToolBuildContext) {
-  const { stAnalyzer, stToolOptions, workspace, guard, contract, failed, guardrails } = context;
+  const {
+    stAnalyzer,
+    stToolOptions,
+    workspace,
+    resolveWorkspacePath,
+    guard,
+    contract,
+    failed,
+    guardrails,
+  } = context;
 
   const toDisplay = (absolutePath: string): string => {
     const root = workspace.primaryRoot;
@@ -136,7 +145,7 @@ export function createStGraphTools(context: StToolBuildContext) {
           };
 
           if (pathArg) {
-            const resolved = workspace.resolve(pathArg);
+            const resolved = await resolveWorkspacePath(pathArg, { targetKind: 'file' });
             const match = matchPoolFile(graph.files, resolved.absolutePath);
             if ('error' in match) {
               return failed(new Error(match.error), 'plan');
@@ -247,7 +256,7 @@ export function createStGraphTools(context: StToolBuildContext) {
           if (!workspace.primaryRoot) {
             return failed(new Error('未打开工作区文件夹,影响面分析不可用'), 'plan');
           }
-          const resolved = workspace.resolve(requestedPath);
+          const resolved = await resolveWorkspacePath(requestedPath, { targetKind: 'file' });
           if (!resolved.absolutePath.toLowerCase().endsWith('.st')) {
             return failed(new Error(`${resolved.relativePath} 不是 .st 文件`), 'plan');
           }
@@ -342,7 +351,7 @@ export function createStGraphTools(context: StToolBuildContext) {
           const asked = typeof requestedPath === 'string' ? requestedPath.trim() : '';
           let pathFilter: string | undefined;
           if (asked && !isPlaceholderText(asked)) {
-            const resolved = workspace.resolve(asked);
+            const resolved = await resolveWorkspacePath(asked, { targetKind: 'file' });
             if (!resolved.absolutePath.toLowerCase().endsWith('.st')) {
               return failed(new Error(`${resolved.relativePath} 不是 .st 文件`), 'plan');
             }

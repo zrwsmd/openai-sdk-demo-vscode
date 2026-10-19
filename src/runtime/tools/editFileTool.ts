@@ -21,13 +21,14 @@ export function createEditFileTool(ctx: ToolBuildContext) {
     runBeforeEffects,
     runAfterEffects,
     workspace,
+    resolveWorkspacePath,
     withEffect,
   } = ctx;
 
   return tool({
     name: "edit_file",
     description:
-      "编辑已存在的工作区文本文件。使用精确 oldText 替换为 newText，支持一次提交多个编辑；工具会在实际改动后返回 unified diff。匹配不唯一时必须缩小 oldText 或明确 replaceAll=true。属于写操作，执行前需要用户在界面批准。",
+      "编辑已存在的工作区文本文件。使用精确 oldText 替换为 newText，支持一次提交多个编辑；工具会在实际改动后返回 unified diff。匹配不唯一时必须缩小 oldText 或明确 replaceAll=true。未授权目录会先询问是否加入本轮授权。属于写操作，执行前需要用户在界面批准。",
     parameters: z.object({
       path: z.string().describe("相对工作区的文件路径"),
       edits: z.array(editOperationSchema).min(1).max(32).describe("按顺序执行的精确文本替换列表"),
@@ -39,7 +40,10 @@ export function createEditFileTool(ctx: ToolBuildContext) {
       guard(
         async () => {
           details?.signal?.throwIfAborted();
-          const target = workspace.resolve(p);
+          const target = await resolveWorkspacePath(p, {
+            targetKind: "file",
+            signal: details?.signal,
+          });
           const prepared = await prepareFileEdit(
             target.root,
             target.relativePath,

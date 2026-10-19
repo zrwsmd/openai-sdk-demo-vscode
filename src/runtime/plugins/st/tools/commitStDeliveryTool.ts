@@ -14,7 +14,7 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
     guard,
     guardrails,
     validationService,
-    workspace,
+    resolveWorkspacePath,
     requiresStRuntimeProgram,
   } = ctx;
 
@@ -51,7 +51,7 @@ export function createStDeliveryCommitTool(ctx: StToolBuildContext) {
               "none",
             );
           }
-          const target = workspace.resolve(path);
+          const target = await resolveWorkspacePath(path, { targetKind: "file" });
           const commit = validationService.recordDeliveryCommit({
             path: target.relativePath,
             workspaceRoot: target.root,
