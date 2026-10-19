@@ -285,10 +285,34 @@ const IMPLICIT_HISTORY_READ_TOOLS = new Set([
   "search_files",
   "list_files",
 ]);
+/**
+ * 这些字段装的是查询条件，不是路径。search_files 的 text 是要搜的字，
+ * 不是文件；glob 仍然是路径筛选，照常检查。
+ */
+const IGNORED_RESOURCE_ARGUMENT_FIELDS: Record<string, ReadonlySet<string>> = {
+  search_files: new Set(["text"]),
+};
+/**
+ * 只认疑问或明确的只读请求。“结果”“内容”“参数”这类名词太常见，
+ * “结果不对，重新生成一版”会被误当成追问；“吧”“啊”既能收问句也能收命令
+ * （“快点处理吧”），同样不算。
+ */
 const IMPLICIT_FOLLOW_UP_PATTERN =
-  /(?:[?？]|吗|呢|啊|吧|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|情况|结果|内容|周期|参数|数值|区别|请(?:查看|读取|检查|分析|确认|看看)|帮我(?:查看|读取|检查|分析|确认|看看))/iu;
+  /(?:[?？]|吗|呢|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|请(?:查看|读取|检查|分析|确认|看看)|帮我(?:查看|读取|检查|分析|确认|看看))/iu;
 const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
 
+/**
+ * 只有这些词出现在开头时才当成“动词 + 文件名”。不能一律削中文——
+ * “变量A.dat”“项目1.dat”都是正常的中文文件名，削了前缀就对不上了。
+ */
+const LEADING_REQUEST_WORD_PATTERN =
+  /^(?:(?:上一轮|上一次|刚才|之前|前面|上述|前述)的?)?(?:读取|查看|打开|列出|列一下|搜索|查找|分析|检查|总结|导入|导出|保存|加载|修改|编辑|写入|更新|确认|读一下|看一下|看看)/u;
+
+/**
+ * 两段：绝对路径，和带扩展名的文件。不带扩展名的相对目录（`src/runtime`）
+ * 故意不放进正则——ST 程序里的 `speed/2` 也会被当成路径。目录靠下面
+ * “整串就是一个路径”的那条补上。
+ */
 const RESOURCE_TOKEN_PATTERN =
   /(?:[a-z]:[\\/][^\s"'`，。！？,;:]+|(?:\.{0,2}[\\/])?[a-z0-9_\u4e00-\u9fff.-]+(?:[\\/][a-z0-9_\u4e00-\u9fff.-]+)*\.[a-z0-9_\u4e00-\u9fff-]{1,16})/giu;
 
@@ -313,6 +337,26 @@ function looksLikeResourceReference(value: string): boolean {
   );
 }
 
+/**
+ * 正则片段允许中文（中文文件名很常见），代价是它会把紧挨着的中文句子一起吞进来：
+ * “读取yy.txt并总结”整句会被当成一个路径。这里只削开头的请求动词，而且削完
+ * 必须以英文或数字开头才采用——“读取日志.txt”这种中文文件名要原样保留。
+ */
+function trimResourceToken(token: string): string {
+  let value = token;
+  const requestWord = value.match(LEADING_REQUEST_WORD_PATTERN);
+  if (requestWord) {
+    const rest = value.slice(requestWord[0].length);
+    if (/^[a-z0-9_.]/iu.test(rest)) value = rest;
+  }
+  const trailing = value.match(/[\u4e00-\u9fff]+$/u);
+  if (trailing) {
+    const rest = value.slice(0, value.length - trailing[0].length);
+    if (/[a-z0-9]$/iu.test(rest)) value = rest;
+  }
+  return value;
+}
+
 function addResourceReference(
   value: string,
   output: Map<string, string>,
@@ -328,7 +372,20 @@ function collectResourceReferencesFromText(
 ): void {
   for (const match of value.matchAll(RESOURCE_TOKEN_PATTERN)) {
     const token = match[0];
-    if (token) addResourceReference(token, output);
+    if (!token) continue;
+    addResourceReference(trimResourceToken(token), output);
+  }
+  // 整个字符串就是一个路径时也收下：目录参数（`src/runtime`）没有扩展名，
+  // 正则匹配不到。带空白的字符串是句子，不能整句当路径——这正是之前
+  // “上一轮读取 yy.txt”被当成文件名的原因。
+  const trimmed = value.trim();
+  if (
+    trimmed &&
+    !/\s/u.test(trimmed) &&
+    !trimmed.startsWith("{") &&
+    !trimmed.startsWith("[")
+  ) {
+    addResourceReference(trimResourceToken(trimmed), output);
   }
 }
 
@@ -432,6 +489,21 @@ function isImplicitFollowUp(currentUserText: string): boolean {
   return IMPLICIT_FOLLOW_UP_PATTERN.test(currentUserText.trim());
 }
 
+/** 工具参数里去掉“不是路径”的字段（目前只有 search_files 的 text）。 */
+function omitIgnoredArgumentFields(
+  input: unknown,
+  fields: ReadonlySet<string>,
+): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = input as Record<string, unknown>;
+  if (!Object.keys(value).some((key) => fields.has(key))) return input;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!fields.has(key)) result[key] = item;
+  }
+  return result;
+}
+
 function resourceMentionedInText(
   normalizedReference: string,
   normalizedText: string,
@@ -467,8 +539,12 @@ export function createHistoricalToolArgumentGuard(
   const explicitContinuation = HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
 
   return (toolName, input) => {
+    const ignoredFields = IGNORED_RESOURCE_ARGUMENT_FIELDS[toolName];
     const currentReferences = new Map<string, string>();
-    collectHistoricalResourceReferences(input, currentReferences);
+    collectHistoricalResourceReferences(
+      ignoredFields ? omitIgnoredArgumentFields(input, ignoredFields) : input,
+      currentReferences,
+    );
     const staleReferences = [...currentReferences.keys()]
       .filter((reference) => historicalReferences.has(reference))
       .filter(

@@ -1276,11 +1276,26 @@ async function runTestTurn(
   if (implicitFollowUpGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
     throw new Error('最近唯一文件的自然追问不应拦截 read_file');
   }
-  if (implicitFollowUpGuard?.('search_files', { text: 'yy.txt' }) !== undefined) {
-    throw new Error('最近唯一文件的自然追问不应拦截 search_files');
-  }
   if (implicitFollowUpGuard?.('st_dependency_map', { path: 'yy.txt' }) === undefined) {
     throw new Error('自然追问不应放行非只读工具');
+  }
+  // search_files 的 text 是“要搜什么字”，不是路径；glob 仍然是路径筛选。
+  if (implicitFollowUpGuard?.('search_files', { text: 'yy.txt' }) !== undefined) {
+    throw new Error('搜索词不应被当成历史资源参数');
+  }
+  if (guard?.('search_files', { text: 'yy.txt' }) !== undefined) {
+    throw new Error('非追问轮次也不应因为搜索词拦截 search_files');
+  }
+
+  // 只认疑问或只读请求：“结果”“内容”这类名词、“吧”“啊”这类语气词都不能
+  // 把一句命令变成追问。
+  const nounGuard = createHistoricalToolArgumentGuard(history, '结果不对，重新生成一版');
+  if (nounGuard?.('read_file', { path: 'yy.txt' }) === undefined) {
+    throw new Error('含名词的命令式请求被误判成自然追问');
+  }
+  const modalGuard = createHistoricalToolArgumentGuard(history, '快点处理吧');
+  if (modalGuard?.('read_file', { path: 'yy.txt' }) === undefined) {
+    throw new Error('语气词“吧”被误判成自然追问');
   }
 
   const noisyHistory = [
@@ -1321,6 +1336,93 @@ async function runTestTurn(
   );
   if (ambiguousGuard?.('read_file', { path: 'b.txt' }) === undefined) {
     throw new Error('存在多个近期文件时不应猜测自然追问的目标');
+  }
+  // “继续”也不再一律放行：上一轮碰过两个文件时同样退回澄清。
+  const ambiguousContinueGuard = createHistoricalToolArgumentGuard(
+    ambiguousHistory,
+    '继续处理刚才的文件',
+  );
+  if (ambiguousContinueGuard?.('read_file', { path: 'b.txt' }) === undefined) {
+    throw new Error('多个近期目标时“继续”不应直接选定其中一个');
+  }
+
+  // 相对目录没有扩展名，也必须能认出来，否则 list_files 带旧目录时守卫不响。
+  // 参数名按真实 schema 用 dir。
+  const directoryHistory = [
+    { type: 'message', role: 'user', content: '列出 src/runtime 下的文件' },
+    {
+      type: 'function_call',
+      name: 'list_files',
+      callId: 'old-list',
+      arguments: JSON.stringify({ dir: 'src/runtime' }),
+    },
+  ];
+  const directoryGuard = createHistoricalToolArgumentGuard(
+    directoryHistory,
+    '分析当前工作区的 ST 依赖关系',
+  );
+  if (directoryGuard?.('list_files', { dir: 'src/runtime' }) === undefined) {
+    throw new Error('相对目录路径没有被识别为历史资源');
+  }
+  // text 跳过，glob 仍然算路径，不能被一起放过。
+  if (directoryGuard?.('search_files', { glob: 'src/runtime' }) === undefined) {
+    throw new Error('search_files 的 glob 仍然是路径，应该检查');
+  }
+  if (directoryGuard?.('search_files', { text: 'src/runtime' }) !== undefined) {
+    throw new Error('search_files 的 text 不是路径，不应该检查');
+  }
+
+  // 中文和路径粘在一起时，显示和比对都应该只取文件名，不能整句吞进去。
+  // 这里只留一条用户消息：工具调用里再带一遍路径的话，就算裁剪失败也能过。
+  const gluedHistory = [
+    { type: 'message', role: 'user', content: '读取yy.txt并总结' },
+  ];
+  const gluedRejection = createHistoricalToolArgumentGuard(
+    gluedHistory,
+    '分析当前工作区的 ST 依赖关系',
+  )?.('st_dependency_map', { path: 'yy.txt' });
+  if (!gluedRejection?.includes('yy.txt')) {
+    throw new Error('粘连中文的历史路径没有被识别');
+  }
+  if (gluedRejection.includes('读取yy.txt并总结')) {
+    throw new Error('整句仍然被当成文件路径');
+  }
+  // 中文文件名本身不能被削掉前缀：只有开头是请求动词时才削。
+  const chineseNameGuard = createHistoricalToolArgumentGuard(
+    [
+      {
+        type: 'message',
+        role: 'user',
+        content: '读取 变量A.st 和 项目1.st 和 程序.st',
+      },
+    ],
+    '分析当前工作区的 ST 依赖关系',
+  );
+  for (const name of ['变量A.st', '项目1.st', '程序.st']) {
+    const rejection = chineseNameGuard?.('st_dependency_map', { path: name });
+    if (rejection === undefined) {
+      throw new Error(`中文文件名被误削: ${name}`);
+    }
+    if (!rejection.includes(name)) {
+      throw new Error(`中文文件名前缀丢失: ${name}`);
+    }
+  }
+  // 纯数字目录也要认。
+  const numericHistory = [
+    { type: 'message', role: 'user', content: '列出 123/456 下的文件' },
+    {
+      type: 'function_call',
+      name: 'list_files',
+      callId: 'old-num',
+      arguments: JSON.stringify({ dir: '123/456' }),
+    },
+  ];
+  const numericGuard = createHistoricalToolArgumentGuard(
+    numericHistory,
+    '分析当前工作区的 ST 依赖关系',
+  );
+  if (numericGuard?.('list_files', { dir: '123/456' }) === undefined) {
+    throw new Error('纯数字目录路径没有被识别');
   }
   console.log('[3a2] 跨工具历史参数恢复 guard:通过');
 }
