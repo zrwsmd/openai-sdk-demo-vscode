@@ -300,6 +300,11 @@ assert.equal(await handshakesOf('b'), 1);
 const cache = await readMcpToolCache(stubDir);
 assert.deepEqual(cache.servers.stub?.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
 assert.deepEqual(cache.servers.other?.tools.map((tool) => tool.name), ['mcp_other_stub_ping']);
+assert.deepEqual(cache.servers.other?.tools[0]?.definition, {
+  name: 'stub_ping',
+  description: '返回固定字符串，用于验证连接是否还活着',
+  inputSchema: { type: 'object', properties: {} },
+});
 assert.equal(cache.servers.stub?.fingerprint, mcpServerFingerprint(stubServer));
 assert.deepEqual([...cachedToolsByServer(cache, twoServers).keys()], ['stub', 'other']);
 // 配置改了（指纹对不上），缓存那份就不算数。
@@ -325,14 +330,25 @@ const offlineLease = await offlinePool.acquire({
   settings: twoServers,
   policyContext: { workspaceRoot: stubDir },
 });
-assert.deepEqual(offlineLease.tools.map((tool) => tool.name), ['mcp_stub_stub_ping']);
+assert.deepEqual(offlineLease.tools.map((tool) => tool.name), ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
 assert.deepEqual(offlineLease.toolNames, ['mcp_stub_stub_ping', 'mcp_other_stub_ping']);
+assert.equal(await handshakesOf('b'), 1);
+// 缓存工具先以 schema 形式出现，不在 acquire 阶段重连；真正调用时才借连接。
+const cachedOtherTool = offlineLease.tools.find((tool) => tool.name === 'mcp_other_stub_ping');
+assert.ok(cachedOtherTool);
+assert.deepEqual(cachedOtherTool.parameters, {
+  type: 'object',
+  properties: {},
+  required: [],
+  additionalProperties: true,
+});
+await fs.rm(sentinelOf('b'), { force: true });
+assert.match(JSON.stringify(await cachedOtherTool.invoke({}, '{}')), /pong/);
 offlineLease.release();
 await offlinePool.dispose();
 // 起不来那台压根没握上手（进程起来就退了），另一台在新池子里重新连了一次。
-assert.equal(await handshakesOf('b'), 1);
+assert.equal(await handshakesOf('b'), 2);
 assert.equal(await handshakesOf('a'), 2);
-await fs.rm(sentinelOf('b'), { force: true });
 
 // 只改一台的配置：只有那一台重连，另一台照旧热着（复用第一条连接，不再握手）。
 const leaseC = await pool.acquire({
@@ -345,7 +361,7 @@ const leaseC = await pool.acquire({
 assert.equal(leaseC.tools.length, 2);
 leaseC.release();
 assert.equal(await handshakesOf('a'), 2);
-assert.equal(await handshakesOf('b'), 2);
+assert.equal(await handshakesOf('b'), 3);
 
 // 关掉之后服务器进程要真的退出，不能只是把引用丢掉。
 // 换会话时旧连接池就是靠这一步收尾的，收不掉就会叠进程。
@@ -424,9 +440,9 @@ assert.equal(await waitForExit(changedPids), true);
 await retirePool.dispose();
 
 const connectedPids = await initPids();
-assert.equal(connectedPids.length, 4);
+assert.equal(connectedPids.length, 5);
 await pool.dispose();
-assert.equal(await handshakesOf('a') + await handshakesOf('b'), 4);
+assert.equal(await handshakesOf('a') + await handshakesOf('b'), 5);
 assert.equal(await waitForExit(connectedPids), true);
 
 // A semantic server selection must limit both live connections and cached

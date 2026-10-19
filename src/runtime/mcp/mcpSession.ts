@@ -19,7 +19,12 @@ import {
   type McpServerConfig,
   type McpSettings,
 } from './mcpConfig';
-import { mcpServerFingerprint, type McpCachedTool, type McpServerToolList } from './mcpToolCache';
+import {
+  cachedMcpToolFromDefinition,
+  mcpServerFingerprint,
+  type McpCachedTool,
+  type McpServerToolList,
+} from './mcpToolCache';
 
 export interface McpSession {
   readonly tools: readonly FunctionTool<any, any, any>[];
@@ -46,6 +51,10 @@ export interface OpenMcpSessionOptions {
 
 /** `listTools()` 返回的单条工具定义。 */
 type McpToolDefinition = Awaited<ReturnType<MCPServer['listTools']>>[number];
+type McpCallToolOptions = Parameters<MCPServer['callTool']>[3];
+type McpCallToolMeta = Parameters<MCPServer['callTool']>[2];
+type McpCallToolArgs = Parameters<MCPServer['callTool']>[1];
+type McpCallToolResult = Awaited<ReturnType<MCPServer['callTool']>>;
 
 export interface McpConnectedTool {
   /** 暴露给模型的工具名，形如 mcp_<server>_<tool>。 */
@@ -102,7 +111,7 @@ export async function openMcpServerConnection(
       }
       reserved.add(name);
       tools.push({ name, serverName: spec.name, server, definition: mcpTool });
-      accepted.push(mcpTool.description ? { name, description: mcpTool.description } : { name });
+      accepted.push(cachedMcpToolFromDefinition(name, mcpTool));
     }
     log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
     return {
@@ -135,6 +144,21 @@ export interface BuildMcpToolsOptions {
   onInvocationError?: (error: unknown) => void;
 }
 
+export interface BuildCachedMcpToolsOptions extends BuildMcpToolsOptions {
+  /** 仅用于标记工具来源和构造懒连接代理的 server.name。 */
+  serverName: string;
+  /**
+   * 缓存工具真正被调用时才执行。回调负责按需拿到连接并调用原始 MCP 工具；
+   * 这里的代理只负责让 Agents SDK 继续使用同一套 schema/result 转换。
+   */
+  invoke: (
+    toolName: string,
+    args: McpCallToolArgs,
+    meta?: McpCallToolMeta,
+    options?: McpCallToolOptions,
+  ) => Promise<McpCallToolResult>;
+}
+
 export function buildMcpTools(
   connections: readonly McpServerConnection[],
   options: BuildMcpToolsOptions,
@@ -152,6 +176,45 @@ export function buildMcpTools(
       onInvocationError: options.onInvocationError,
     });
   }));
+}
+
+/**
+ * 用缓存里的 MCP 定义生成可展示的 FunctionTool，但不在构造阶段连接服务器。
+ * `mcpToFunctionTool` 接收到的是一个只实现调用转发的轻量代理；真正的连接时机
+ * 由 `invoke` 回调决定，因此缓存只负责 schema，连接池仍负责生命周期和回收。
+ */
+export function buildCachedMcpTools(
+  cachedTools: readonly McpCachedTool[],
+  options: BuildCachedMcpToolsOptions,
+): FunctionTool<any, any, any>[] {
+  const lazyServer = {
+    cacheToolsList: false,
+    name: options.serverName,
+    connect: async () => undefined,
+    close: async () => undefined,
+    listTools: async () => [],
+    callTool: options.invoke,
+    invalidateToolsCache: async () => undefined,
+  } as unknown as MCPServer;
+  const policy = options.policy ?? new DefaultToolPolicy();
+  return cachedTools.flatMap((cached) => {
+    if (!cached.definition) return [];
+    try {
+      const fnTool = mcpToFunctionTool(cached.definition as McpToolDefinition, lazyServer, false, {
+        toolNameOverride: cached.name,
+      });
+      return [wrapMcpFunctionTool(fnTool, {
+        serverName: options.serverName,
+        policy,
+        policyContext: options.policyContext,
+        executeEffect: options.executeEffect,
+        onInvocationError: options.onInvocationError,
+      })];
+    } catch {
+      // 缓存是加速层；旧版本或损坏 schema 不能拖挂整轮 acquire。
+      return [];
+    }
+  });
 }
 
 /** 单轮用法：连上所有服务器、包装、用完关闭。跨轮复用走连接池。 */

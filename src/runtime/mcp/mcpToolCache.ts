@@ -4,7 +4,7 @@ import { isMcpServerEnabled, type McpServerConfig, type McpSettings } from './mc
 /**
  * MCP 工具清单缓存，跟 mcp.json 放在同一个目录。
  *
- * 记的是"上次真连上时，这个服务器给了哪些工具"，不是配置本身。
+ * 记的是"上次真连上时，这个服务器给了哪些工具及其可序列化定义"，不是配置本身。
  * 存在的意义只有一个：让"这一轮有哪些 MCP 工具"这件事不必先连上才知道，
  * 于是可见性不再吊在连接上——服务器暂时连不上、或者将来改成按需连接，
  * 工具名单仍然拿得到。
@@ -15,6 +15,18 @@ export interface McpCachedTool {
   /** 暴露给模型的工具名，形如 mcp_<server>_<tool>，跟实际发出去的名字一致。 */
   name: string;
   description?: string;
+  /**
+   * 上次清单里的可序列化 MCP 定义。它只描述工具，不包含连接或可执行代码；
+   * 真正调用时仍会按服务器配置懒连接。
+   */
+  definition?: McpCachedToolDefinition;
+}
+
+export interface McpCachedToolDefinition {
+  /** MCP server 原始工具名，调用 tools/call 时使用它。 */
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
 }
 
 export interface McpServerToolList {
@@ -153,7 +165,54 @@ function parseCachedTool(value: unknown): McpCachedTool | undefined {
   const name = typeof value.name === 'string' ? value.name.trim() : '';
   if (!name) return undefined;
   const description = typeof value.description === 'string' ? value.description.trim() : '';
-  return description ? { name, description } : { name };
+  const definition = parseCachedToolDefinition(value.definition);
+  return {
+    name,
+    ...(description ? { description } : {}),
+    ...(definition ? { definition } : {}),
+  };
+}
+
+/**
+ * 把 SDK 返回的 MCP 工具定义转成可落盘的最小定义。
+ * MCP 的 schema 是 JSON 对象；这里保留原始 inputSchema，避免缓存只剩名字，
+ * 同时不把 SDK/server 上的函数、连接状态或其它运行时对象写进文件。
+ */
+export function cachedMcpToolFromDefinition(
+  exposedName: string,
+  definition: {
+    name: string;
+    description?: string;
+    inputSchema?: unknown;
+  },
+): McpCachedTool {
+  const description = typeof definition.description === 'string'
+    ? definition.description.trim()
+    : '';
+  const inputSchema = isRecord(definition.inputSchema)
+    ? definition.inputSchema
+    : { type: 'object', properties: {}, required: [] };
+  return {
+    name: exposedName,
+    ...(description ? { description } : {}),
+    definition: {
+      name: definition.name,
+      ...(description ? { description } : {}),
+      inputSchema,
+    },
+  };
+}
+
+function parseCachedToolDefinition(value: unknown): McpCachedToolDefinition | undefined {
+  if (!isRecord(value)) return undefined;
+  const name = typeof value.name === 'string' ? value.name.trim() : '';
+  if (!name || !isRecord(value.inputSchema)) return undefined;
+  const description = typeof value.description === 'string' ? value.description.trim() : '';
+  return {
+    name,
+    ...(description ? { description } : {}),
+    inputSchema: value.inputSchema,
+  };
 }
 
 function joinPath(root: string, relativePath: string): string {

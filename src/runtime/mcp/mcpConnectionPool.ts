@@ -1,14 +1,20 @@
-import type { FunctionTool } from '@openai/agents';
+import type { FunctionTool, MCPServer } from '@openai/agents';
 import type { ToolPolicy, ToolPolicyContext } from '../../tools/toolContract';
 import type { AgentConfig } from '../agentConfig';
 import { hashContent } from '../contentHash';
 import { isMcpServerEnabled, type McpServerConfig, type McpSettings } from './mcpConfig';
-import { buildMcpTools, openMcpServerConnection, type McpServerConnection } from './mcpSession';
+import {
+  buildCachedMcpTools,
+  buildMcpTools,
+  openMcpServerConnection,
+  type McpServerConnection,
+} from './mcpSession';
 import {
   cachedToolsByServer,
   mcpServerFingerprint,
   readMcpToolCache,
   writeMcpToolCache,
+  type McpCachedTool,
   type McpServerToolList,
 } from './mcpToolCache';
 
@@ -114,10 +120,14 @@ export class McpConnectionPool {
     const reserved = new Set(options.reservedToolNames ?? []);
     const keys: string[] = [];
     const connections: McpServerConnection[] = [];
+    const failedServers: McpServerConfig[] = [];
     for (const server of servers) {
       const key = mcpServerKey(server, options);
       const connection = await this.connectionFor(key, server, reserved, scopeKey);
-      if (!connection) continue;
+      if (!connection) {
+        failedServers.push(server);
+        continue;
+      }
       keys.push(key);
       connections.push(connection);
     }
@@ -140,7 +150,7 @@ export class McpConnectionPool {
     try {
       await this.rememberToolLists(options, connections.map((connection) => connection.toolList));
       // 逐台包工具，这样某台调用出错时能精确丢掉那一台，不误伤别的服务器。
-      const tools = connections.flatMap((connection, index) => buildMcpTools([connection], {
+      const liveTools = connections.flatMap((connection, index) => buildMcpTools([connection], {
         policy: options.policy,
         policyContext: options.policyContext,
         executeEffect: options.executeEffect,
@@ -151,8 +161,51 @@ export class McpConnectionPool {
           void this.drop(keys[index]);
         },
       }));
-      const toolNames = await this.toolNamesFor(options, connections);
-      return { tools, toolNames, release };
+      const cachedByServer = cachedToolsByServer(
+        await readMcpToolCache(options.policyContext.workspaceRoot),
+        options.settings,
+      );
+      const cachedTools = failedServers.flatMap((server) => {
+        const cached = cachedByServer.get(server.name) ?? [];
+        const available = cached.filter((tool) => tool.definition && !reserved.has(tool.name));
+        for (const tool of available) reserved.add(tool.name);
+        if (!available.length) return [];
+        const invoke = async (
+          toolName: string,
+          args: Parameters<MCPServer['callTool']>[1],
+          meta?: Parameters<MCPServer['callTool']>[2],
+          callOptions?: Parameters<MCPServer['callTool']>[3],
+        ) => {
+          const cachedTool = available.find((tool) => tool.definition?.name === toolName);
+          if (!cachedTool) {
+            throw new Error(`缓存的 MCP 工具 ${server.name}.${toolName} 已不存在`);
+          }
+          return this.invokeCachedMcpTool(
+            server,
+            cachedTool.name,
+            toolName,
+            args,
+            meta,
+            callOptions,
+            options,
+          );
+        };
+        return buildCachedMcpTools(available, {
+          serverName: server.name,
+          policy: options.policy,
+          policyContext: options.policyContext,
+          executeEffect: options.executeEffect,
+          invoke,
+          onInvocationError: (error) => {
+            this.log(
+              `[mcp] ${server.name} 缓存工具调用失败，丢弃这台连接以便下次重连: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            void this.drop(mcpServerKey(server, options));
+          },
+        });
+      });
+      const toolNames = await this.toolNamesFor(options, connections, cachedByServer);
+      return { tools: [...liveTools, ...cachedTools], toolNames, release };
     } catch (error) {
       // 借连接后任何一步失败都必须归还，否则清掉的 idle timer 永远不会恢复。
       release();
@@ -176,17 +229,64 @@ export class McpConnectionPool {
   private async toolNamesFor(
     options: AcquireMcpSessionOptions,
     connections: readonly McpServerConnection[],
+    cachedByServer: Map<string, McpCachedTool[]>,
   ): Promise<string[]> {
     const names = connections.flatMap((connection) => connection.tools.map((entry) => entry.name));
     const live = new Set(connections.map((connection) => connection.serverName));
-    const cache = await readMcpToolCache(options.policyContext.workspaceRoot);
-    for (const [serverName, cached] of cachedToolsByServer(cache, options.settings)) {
+    for (const [serverName, cached] of cachedByServer) {
       if (options.serverNames !== undefined && !options.serverNames.includes(serverName)) continue;
       if (live.has(serverName)) continue;
       this.log(`[mcp] ${serverName} 本次没连上，用缓存里的 ${cached.length} 个工具名兜底`);
       names.push(...cached.map((tool) => tool.name));
     }
     return names;
+  }
+
+  /**
+   * 缓存工具的真正执行路径：借一条实时连接，验证缓存工具仍在清单里，
+   * 直接调用 MCP server，最后按普通租约规则归还。调用失败由外层包装丢弃连接。
+   */
+  private async invokeCachedMcpTool(
+    server: McpServerConfig,
+    exposedToolName: string,
+    rawToolName: string,
+    args: Parameters<MCPServer['callTool']>[1],
+    meta: Parameters<MCPServer['callTool']>[2] | undefined,
+    callOptions: Parameters<MCPServer['callTool']>[3] | undefined,
+    options: AcquireMcpSessionOptions,
+  ): Promise<Awaited<ReturnType<MCPServer['callTool']>>> {
+    const key = mcpServerKey(server, options);
+    const scopeKey = mcpScopeKey(options);
+    const reserved = new Set(options.reservedToolNames ?? []);
+    const connection = await this.connectionFor(key, server, reserved, scopeKey);
+    if (!connection) {
+      throw new Error(`MCP 服务器 ${server.name} 当前无法连接，缓存工具 ${exposedToolName} 暂时不可用`);
+    }
+    const entry = this.entries.get(key);
+    if (entry) {
+      this.clearTimer(entry);
+      entry.leases += 1;
+    }
+    try {
+      await this.rememberToolLists(options, [connection.toolList]);
+      const liveTool = connection.tools.find((tool) => (
+        tool.name === exposedToolName && tool.definition.name === rawToolName
+      ));
+      if (!liveTool) {
+        throw new Error(`MCP 服务器 ${server.name} 已不再提供缓存工具 ${exposedToolName}`);
+      }
+      return await connection.server.callTool(liveTool.definition.name, args, meta, callOptions);
+    } finally {
+      if (entry) {
+        this.release(key);
+      } else {
+        try {
+          await connection.server.close();
+        } catch {
+          // 连接池已销毁时没有 entry，临时连接也要尽力收掉。
+        }
+      }
+    }
   }
 
   /**
