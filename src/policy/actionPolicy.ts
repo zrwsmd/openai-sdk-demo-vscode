@@ -11,6 +11,20 @@
 /** @deprecated Kept as a compatibility name; this is an action hint, not a forced call. */
 export type RequiredAgentTool = 'read_file' | 'write_file' | 'edit_file' | 'export_st_program' | 'run_command';
 
+/**
+ * Coarse action intent shared by workflow routing and ordinary tool policy.
+ *
+ * A project name or a recently created project is target context.  This value
+ * describes the action in the current user turn so a domain workflow cannot
+ * claim a request merely because its domain is mentioned as the target.
+ */
+export type CurrentActionIntent =
+  | 'project'
+  | 'file_read'
+  | 'file_edit'
+  | 'command'
+  | 'unknown';
+
 export interface ActionPolicy {
   requiredToolFor(userText: string): RequiredAgentTool | undefined;
 }
@@ -24,7 +38,7 @@ export class DefaultActionPolicy implements ActionPolicy {
     }
 
     const mentionsWorkspaceFile =
-      /(?:文件|工作区|当前项目|workspace|\bfile\b)/iu.test(text) ||
+      /(?:文件|目录|工作区|当前项目|配置(?:文件)?|文档|脚本|源码|代码|workspace|\bfile\b|\bdirectory\b)/iu.test(text) ||
       looksLikeWorkspaceFileReference(text);
     // ActionPolicy is only an intent hint. Retrospective/state questions such as
     // "which file was written just now?" must not be interpreted as a new
@@ -53,6 +67,63 @@ const defaultActionPolicy = new DefaultActionPolicy();
 
 export function inferRequiredTool(userText: string): RequiredAgentTool | undefined {
   return defaultActionPolicy.requiredToolFor(userText);
+}
+
+/**
+ * Infer the current turn's coarse action independently from its target nouns.
+ * This is deliberately conservative: unknown leaves workflow selection to the
+ * registered local matcher or model classifier.
+ */
+export function inferCurrentActionIntent(userText: string): CurrentActionIntent {
+  const text = userText.trim();
+  if (!text) return 'unknown';
+
+  const requiredTool = defaultActionPolicy.requiredToolFor(text);
+  if (requiredTool === 'read_file') return 'file_read';
+  if (requiredTool === 'write_file' || requiredTool === 'edit_file' || requiredTool === 'export_st_program') {
+    return 'file_edit';
+  }
+  if (requiredTool === 'run_command') return 'command';
+
+  // File listing/searching does not have a single required tool yet, but it is
+  // still a concrete read action and must not be mistaken for project setup.
+  const mentionsWorkspaceTarget =
+    /(?:文件|目录|工作区|路径|内容|配置(?:文件)?|文档|脚本|源码|代码|workspace|file|directory)/iu.test(text) ||
+    looksLikeWorkspaceFileReference(text);
+  const asksWorkspaceInspection =
+    /(?:列出|列举|搜索|查找|检索|浏览|扫描|检查|分析|inspect|list|search)/iu.test(text);
+  if (mentionsWorkspaceTarget && asksWorkspaceInspection) return 'file_read';
+
+  // A project mention can be historical context for a code-delivery request;
+  // keep that request out of the project lifecycle workflow as well.
+  if (/(?:程序|代码|源码|结构化文本|IEC\s*61131)/u.test(text)) return 'file_edit';
+
+  if (isProjectLifecycleRequest(text)) return 'project';
+  return 'unknown';
+}
+
+function isProjectLifecycleRequest(text: string): boolean {
+  const lead = /^(?:请(?:帮我)?|帮我|我要|我想|想|想要|需要)?/u;
+  const create = new RegExp(
+    `${lead.source}(?:在[^。！？\\r\\n]{0,24})?(?:新建|创建|建立|搭建|生成|建(?=个|一个|工程|项目))\\s*` +
+      `(?:一个|个|新的)?\\s*(?:[A-Za-z0-9_-]+\\s*)?(?:工程|项目)(?!的)`,
+    'u',
+  );
+  const open = new RegExp(
+    `${lead.source}(?:打开|开启)\\s*[^。！？\\r\\n]{0,24}(?:工程|项目)(?!的)`,
+    'u',
+  );
+  const manageBeforeTarget = new RegExp(
+    `${lead.source}(?:关闭|关掉|关了|删除|删掉|移除)\\s*` +
+      `(?:当前|这个|那个|刚刚创建的|刚刚新建的)?\\s*(?:工程|项目)(?!的)`,
+    'u',
+  );
+  const manageAfterTarget = new RegExp(
+    `${lead.source}(?:把)?\\s*(?:当前|这个|那个)?\\s*(?:工程|项目)\\s*` +
+      `(?:关闭|关掉|关了|删除|删掉|移除|重命名|改名|改个名)`,
+    'u',
+  );
+  return create.test(text) || open.test(text) || manageBeforeTarget.test(text) || manageAfterTarget.test(text);
 }
 
 function hasNegation(text: string, action: RegExp): boolean {

@@ -30,6 +30,7 @@ const shouldMatch = [
   '关闭当前工程',
   '把工程关了',
   '把工程改个名字',
+  '打开刚刚创建的工程',
 ];
 for (const text of shouldMatch) {
   assert.equal(match(text).matched, true, `应当认领:${text}`);
@@ -45,6 +46,12 @@ const shouldNotMatch = [
   '今天天气怎么样',
   '建议这个工程怎么优化',
   '打开那个配置文件',
+  '刚刚新建的工程怎么样',
+  '不要在刚刚新建的工程下写文件，只解释一下怎么写',
+  '在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello',
+  '读取刚刚新建的工程里的 config.json',
+  '列出刚刚新建的工程下面的文件',
+  '在刚刚新建的工程里运行构建命令',
 ];
 for (const text of shouldNotMatch) {
   assert.equal(match(text).matched, false, `不该认领:${text}`);
@@ -121,6 +128,71 @@ for (const text of ['生成一个水泵控制程序', '建个工程然后写个�
     `代码交付请求不该被工程事务工作流认领:${text}`,
   );
 }
+
+// The project noun may be carried over as target context, but an explicit
+// current-turn action must select the corresponding fallback surface.
+for (const [text, expectedTool] of [
+  ['在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello', 'write_file'],
+  ['读取刚刚新建的工程里的 config.json', 'read_file'],
+  ['列出刚刚新建的工程下面的文件', 'list_files'],
+  ['在刚刚新建的工程里运行构建命令', 'run_command'],
+]) {
+  const decision = await decisionService.decide(cfg, text);
+  assert.notEqual(
+    workflowIdOf(decision),
+    DEVUNI_PROJECT_WORKFLOW_ID,
+    `当前动作不该被工程 workflow 抢走:${text}`,
+  );
+  assert(
+    decision.allowedTools?.includes(expectedTool),
+    `当前动作的工具面应包含 ${expectedTool}:${text}`,
+  );
+}
+
+// The same action boundary must protect against a stale/high-confidence
+// Jev route and a model classifier route, not only the local matcher.
+const forcedProjectHint = {
+  delivery: 'required',
+  deliveryConfidence: 0.95,
+  orchestration: 'single',
+  orchestrationConfidence: 0.95,
+  workflow: DEVUNI_PROJECT_WORKFLOW_ID,
+  workflowConfidence: 0.99,
+  toolNeeds: {
+    readFile: { value: 'no', confidence: 0.95 },
+    writeFile: { value: 'yes', confidence: 0.95 },
+    runCommand: { value: 'no', confidence: 0.95 },
+  },
+  riskLevel: 'medium',
+  riskConfidence: 0.9,
+  needsApproval: { value: 'yes', confidence: 0.9 },
+  evaluation: {},
+};
+const forcedProjectRoute = new WorkflowDecisionService(
+  () => {},
+  { taskHint: async () => forcedProjectHint },
+  createAppWorkflowRegistry(),
+);
+const forcedJevDecision = await forcedProjectRoute.decide(
+  cfg,
+  '在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello',
+);
+assert.notEqual(workflowIdOf(forcedJevDecision), DEVUNI_PROJECT_WORKFLOW_ID);
+const forcedModelDecision = await forcedProjectRoute.decide(
+  cfg,
+  '在刚刚新建的工程下面写入一个文件 asd.txt，内容是 hello',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => ({
+      kind: 'workflow',
+      workflowId: DEVUNI_PROJECT_WORKFLOW_ID,
+      confidence: 0.99,
+      reason: 'intentionally stale project route',
+    }),
+  },
+);
+assert.notEqual(workflowIdOf(forcedModelDecision), DEVUNI_PROJECT_WORKFLOW_ID);
 
 /* ------------------------------------------------------------------ */
 /* [4] 运行时:名单原样发,不经过风险过滤和文本收窄                      */

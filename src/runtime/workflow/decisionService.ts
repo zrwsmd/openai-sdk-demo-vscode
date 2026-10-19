@@ -10,6 +10,8 @@ import {
   type WorkflowRegistry,
 } from "./registry";
 import type { ToolCatalog } from "../toolCatalog";
+import { inferCurrentActionIntent } from "../../policy/actionPolicy";
+import type { CurrentActionIntent } from "../../policy/actionPolicy";
 import { createWorkflowContract } from "./types";
 import type {
   WorkflowDecision,
@@ -46,6 +48,7 @@ export class WorkflowDecisionService {
     } = {},
   ): Promise<WorkflowDecision> {
     const workflows = this.registry.list();
+    const actionIntent = inferCurrentActionIntent(userText);
     const jevHint = await this.decisionService.taskHint(cfg.jev, userText, signal, {
       workflowChoices: workflows
         .map((workflow) => ({
@@ -55,13 +58,22 @@ export class WorkflowDecisionService {
         })),
       mcpServerChoices: options.mcpServerChoices,
     });
-    const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(jevHint);
+    const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(
+      jevHint,
+      actionIntent,
+    );
     if (registeredWorkflowDecision) return registeredWorkflowDecision;
 
     const commandQueryDecision = this.workflowFromCommandQueryJevHint(jevHint, userText);
     if (commandQueryDecision) return commandQueryDecision;
 
-    const localDecision = this.workflowFromLocalDetectors(userText, history, workflows, jevHint);
+    const localDecision = this.workflowFromLocalDetectors(
+      userText,
+      history,
+      workflows,
+      jevHint,
+      actionIntent,
+    );
     if (localDecision) return localDecision;
 
     const safeFallbackDecision = this.workflowFromSafeJevFallback(jevHint, userText);
@@ -81,6 +93,7 @@ export class WorkflowDecisionService {
       workflows,
       options.modelClassifier,
       jevHint,
+      actionIntent,
     );
     if (modelDecision) return modelDecision;
 
@@ -89,9 +102,10 @@ export class WorkflowDecisionService {
 
   private workflowFromRegisteredJevHint(
     hint: TaskDecisionHint,
+    actionIntent: CurrentActionIntent,
   ): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
-    if (workflow) {
+    if (workflow && isWorkflowCompatibleWithAction(workflow, actionIntent)) {
       const contract = createWorkflowContract(workflow, {
         source: "jev",
         reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
@@ -108,6 +122,11 @@ export class WorkflowDecisionService {
         signals: signalsFromHint(hint),
         ...(contract ? { contract } : {}),
       };
+    }
+    if (workflow) {
+      this.log(
+        `[workflow] 忽略 ${workflow.id}: 当前动作 ${actionIntent} 不在该 workflow 的兼容范围内`,
+      );
     }
     return undefined;
   }
@@ -179,9 +198,10 @@ export class WorkflowDecisionService {
     history: AgentInputItem[],
     workflows: readonly WorkflowDescriptor[],
     hint: TaskDecisionHint,
+    actionIntent: CurrentActionIntent,
   ): WorkflowDecision | undefined {
     for (const workflow of workflows) {
-      const match = workflow.localMatch?.({ userText, history });
+      const match = workflow.localMatch?.({ userText, history, actionIntent });
       if (!match?.matched) continue;
       const contract = createWorkflowContract(workflow, {
         source: "local",
@@ -211,6 +231,7 @@ export class WorkflowDecisionService {
     workflows: readonly WorkflowDescriptor[],
     classifier: WorkflowModelClassifier | undefined,
     hint: TaskDecisionHint,
+    actionIntent: CurrentActionIntent,
   ): Promise<WorkflowDecision | undefined> {
     if (!classifier) return undefined;
     let decision: WorkflowModelDecision | undefined;
@@ -225,6 +246,12 @@ export class WorkflowDecisionService {
     if (decision.kind === "workflow") {
       const workflow = this.registry.get(decision.workflowId);
       if (!workflow) return undefined;
+      if (!isWorkflowCompatibleWithAction(workflow, actionIntent)) {
+        this.log(
+          `[workflow] 忽略模型 workflow ${workflow.id}: 当前动作 ${actionIntent} 不在兼容范围内`,
+        );
+        return undefined;
+      }
       const contract = createWorkflowContract(workflow, {
         source: "model",
         reason: decision.reason,
@@ -298,6 +325,14 @@ export class WorkflowDecisionService {
     return allowedToolsForFallback(mode);
   }
 
+}
+
+function isWorkflowCompatibleWithAction(
+  workflow: WorkflowDescriptor,
+  actionIntent: CurrentActionIntent,
+): boolean {
+  const allowed = workflow.actionIntents;
+  return !allowed || allowed.length === 0 || allowed.includes(actionIntent);
 }
 
 function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {

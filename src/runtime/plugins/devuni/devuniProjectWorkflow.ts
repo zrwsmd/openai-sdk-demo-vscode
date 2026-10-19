@@ -1,8 +1,8 @@
 /**
  * devuni 工程事务工作流。
  *
- * 它认领的是一"类"请求,不是一个动作:凡是发生在"工程/项目"这个层面的事
- * (新建、打开、关闭、改名……)都归它。现在真正挂上去的工具只有查询和创建
+ * 它认领的是工程生命周期事务(新建、打开、关闭、改名……),不是所有提到
+ * 工程/项目的请求。写文件、读配置或运行命令时,工程名只是目标上下文。现在真正挂上去的工具只有查询和创建
  * 两个;等同事那边把关闭、改名等接口放出来,只要往 DEVUNI_COMMANDS 里加一条,
  * 工具名单会自动跟上,这个文件一个字都不用改。
  *
@@ -13,6 +13,7 @@
  * 工具名单原样发,这两道筛选都不会跑。
  */
 import { CLARIFICATION_TOOL_NAME } from "../../clarification";
+import { inferCurrentActionIntent } from "../../../policy/actionPolicy";
 import type {
   WorkflowDecisionContext,
   WorkflowDescriptor,
@@ -35,7 +36,11 @@ export const DEVUNI_PROJECT_TOOL_NAMES: readonly string[] = [
 ];
 
 /**
- * 认领规则:动作词 + 工程名词,且不含代码交付类的标志词。
+ * 认领规则:当前动作是工程生命周期操作,且文本含工程名词。
+ *
+ * “刚刚新建的工程”这类词只是目标上下文,不能抢走后面的“写入文件”
+ * “列出文件”或“运行命令”。动作意图由路由层预先计算,直接调用 matcher
+ * 时则在这里回退计算,确保两条入口行为一致。
  *
  * "建"必须紧跟着"个 / 一个 / 工程 / 项目"才算动作,否则"建议""组建"这类词
  * 会被误当成建工程。
@@ -56,6 +61,14 @@ function localMatch(context: WorkflowDecisionContext): WorkflowLocalMatch {
   const text = context.userText.trim();
   if (!text || CODE_DELIVERY_MARKER.test(text)) {
     return { matched: false, confidence: 0, reason: NO_MATCH_REASON };
+  }
+  const actionIntent = context.actionIntent ?? inferCurrentActionIntent(text);
+  if (actionIntent !== "project") {
+    return {
+      matched: false,
+      confidence: 0,
+      reason: "当前动作属于文件或命令操作,工程名只是目标上下文",
+    };
   }
   const matched =
     DEVUNI_PROJECT_ACTION.test(text) && DEVUNI_PROJECT_NOUN.test(text);
@@ -100,6 +113,7 @@ export const DEVUNI_PROJECT_WORKFLOW: WorkflowDescriptor = {
   description:
     "处理 devUni IDE 插件里的工程级事务:新建工程,以及查询可用的设备型号、语言和工程类型。不涉及代码交付。",
   runtimeManaged: true,
+  actionIntents: ["project"],
   workflowRoute: DEVUNI_PROJECT_WORKFLOW_ID,
   businessToolNames: DEVUNI_PROJECT_TOOL_NAMES,
   localMatch,

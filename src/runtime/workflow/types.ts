@@ -10,6 +10,7 @@ import type { WorkflowRuntimeState } from "./runtimeState";
 import type { RuntimeServiceContainer } from "../services";
 import type { ToolEvidenceExtractor } from "../decision/completionEvidence";
 import type { ToolCatalog, ToolFallbackMode } from "../toolCatalog";
+import type { CurrentActionIntent } from "../../policy/actionPolicy";
 
 export type WorkflowId = string;
 
@@ -206,6 +207,8 @@ export type WorkflowFallbackMode = ToolFallbackMode;
 export interface WorkflowDecisionContext {
   userText: string;
   history?: AgentInputItem[];
+  /** Action in the current turn; target nouns such as a project are context. */
+  actionIntent?: CurrentActionIntent;
 }
 
 export interface WorkflowLocalMatch {
@@ -249,6 +252,8 @@ export interface WorkflowDescriptor {
   title: string;
   description: string;
   runtimeManaged: boolean;
+  /** Current-turn action intents this workflow can own, when constrained. */
+  actionIntents?: readonly CurrentActionIntent[];
   workflowRoute?: string;
   businessToolNames?: readonly string[];
   resolveBusinessToolPolicy?: WorkflowBusinessToolPolicyResolver;

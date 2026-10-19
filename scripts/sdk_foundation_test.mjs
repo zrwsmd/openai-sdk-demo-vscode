@@ -9,6 +9,7 @@ import {
   MockPlcAdapter,
   createIndustrialAgentTeam,
   inferRequiredTool,
+  inferCurrentActionIntent,
   industrialAgentOutputDefinition,
   industrialAgentOutputSchema,
   industrialFinalArtifactOutputSchema,
@@ -325,6 +326,20 @@ assert.equal(
   undefined,
 );
 assert.equal(inferRequiredTool('查看 config.json'), 'read_file');
+assert.equal(inferCurrentActionIntent('帮我在 E 盘建个工程'), 'project');
+assert.equal(
+  inferCurrentActionIntent('在刚刚新建的工程下面写入 asd.txt'),
+  'file_edit',
+);
+assert.equal(
+  inferCurrentActionIntent('列出刚刚新建的工程下面的文件'),
+  'file_read',
+);
+assert.equal(
+  inferCurrentActionIntent('在刚刚新建的工程里运行构建命令'),
+  'command',
+);
+assert.equal(inferCurrentActionIntent('刚刚新建的工程怎么样'), 'unknown');
 const outputFormat = zodTextFormat(industrialAgentOutputSchema, 'industrial_agent_output');
 const assertClosedObjects = (value) => {
   if (!value || typeof value !== 'object') return;
