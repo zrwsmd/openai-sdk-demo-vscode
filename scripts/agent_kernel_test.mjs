@@ -1266,6 +1266,62 @@ async function runTestTurn(
   if (continuationGuard?.('st_dependency_map', { path: 'yy.txt' }) !== undefined) {
     throw new Error('明确的历史上下文续接被错误拦截');
   }
+
+  // 最近只有一个活动文件时，省略式追问也允许只读工具继续使用它；
+  // 非只读工具仍然需要显式表达继续操作。
+  const implicitFollowUpGuard = createHistoricalToolArgumentGuard(
+    history,
+    '周期分别是多少啊',
+  );
+  if (implicitFollowUpGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
+    throw new Error('最近唯一文件的自然追问不应拦截 read_file');
+  }
+  if (implicitFollowUpGuard?.('search_files', { text: 'yy.txt' }) !== undefined) {
+    throw new Error('最近唯一文件的自然追问不应拦截 search_files');
+  }
+  if (implicitFollowUpGuard?.('st_dependency_map', { path: 'yy.txt' }) === undefined) {
+    throw new Error('自然追问不应放行非只读工具');
+  }
+
+  const noisyHistory = [
+    ...history,
+    {
+      type: 'function_call_output',
+      callId: 'old-read',
+      output: JSON.stringify({ matches: ['other-a.txt', 'other-b.txt', 'other-c.txt'] }),
+    },
+  ];
+  const noisyFollowUpGuard = createHistoricalToolArgumentGuard(
+    noisyHistory,
+    '周期分别是多少啊',
+  );
+  if (noisyFollowUpGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
+    throw new Error('工具回执中的多个文件名不应让唯一活动目标变成歧义');
+  }
+
+  const ambiguousHistory = [
+    { type: 'message', role: 'user', content: '读取 a.txt' },
+    {
+      type: 'function_call',
+      name: 'read_file',
+      callId: 'old-a',
+      arguments: JSON.stringify({ path: 'a.txt' }),
+    },
+    { type: 'message', role: 'user', content: '再读取 b.txt' },
+    {
+      type: 'function_call',
+      name: 'read_file',
+      callId: 'old-b',
+      arguments: JSON.stringify({ path: 'b.txt' }),
+    },
+  ];
+  const ambiguousGuard = createHistoricalToolArgumentGuard(
+    ambiguousHistory,
+    '周期分别是多少啊',
+  );
+  if (ambiguousGuard?.('read_file', { path: 'b.txt' }) === undefined) {
+    throw new Error('存在多个近期文件时不应猜测自然追问的目标');
+  }
   console.log('[3a2] 跨工具历史参数恢复 guard:通过');
 }
 

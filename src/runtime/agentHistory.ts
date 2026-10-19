@@ -276,6 +276,19 @@ export type HistoricalToolArgumentGuard = (
 const HISTORICAL_REFERENCE_PATTERN =
   /(?:继续|接着|续上|基于(?:上面|之前|前面|刚才|上述)|刚才|上一轮|上一次|之前|前面|上述|前述|该(?:文件|路径|结果|内容|对象|程序)|这个(?:文件|路径|结果|内容|对象|程序)|continue|previous|that file|this file)/iu;
 
+/**
+ * 只读工具可以在“最近且唯一的目标”上承接自然语言追问；副作用工具仍
+ * 需要当前请求明确表达继续处理历史目标。
+ */
+const IMPLICIT_HISTORY_READ_TOOLS = new Set([
+  "read_file",
+  "search_files",
+  "list_files",
+]);
+const IMPLICIT_FOLLOW_UP_PATTERN =
+  /(?:[?？]|吗|呢|啊|吧|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|情况|结果|内容|周期|参数|数值|区别|请(?:查看|读取|检查|分析|确认|看看)|帮我(?:查看|读取|检查|分析|确认|看看))/iu;
+const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
+
 const RESOURCE_TOKEN_PATTERN =
   /(?:[a-z]:[\\/][^\s"'`，。！？,;:]+|(?:\.{0,2}[\\/])?[a-z0-9_\u4e00-\u9fff.-]+(?:[\\/][a-z0-9_\u4e00-\u9fff.-]+)*\.[a-z0-9_\u4e00-\u9fff-]{1,16})/giu;
 
@@ -317,7 +330,6 @@ function collectResourceReferencesFromText(
     const token = match[0];
     if (token) addResourceReference(token, output);
   }
-  addResourceReference(value, output);
 }
 
 function collectHistoricalResourceReferences(
@@ -353,6 +365,73 @@ function collectHistoricalResourceReferences(
   }
 }
 
+interface HistoricalReferenceRecord {
+  display: string;
+  /** 从 1 开始的用户轮次；工具调用和回执归属于它前面的 user 轮次。 */
+  turnIndex: number;
+}
+
+interface HistoricalReferenceRecords {
+  /** 所有历史引用，用来识别模型是否复制了旧参数。 */
+  records: Map<string, HistoricalReferenceRecord>;
+  /** 适合自动承接的目标：用户/助手文本和工具调用参数，不含工具回执里的搜索结果。 */
+  activeRecords: Map<string, HistoricalReferenceRecord>;
+  currentTurnIndex: number;
+}
+
+function isUserMessage(item: unknown): item is { type?: string; role?: string; content?: unknown } {
+  const value = item as { type?: string; role?: string };
+  return value.type === "message" && value.role === "user";
+}
+
+function isActiveReferenceItem(item: unknown): boolean {
+  const value = item as { type?: string; role?: string };
+  if (value.type === "message") {
+    return value.role === "user" || value.role === "assistant";
+  }
+  return value.type === "function_call" ||
+    value.type === "tool_call" ||
+    value.type === "mcp_call" ||
+    value.type === "shell_call" ||
+    value.type === "apply_patch_call";
+}
+
+function historicalReferenceRecords(
+  historyItems: readonly AgentInputItem[],
+  currentUserText: string,
+): HistoricalReferenceRecords {
+  // 当前 user 消息不属于历史目标。真实运行时它通常已经写入 session，
+  // 直接调用 createHistoricalToolArgumentGuard 的测试则可能没有这一项。
+  const currentUserIndex = [...historyItems]
+    .map((item, index) => ({ item, index }))
+    .reverse()
+    .find(({ item }) => isUserMessage(item) &&
+      typeof item.content === "string" && item.content === currentUserText)
+    ?.index ?? historyItems.length;
+  const records = new Map<string, HistoricalReferenceRecord>();
+  const activeRecords = new Map<string, HistoricalReferenceRecord>();
+  let turnIndex = 0;
+  for (let index = 0; index < currentUserIndex; index += 1) {
+    const item = historyItems[index];
+    if (isUserMessage(item)) turnIndex += 1;
+    const references = new Map<string, string>();
+    collectHistoricalResourceReferences(item, references);
+    for (const [normalized, display] of references) {
+      records.set(normalized, { display, turnIndex });
+    }
+    if (isActiveReferenceItem(item)) {
+      for (const [normalized, display] of references) {
+        activeRecords.set(normalized, { display, turnIndex });
+      }
+    }
+  }
+  return { records, activeRecords, currentTurnIndex: turnIndex + 1 };
+}
+
+function isImplicitFollowUp(currentUserText: string): boolean {
+  return IMPLICIT_FOLLOW_UP_PATTERN.test(currentUserText.trim());
+}
+
 function resourceMentionedInText(
   normalizedReference: string,
   normalizedText: string,
@@ -373,18 +452,21 @@ export function createHistoricalToolArgumentGuard(
   historyItems: readonly AgentInputItem[],
   currentUserText: string,
 ): HistoricalToolArgumentGuard | undefined {
-  const historicalReferences = new Map<string, string>();
-  for (const item of historyItems) {
-    collectHistoricalResourceReferences(item, historicalReferences);
-  }
+  const { records: historicalReferences, activeRecords, currentTurnIndex } =
+    historicalReferenceRecords(historyItems, currentUserText);
   if (historicalReferences.size === 0) return undefined;
 
   const normalizedUserText = normalizeResourceReference(currentUserText);
-  const allowsHistoricalReference =
-    HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
+  const currentUserReferences = new Map<string, string>();
+  collectResourceReferencesFromText(currentUserText, currentUserReferences);
+  const recentReferences = new Set(
+    [...activeRecords.entries()]
+      .filter(([, record]) => currentTurnIndex - record.turnIndex <= MAX_IMPLICIT_HISTORY_TURN_AGE)
+      .map(([reference]) => reference),
+  );
+  const explicitContinuation = HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
 
   return (toolName, input) => {
-    if (allowsHistoricalReference) return undefined;
     const currentReferences = new Map<string, string>();
     collectHistoricalResourceReferences(input, currentReferences);
     const staleReferences = [...currentReferences.keys()]
@@ -395,14 +477,29 @@ export function createHistoricalToolArgumentGuard(
       );
     if (staleReferences.length === 0) return undefined;
 
+    // 明确说“继续/刚才/该文件”时，仍要求历史目标唯一；否则关键词本身
+    // 不能解决“刚才的两个文件到底是哪一个”的歧义。
+    const hasUniqueHistoricalTarget = activeRecords.size === 1;
+    const hasUniqueRecentTarget = recentReferences.size === 1;
+    const canContinueExplicitly = explicitContinuation &&
+      (hasUniqueHistoricalTarget || hasUniqueRecentTarget) &&
+      staleReferences.every((reference) => recentReferences.has(reference) || hasUniqueHistoricalTarget);
+    const canContinueImplicitly = IMPLICIT_HISTORY_READ_TOOLS.has(toolName) &&
+      currentUserReferences.size === 0 &&
+      isImplicitFollowUp(currentUserText) &&
+      hasUniqueRecentTarget &&
+      staleReferences.length === 1 &&
+      recentReferences.has(staleReferences[0]);
+    if (canContinueExplicitly || canContinueImplicitly) return undefined;
+
     const displayReferences = staleReferences
       .slice(0, 3)
-      .map((reference) => historicalReferences.get(reference) ?? reference);
+      .map((reference) => historicalReferences.get(reference)?.display ?? reference);
     return (
       `疑似沿用了历史对话中的资源参数（${displayReferences.join("、")}），` +
-      `但当前用户请求没有明确引用它们；已阻止工具 ${toolName} 执行。` +
+      `但当前用户请求没有明确引用或唯一承接它们；已阻止工具 ${toolName} 执行。` +
       "请忽略旧工具参数，重新依据当前用户请求选择工具和参数；" +
-      "如果用户确实要继续处理旧资源，请等待用户明确说明。"
+      "如果这是对最近唯一资源的追问，请明确写出文件或路径；写入、编辑和执行类工具还需要明确表达继续操作。"
     );
   };
 }
@@ -433,7 +530,7 @@ export const NEW_TURN_CONTEXT_PROMPT =
   "\n\n本轮上下文边界（仅适用于新的用户请求）：" +
   "最后一条 user 消息是本轮唯一的执行目标；更早的 user/assistant 消息仅作为历史参考，用于理解术语、已确认事实和用户偏好。" +
   "历史消息中的具体文件路径、文件名、符号名、变量值、命令参数、工具名称和待办动作，默认不属于本轮目标。" +
-  "除非当前 user 消息明确表达继续、接着、基于上面、刚才、该文件、这个结果等指代，且历史中的指代对象可以唯一确定，否则不要把历史中的具体值复制到本轮工具参数，也不要因为历史动作再次调用工具。" +
+  "除非当前 user 消息明确表达继续、接着、基于上面、刚才、该文件、这个结果等指代，且历史中的指代对象可以唯一确定，或者当前消息是在追问最近唯一的活动资源且只调用只读工具，否则不要把历史中的具体值复制到本轮工具参数，也不要因为历史动作再次调用工具。" +
   "当前 user 消息明确给出的路径、文件名、符号和参数优先；当前消息没有给出具体目标时，不要从历史猜测一个具体目标，需要时先澄清。" +
   "历史工具回执可以作为参考事实，但不代表本轮已经执行；本轮需要动作时，必须根据当前目标重新决定工具调用。" +
   "如果当前用户是在追问上一轮为什么这样处理、某个配置为什么没有变化或当前状态如何形成，可以引用历史对话中已经明确陈述的事实来解释原因；本轮没有工具调用不等于不能解释历史状态。" +
