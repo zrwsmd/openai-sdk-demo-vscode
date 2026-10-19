@@ -196,6 +196,7 @@ export class McpConnectionPool {
           policyContext: options.policyContext,
           executeEffect: options.executeEffect,
           invoke,
+          log: this.log,
           onInvocationError: (error) => {
             this.log(
               `[mcp] ${server.name} 缓存工具调用失败，丢弃这台连接以便下次重连: ${error instanceof Error ? error.message : String(error)}`,

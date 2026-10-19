@@ -21,6 +21,7 @@ import {
 } from './mcpConfig';
 import {
   cachedMcpToolFromDefinition,
+  MAX_CACHED_TOOL_SCHEMA_CHARS,
   mcpServerFingerprint,
   type McpCachedTool,
   type McpServerToolList,
@@ -111,7 +112,13 @@ export async function openMcpServerConnection(
       }
       reserved.add(name);
       tools.push({ name, serverName: spec.name, server, definition: mcpTool });
-      accepted.push(cachedMcpToolFromDefinition(name, mcpTool));
+      const cachedTool = cachedMcpToolFromDefinition(name, mcpTool);
+      if (!cachedTool.definition) {
+        log(
+          `[mcp] ${name} 的 inputSchema 超过 ${MAX_CACHED_TOOL_SCHEMA_CHARS} 字符，只缓存名字，不做懒加载`,
+        );
+      }
+      accepted.push(cachedTool);
     }
     log(`[mcp] 已连接 ${spec.name}(${spec.transport})，工具 ${listed.length} 个`);
     return {
@@ -157,6 +164,8 @@ export interface BuildCachedMcpToolsOptions extends BuildMcpToolsOptions {
     meta?: McpCallToolMeta,
     options?: McpCallToolOptions,
   ) => Promise<McpCallToolResult>;
+  /** 转换失败时的诊断出口；不传就静默跳过。 */
+  log?: (line: string) => void;
 }
 
 export function buildMcpTools(
@@ -210,8 +219,12 @@ export function buildCachedMcpTools(
         executeEffect: options.executeEffect,
         onInvocationError: options.onInvocationError,
       })];
-    } catch {
-      // 缓存是加速层；旧版本或损坏 schema 不能拖挂整轮 acquire。
+    } catch (error) {
+      // 缓存是加速层：旧版本或损坏 schema 不能拖挂整轮 acquire。但静默跳过会让
+      // "这台服务器为什么没有懒加载工具"变成悬案，所以留一行。
+      options.log?.(
+        `[mcp] 缓存工具 ${cached.name} 的定义无法转换为 FunctionTool，已跳过: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return [];
     }
   });

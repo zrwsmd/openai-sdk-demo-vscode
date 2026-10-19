@@ -23,6 +23,8 @@ import {
   shouldExposeMcpTools,
   wrapMcpFunctionTool,
   cachedToolsByServer,
+  cachedMcpToolFromDefinition,
+  MAX_CACHED_TOOL_SCHEMA_CHARS,
   mcpServerFingerprint,
   mcpToolCachePath,
   parseMcpToolCache,
@@ -320,6 +322,40 @@ assert.deepEqual(parseMcpToolCache({ version: 1, servers: 'nope' }).servers, {})
 assert.deepEqual(parseMcpToolCache(null).servers, {});
 assert.deepEqual((await readMcpToolCache(path.join(stubDir, 'not-there'))).servers, {});
 assert.equal(path.basename(mcpToolCachePath(stubDir)), 'mcp-tools-cache.json');
+
+// schema 体积上限：写的时候超限只留名字和描述，读的时候按同一把尺子再过一遍。
+// 这样缓存文件不会因为某个服务器把整份文档塞进 schema 而无限长大。
+const padding = 'x'.repeat(MAX_CACHED_TOOL_SCHEMA_CHARS);
+const fatSchema = { type: 'object', properties: { blob: { type: 'string', description: padding } } };
+const trimmed = cachedMcpToolFromDefinition('mcp_fat_big', {
+  name: 'big',
+  description: '体积超限的工具',
+  inputSchema: fatSchema,
+});
+assert.equal(trimmed.name, 'mcp_fat_big');
+assert.equal(trimmed.description, '体积超限的工具');
+assert.equal(trimmed.definition, undefined);
+// 刚好在上限内要照常保留，别把正常工具一起砍掉。
+const slimSchema = { type: 'object', properties: { q: { type: 'string' } } };
+assert.ok(cachedMcpToolFromDefinition('mcp_slim_q', { name: 'q', inputSchema: slimSchema }).definition);
+// 旧缓存里已经写进去的超大 schema，读的时候同样丢掉定义。
+const oversizedCache = parseMcpToolCache({
+  version: 1,
+  servers: {
+    fat: {
+      serverName: 'fat',
+      fingerprint: 'abc',
+      fetchedAt: '2026-10-19T00:00:00.000Z',
+      tools: [{
+        name: 'mcp_fat_big',
+        description: '体积超限的工具',
+        definition: { name: 'big', description: '体积超限的工具', inputSchema: fatSchema },
+      }],
+    },
+  },
+});
+assert.equal(oversizedCache.servers.fat?.tools[0]?.name, 'mcp_fat_big');
+assert.equal(oversizedCache.servers.fat?.tools[0]?.definition, undefined);
 
 // 一台起不来：只有那一台的名单从缓存补，另一台照常在。
 // 这段必须排在下面前面——缓存是按服务器名合并的，改了配置的那台一旦连上，

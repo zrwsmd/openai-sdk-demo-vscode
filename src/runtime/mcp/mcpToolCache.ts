@@ -11,6 +11,16 @@ import { isMcpServerEnabled, type McpServerConfig, type McpSettings } from './mc
  */
 export const MCP_TOOL_CACHE_RELATIVE_PATH = '.plc-agent/mcp-tools-cache.json';
 
+/**
+ * 单个工具 schema 的缓存上限（按序列化后的字符数计）。
+ *
+ * 缓存存在的意义是"连不上时也知道有哪些工具"，不是把整份工具文档抄一份。
+ * 真实 MCP 的 inputSchema 通常几百字符，上到几 KB 已经很少见；超过这个量级的，
+ * 多半是把别的东西一起塞了进来。超限就只留名字和描述——宁可这一条没有懒加载，
+ * 也不让这个文件无限长大。
+ */
+export const MAX_CACHED_TOOL_SCHEMA_CHARS = 8 * 1024;
+
 export interface McpCachedTool {
   /** 暴露给模型的工具名，形如 mcp_<server>_<tool>，跟实际发出去的名字一致。 */
   name: string;
@@ -192,9 +202,14 @@ export function cachedMcpToolFromDefinition(
   const inputSchema = isRecord(definition.inputSchema)
     ? definition.inputSchema
     : { type: 'object', properties: {}, required: [] };
-  return {
+  const base = {
     name: exposedName,
     ...(description ? { description } : {}),
+  };
+  // 超限只留名字和描述：调用方据此知道这一条没有懒加载定义，也就不会为它造工具。
+  if (!schemaWithinCacheBudget(inputSchema)) return base;
+  return {
+    ...base,
     definition: {
       name: definition.name,
       ...(description ? { description } : {}),
@@ -207,12 +222,23 @@ function parseCachedToolDefinition(value: unknown): McpCachedToolDefinition | un
   if (!isRecord(value)) return undefined;
   const name = typeof value.name === 'string' ? value.name.trim() : '';
   if (!name || !isRecord(value.inputSchema)) return undefined;
+  // 旧缓存可能是放宽限制之前写的，读的时候按同一把尺子再过一遍。
+  if (!schemaWithinCacheBudget(value.inputSchema)) return undefined;
   const description = typeof value.description === 'string' ? value.description.trim() : '';
   return {
     name,
     ...(description ? { description } : {}),
     inputSchema: value.inputSchema,
   };
+}
+
+function schemaWithinCacheBudget(schema: Record<string, unknown>): boolean {
+  try {
+    return JSON.stringify(schema).length <= MAX_CACHED_TOOL_SCHEMA_CHARS;
+  } catch {
+    // 循环引用之类序列化不了的东西，本来也没法落盘。
+    return false;
+  }
 }
 
 function joinPath(root: string, relativePath: string): string {
