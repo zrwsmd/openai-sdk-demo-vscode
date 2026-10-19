@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DefaultToolPolicy,
   McpConnectionPool,
+  EMPTY_MCP_SESSION_LEASE,
   loadMcpSettings,
   mcpAllowlist,
   mcpFunctionToolName,
@@ -275,6 +276,7 @@ const noServers = await pool.acquire({
   settings: { enabled: false, servers: [] },
   policyContext: { workspaceRoot: stubDir },
 });
+assert.equal(noServers, EMPTY_MCP_SESSION_LEASE);
 assert.equal(noServers.tools.length, 0);
 assert.deepEqual(noServers.toolNames, []);
 noServers.release();

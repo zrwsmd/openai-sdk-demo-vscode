@@ -99,7 +99,7 @@ export class McpConnectionPool {
       : [];
     const scopeKey = mcpScopeKey(options);
     this.retireMissingEntries(scopeKey, new Set(servers.map((server) => server.name)));
-    if (!servers.length) return { tools: [], toolNames: [], release: () => undefined };
+    if (!servers.length) return EMPTY_MCP_SESSION_LEASE;
 
     // 跨服务器的重名占位。按配置顺序逐台过：前面接受的名字让后面避让，
     // 复用的那台也要把它上次占住的名字重新加回来。
