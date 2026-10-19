@@ -130,7 +130,12 @@ export async function writeMcpToolCache(
   if (!root || !lists.length) return;
   const existing = await readMcpToolCache(root);
   const servers = { ...existing.servers };
-  for (const list of lists) servers[list.serverName] = list;
+  for (const list of lists) {
+    servers[list.serverName] = {
+      ...list,
+      tools: boundedCachedTools(list.tools),
+    };
+  }
   const document: McpToolCache = { version: 1, servers };
   const { promises: fs } = await import('node:fs');
   const filePath = mcpToolCachePath(root);
@@ -165,10 +170,11 @@ function parseServerToolList(name: string, value: unknown): McpServerToolList | 
   const fingerprint = typeof value.fingerprint === 'string' ? value.fingerprint : '';
   if (!fingerprint) return undefined;
   const tools = Array.isArray(value.tools)
-    ? value.tools
-      .map((item) => parseCachedTool(item))
-      .filter((item): item is McpCachedTool => !!item)
-      .slice(0, MAX_CACHED_TOOLS_PER_SERVER)
+    ? boundedCachedTools(
+      value.tools
+        .map((item) => parseCachedTool(item))
+        .filter((item): item is McpCachedTool => !!item),
+    )
     : [];
   return {
     serverName: typeof value.serverName === 'string' && value.serverName.trim()
@@ -191,6 +197,19 @@ function parseCachedTool(value: unknown): McpCachedTool | undefined {
     ...(description ? { description } : {}),
     ...(definition ? { definition } : {}),
   };
+}
+
+/** 去掉损坏/手工编辑缓存里的重复工具，并在所有缓存边界统一限条数。 */
+function boundedCachedTools(tools: readonly McpCachedTool[]): McpCachedTool[] {
+  const seen = new Set<string>();
+  const result: McpCachedTool[] = [];
+  for (const tool of tools) {
+    if (seen.has(tool.name)) continue;
+    seen.add(tool.name);
+    result.push(tool);
+    if (result.length >= MAX_CACHED_TOOLS_PER_SERVER) break;
+  }
+  return result;
 }
 
 /**

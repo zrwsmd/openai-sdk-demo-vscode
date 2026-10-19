@@ -172,8 +172,13 @@ export class McpConnectionPool {
       const cachedTools = failedServers.flatMap((server) => {
         const cached = cachedByServer.get(server.name) ?? [];
         // 没有 definition 的条目（旧缓存、或 schema 超限）造不出工具，直接不参与。
-        const available = cached.filter((tool) => tool.definition && !reserved.has(tool.name));
-        for (const tool of available) reserved.add(tool.name);
+        // 同时防御手工编辑或旧版本产生的重复工具名，避免一次 acquire 造出同名 FunctionTool。
+        const available: McpCachedTool[] = [];
+        for (const tool of cached) {
+          if (!tool.definition || reserved.has(tool.name)) continue;
+          reserved.add(tool.name);
+          available.push(tool);
+        }
         if (!available.length) return [];
         this.log(`[mcp] ${server.name} 本次没连上，用缓存里的 ${available.length} 个工具兜底`);
         const invoke = async (

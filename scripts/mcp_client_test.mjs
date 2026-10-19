@@ -720,6 +720,22 @@ await selectedPool.dispose();
   const manyRaw = JSON.parse(await fs.readFile(mcpToolCachePath(manyDir), 'utf8'));
   assert.equal(manyRaw.servers.many.tools.length, MAX_CACHED_TOOLS_PER_SERVER);
   await manyPool.dispose();
+
+  // 直接写缓存也必须执行同一条数上限，并且丢掉重复工具名。
+  await writeMcpToolCache(manyDir, [{
+    serverName: 'many',
+    fingerprint: 'abc',
+    fetchedAt: '2026-10-19T00:00:00.000Z',
+    tools: [
+      { name: 'duplicate', description: 'first' },
+      { name: 'duplicate', description: 'second' },
+      ...Array.from({ length: manyCount }, (_, index) => ({ name: `bounded_${index}` })),
+    ],
+  }]);
+  const boundedRaw = JSON.parse(await fs.readFile(mcpToolCachePath(manyDir), 'utf8'));
+  assert.equal(boundedRaw.servers.many.tools.length, MAX_CACHED_TOOLS_PER_SERVER);
+  assert.equal(boundedRaw.servers.many.tools.filter((tool) => tool.name === 'duplicate').length, 1);
+
   // 读取侧同样按上限过一遍：限制之前写进去的超长清单也要被裁掉。
   const fatList = {
     serverName: 'many',
@@ -808,6 +824,39 @@ await selectedPool.dispose();
   coldLease.release();
   await driftPool.dispose();
   await fs.rm(driftDir, { recursive: true, force: true });
+}
+
+// 损坏缓存里出现重复的可执行定义时，兜底工具仍然只能生成一份。
+{
+  const duplicateServer = makeServer('duplicate', 'm');
+  const duplicateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-duplicate-'));
+  await writeMcpToolCache(duplicateDir, [{
+    serverName: 'duplicate',
+    fingerprint: mcpServerFingerprint(duplicateServer),
+    fetchedAt: new Date().toISOString(),
+    tools: [
+      {
+        name: 'mcp_duplicate_stub_ping',
+        definition: { name: 'stub_ping', inputSchema: { type: 'object', properties: {} } },
+      },
+      {
+        name: 'mcp_duplicate_stub_ping',
+        definition: { name: 'stub_ping', inputSchema: { type: 'object', properties: {} } },
+      },
+    ],
+  }]);
+  await fs.writeFile(sentinelOf('m'), '');
+  const duplicatePool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const duplicateLease = await duplicatePool.acquire({
+    settings: { enabled: true, servers: [duplicateServer] },
+    policyContext: { workspaceRoot: duplicateDir },
+  });
+  assert.deepEqual(duplicateLease.toolNames, ['mcp_duplicate_stub_ping']);
+  assert.equal(duplicateLease.tools.length, 1);
+  duplicateLease.release();
+  await duplicatePool.dispose();
+  await fs.rm(sentinelOf('m'), { force: true });
+  await fs.rm(duplicateDir, { recursive: true, force: true });
 }
 
 console.log('mcp client tests passed');
