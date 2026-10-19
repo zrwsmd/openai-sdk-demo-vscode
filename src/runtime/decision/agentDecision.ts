@@ -7,6 +7,9 @@
  * workflow code.
  */
 
+import { hashContent } from '../contentHash';
+import { sanitizeMcpNamePart } from '../mcp/mcpConfig';
+
 export type JevJsonValue =
   | string
   | number
@@ -478,8 +481,8 @@ function taskQuestions(options: TaskHintOptions = {}): Record<string, JevQuestio
     workflowCriteria[route] = `${workflow.title}: ${workflow.description}`;
   }
   const mcpQuestions = Object.fromEntries(
-    (options.mcpServerChoices ?? []).map((server, index) => [
-      mcpServerQuestionKey(index),
+    (options.mcpServerChoices ?? []).map((server) => [
+      mcpServerQuestionKey(server.name),
       {
         type: 'noul',
         instructions:
@@ -561,8 +564,12 @@ function taskQuestions(options: TaskHintOptions = {}): Record<string, JevQuestio
 };
 }
 
-function mcpServerQuestionKey(index: number): string {
-  return `needs_mcp_server_${index}`;
+function mcpServerQuestionKey(serverName: string): string {
+  const readableName = sanitizeMcpNamePart(serverName);
+  // The readable part helps the model anchor the question; the hash prevents
+  // names such as "data-base" and "data_base" from sharing an answer key.
+  const stableSuffix = hashContent(serverName).slice(0, 8);
+  return `needs_mcp_server_${readableName}_${stableSuffix}`;
 }
 
 const COMPLETION_GATE_QUESTIONS: Record<string, JevQuestion> = {
@@ -631,6 +638,7 @@ function answerConfidence(answer: JevAnswer | undefined): number {
 function binaryDecision(
   answer: JevAnswer | undefined,
   minConfidence: number,
+  noProbabilityThreshold = 1 - minConfidence,
 ): BinaryDecisionHint {
   if (answer?.type !== 'noul' || typeof answer.noul !== 'number' || !Number.isFinite(answer.noul)) {
     return { value: 'unknown', confidence: 0 };
@@ -640,7 +648,7 @@ function binaryDecision(
   return {
     value: probability >= minConfidence
       ? 'yes'
-      : probability <= 1 - minConfidence
+      : probability <= noProbabilityThreshold
         ? 'no'
         : 'unknown',
     probability,
@@ -758,9 +766,16 @@ function mcpServerNeedsFromEvaluation(
   options: TaskHintOptions,
 ): Record<string, BinaryDecisionHint> {
   return Object.fromEntries(
-    (options.mcpServerChoices ?? []).map((server, index) => [
+    (options.mcpServerChoices ?? []).map((server) => [
       server.name,
-      binaryDecision(evaluation.answers?.[mcpServerQuestionKey(index)], minConfidence),
+      // A false negative hides the only server that may have the required
+      // capability. Keep MCP "no" conservative; the unknown band falls back
+      // to the existing all-server behavior.
+      binaryDecision(
+        evaluation.answers?.[mcpServerQuestionKey(server.name)],
+        minConfidence,
+        0.1,
+      ),
     ]),
   );
 }

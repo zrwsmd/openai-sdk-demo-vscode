@@ -602,4 +602,61 @@ await selectedPool.dispose();
   await fs.rm(intentDir, { recursive: true, force: true });
 }
 
+// Any unknown MCP intent must fail open: both servers remain available so a
+// semantic miss cannot hide the tool that the request actually needs.
+{
+  const knownServer = makeServer('known', 'h');
+  const uncertainServer = makeServer('uncertain', 'i');
+  const uncertainPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const uncertainDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-uncertain-'));
+  const seen = [];
+  const coordinator = new RunCoordinator({
+    session: new JsonFileSession(path.join(uncertainDir, 'session.json')),
+    store: new JsonRunStore(path.join(uncertainDir, 'runs.json')),
+    emit: () => undefined,
+    mcpPool: uncertainPool,
+    decisionService: {
+      taskHint: async () => ({
+        delivery: 'not_required',
+        deliveryConfidence: 0.95,
+        orchestration: 'single',
+        orchestrationConfidence: 0.95,
+        workflow: 'general_chat',
+        workflowConfidence: 0.95,
+        toolNeeds: {
+          readFile: { value: 'no', confidence: 0.95 },
+          writeFile: { value: 'no', confidence: 0.95 },
+          runCommand: { value: 'no', confidence: 0.95 },
+        },
+        mcpServerNeeds: {
+          known: { value: 'yes', confidence: 0.95 },
+          uncertain: { value: 'unknown', confidence: 0 },
+        },
+        riskLevel: 'low',
+        riskConfidence: 0.95,
+        needsApproval: { value: 'no', confidence: 0.95 },
+        evaluation: { status: 'ok', elapsedMs: 1 },
+      }),
+    },
+    executeAgent: async (_cfg, _session, _userText, options) => {
+      seen.push((options.extraBusinessTools ?? []).map((tool) => tool.name));
+      return completedAgentResult();
+    },
+  });
+  await coordinator.initialize();
+  await coordinator.start('查询外部服务', {
+    baseUrl: 'http://mock/v1',
+    model: 'mock',
+    exportDir: '',
+    workspaceRoot: uncertainDir,
+    jev: { enabled: false },
+    mcp: { enabled: true, servers: [knownServer, uncertainServer] },
+  }, 'key');
+  assert.deepEqual(seen, [['mcp_known_stub_ping', 'mcp_uncertain_stub_ping']]);
+  assert.equal(await handshakesOf('h'), 1);
+  assert.equal(await handshakesOf('i'), 1);
+  await uncertainPool.dispose();
+  await fs.rm(uncertainDir, { recursive: true, force: true });
+}
+
 console.log('mcp client tests passed');

@@ -394,6 +394,10 @@ export class McpConnectionPool {
   }
 
   private retireMissingEntries(scopeKey: string, activeNames: ReadonlySet<string>): void {
+    // `activeNames` deliberately contains every enabled configured server,
+    // rather than only this round's semantic selection. A server not selected
+    // for one run is still configured and may be selected by the next run;
+    // only removal/disablement should retire its pooled connection.
     for (const [key, entry] of this.entries) {
       if (entry.scopeKey !== scopeKey || activeNames.has(entry.serverName)) continue;
       entry.stale = true;

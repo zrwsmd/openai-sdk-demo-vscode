@@ -489,7 +489,13 @@ export class RunCoordinator {
     };
   }
 
-  /** Build semantic MCP candidates without starting any configured server. */
+  /**
+   * Build semantic MCP candidates without starting any configured server.
+   * This runs before the workflow gate on purpose: the candidates are part of
+   * the same Jev request that returns the workflow and per-server intent. Moving
+   * it after the gate would either remove the server signals or require a
+   * second model request.
+   */
   private async mcpServerChoices(
     config: DurableRunConfig,
   ): Promise<readonly TaskMcpServerChoice[]> {
@@ -521,7 +527,8 @@ export class RunCoordinator {
     if (!servers.length || !needs) return undefined;
     // Only narrow the connection set when every enabled server has a
     // confident yes/no result. An unknown result keeps the old all-server
-    // behavior so a semantic miss cannot hide a needed tool.
+    // behavior so a semantic miss cannot hide a needed tool. This also means
+    // Jev disabled/unavailable (or missing its API key) keeps the old behavior.
     if (servers.some((server) => needs[server.name]?.value === 'unknown' || !needs[server.name])) {
       return undefined;
     }
