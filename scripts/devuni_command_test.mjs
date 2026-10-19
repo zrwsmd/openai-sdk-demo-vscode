@@ -197,12 +197,17 @@ async function buildTool(port) {
       deviceModel: 'SC5100',
       language: 'st',
       projectType: 'standard',
+      openAfterCreate: true,
     }),
     {},
   );
   const result = JSON.parse(raw);
   assert(result.ok === true, `创建工程应成功: ${raw}`);
   assert(calls.length === 1, `参数齐全时只应调用一次,实际 ${calls.length} 次`);
+  assert(
+    calls[0].args.openAfterCreate === false,
+    '即使旧调用方传 true，创建命令也必须等待整轮完成后由宿主打开新窗口',
+  );
 }
 
 // [3c] 对方返回 status:false 时,必须变成 ok:false 并带上排查提示

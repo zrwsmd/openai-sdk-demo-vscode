@@ -81,6 +81,10 @@ import {
 import type { AgentConfig } from "./agentConfig";
 import { shouldAutoApproveToolCall } from "./permissionPolicy";
 import { PipelineStageRuntime } from "./pipeline/stageRuntime";
+import {
+  requireToolOnce,
+  withOneShotToolChoice,
+} from "./oneShotToolChoiceModel";
 import { ToolCallDeduper } from "./toolCallDeduper";
 import { AgentDecisionService } from "./decision/agentDecision";
 import {
@@ -385,7 +389,7 @@ export async function runAgent(
     cfg.workspaceRoots,
   );
   const modelAdapter = buildModelAdapter(cfg);
-  const model = modelAdapter.model;
+  const model = withOneShotToolChoice(modelAdapter.model);
   const promptCacheSettings = promptCacheModelSettings(cfg);
   if (cfg.promptCache?.enabled) {
     agentLog(
@@ -438,6 +442,7 @@ export async function runAgent(
     options.workflowRegistry,
     workflowVisibilityContext,
   );
+  const requiredActionTool = workflowRuntime?.requiredActionTool ?? requiredTool;
   const workflowTurnBudget = workflowRuntime?.turnBudget;
   let modelTurnLimit = options.continueTurnBudget && workflowTurnBudget
     ? workflowTurnBudget.hardLimit
@@ -687,16 +692,11 @@ export async function runAgent(
      workflowDynamicInstructions;
   let runtimeCompletionRepairInstruction = "";
   let runtimeActionReminderInstruction = "";
-  const buildAgent = (forcedTool?: string) => {
-    const availableForcedTool =
-      forcedTool && availableToolNames.has(forcedTool) ? forcedTool : undefined;
+  const buildAgent = () => {
     const modelSettings = {
       parallelToolCalls: workflowRuntime?.parallelToolCalls ?? true,
       ...(officialResponsesCompactionSettings(cfg) ?? {}),
       ...(promptCacheSettings ?? {}),
-      ...(availableForcedTool && !(model instanceof GatewayGuardedModel)
-        ? { toolChoice: availableForcedTool }
-        : {}),
     };
     const runtimeInstructions = [
       permissionMode === "full_access"
@@ -765,10 +765,10 @@ export async function runAgent(
       `[workflow] 跳过不可用的初始强制工具: ${initialWorkflowTool}`,
     );
   }
-  if (availableInitialWorkflowTool && model instanceof GatewayGuardedModel) {
-    model.requireToolOnce(availableInitialWorkflowTool);
+  if (availableInitialWorkflowTool) {
+    requireToolOnce(model, availableInitialWorkflowTool);
   }
-  let agent = buildAgent(availableInitialWorkflowTool);
+  let agent = buildAgent();
 
   const tracingDisabled = !(
     modelAdapter.provider === "openai" &&
@@ -948,8 +948,11 @@ export async function runAgent(
       result,
       availableToolNames,
     );
-    if (!decision || !(model instanceof GatewayGuardedModel)) return;
-    model.requireToolOnce(decision.toolName);
+    if (!decision) return;
+    if (!requireToolOnce(model, decision.toolName)) {
+      agentLog(`[workflow] 无法为当前模型强制下一工具: ${decision.toolName}`);
+      return;
+    }
     agentLog(`[workflow] ${decision.reason}`);
   };
 
@@ -998,7 +1001,7 @@ export async function runAgent(
   };
 
   const verifyRequiredActions = async (): Promise<Artifact[]> => {
-    const verificationTool = workflowRuntime?.requiredActionTool ?? requiredTool;
+    const verificationTool = requiredActionTool;
     if (!verificationTool) return [];
     const verified: Artifact[] = [];
     const calls = [...historicalToolResults, ...toolResults.values()].filter(
@@ -1027,7 +1030,7 @@ export async function runAgent(
       // ActionPolicy is a soft hint for ordinary turns. A missing hint call
       // must not turn a status question or a model choice into a hard error.
       // Workflow contracts keep their own strict evidence path below.
-      if (!workflowRuntime) return [];
+      if (!workflowRuntime || hasCancelledClarification()) return [];
       throw new AgentActionVerificationError(
         `用户明确要求执行 ${verificationTool}，但本轮没有调用该工具`,
       );
@@ -1186,9 +1189,22 @@ export async function runAgent(
   };
 
   const hasAttemptedRequiredAction = (): boolean => {
-    if (!requiredTool) return true;
-    return [...toolResults.values()].some((call) => call.name === requiredTool);
+    if (!requiredActionTool) return true;
+    return [...historicalToolResults, ...toolResults.values()]
+      .some((call) => call.name === requiredActionTool);
   };
+
+  const hasCancelledClarification = (): boolean =>
+    [...historicalToolResults, ...toolResults.values()].some((call) => {
+      if (call.name !== "request_clarification" || !call.result.ok) return false;
+      const data = call.result.data;
+      return Boolean(
+        data &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        (data as Record<string, unknown>).cancelled === true,
+      );
+    });
 
   const assertPlanCompleted = (): void => {
     if (activePlan && activePlan.status !== "completed") {
@@ -1575,10 +1591,10 @@ export async function runAgent(
         }),
       );
     }
-    if (availableForcedRepairTool && model instanceof GatewayGuardedModel) {
-      model.requireToolOnce(availableForcedRepairTool);
+    if (availableForcedRepairTool) {
+      requireToolOnce(model, availableForcedRepairTool);
     }
-    agent = buildAgent(availableForcedRepairTool);
+    agent = buildAgent();
     // Once the SDK has settled a final assistant output, changing that same
     // RunState into a new tool turn can make its completed-tool ledger diverge
     // from generated item history. Restart this repair turn from the durable
@@ -2182,23 +2198,28 @@ export async function runAgent(
       };
     }
     if (
-      requiredTool &&
+      requiredActionTool &&
       !hasAttemptedRequiredAction() &&
       !actionReminderUsed &&
       !options.initialState &&
       !activePlan &&
       !options.teamTask &&
-      !workflowRuntime &&
-      availableToolNames.has(requiredTool) &&
+      !(workflowRuntime && hasCancelledClarification()) &&
+      availableToolNames.has(requiredActionTool) &&
       !state.getInterruptions().length
     ) {
       actionReminderUsed = true;
-      runtimeActionReminderInstruction =
-        `用户请求中的动作意图可能需要 ${requiredTool}。` +
-        "请先判断当前请求是否确实要求执行该动作；如果要求，就调用对应工具，" +
-        "不要只重复说明或假设动作已经完成。";
+      const strictWorkflowAction = workflowRuntime !== undefined;
+      runtimeActionReminderInstruction = strictWorkflowAction
+        ? `当前工作流要求实际完成 ${requiredActionTool}，不能用过程说明代替工具调用。`
+        : `用户请求中的动作意图可能需要 ${requiredActionTool}。` +
+          "请先判断当前请求是否确实要求执行该动作；如果要求，就调用对应工具，" +
+          "不要只重复说明或假设动作已经完成。";
+      if (strictWorkflowAction) requireToolOnce(model, requiredActionTool);
       agentLog(
-        `[action] ${requiredTool} 未被调用，发送一次普通动作提醒，不强制 toolChoice`,
+        strictWorkflowAction
+          ? `[workflow] 必做动作 ${requiredActionTool} 未被调用，强制续跑一次`
+          : `[action] ${requiredActionTool} 未被调用，发送一次普通动作提醒，不强制 toolChoice`,
       );
       agent = buildAgent();
       state = undefined;

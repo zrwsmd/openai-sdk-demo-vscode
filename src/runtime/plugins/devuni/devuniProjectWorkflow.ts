@@ -14,15 +14,20 @@
  */
 import { CLARIFICATION_TOOL_NAME } from "../../clarification";
 import { inferCurrentActionIntent } from "../../../policy/actionPolicy";
+import type { Artifact, ToolResult } from "../../../protocol/results";
+import type { PipelineStagePlan } from "../../pipeline/stagePlan";
 import type {
   WorkflowDecisionContext,
   WorkflowDescriptor,
+  WorkflowCompletionAdapter,
   WorkflowLocalMatch,
   WorkflowRuntime,
+  WorkflowToolRecord,
 } from "../../workflow/types";
 import { DEVUNI_COMMANDS } from "./devuniCommands";
 
 export const DEVUNI_PROJECT_WORKFLOW_ID = "devuni_project";
+const DEVUNI_CREATE_PROJECT_TOOL_NAME = "devuni_create_project";
 
 /**
  * 这一轮发给模型的工具:命令表里所有 devuni 工具,外加反问工具。
@@ -47,6 +52,10 @@ export const DEVUNI_PROJECT_TOOL_NAMES: readonly string[] = [
  */
 const DEVUNI_PROJECT_ACTION =
   /(?:新建|创建|建立|搭建|生成|打开|开启|关闭|关掉|关了|删除|删掉|移除|重命名|改名|改个名|建(?=个|一个|工程|项目))/u;
+const DEVUNI_CREATE_PROJECT_ACTION =
+  /(?:新建|创建|建立|搭建|生成|建(?=个|一个|工程|项目))/u;
+const HISTORICAL_CREATED_PROJECT_REFERENCE =
+  /(?:(?:刚刚?|之前|此前|上(?:一)?轮|我|你|系统)[^，。；,;]{0,8})?(?:新建|创建|建立|搭建|生成)(?:好|完成)?的(?=工程|项目)/gu;
 const DEVUNI_PROJECT_NOUN = /(?:工程|项目)/u;
 /**
  * 一旦出现这几个词,说明这趟活是写代码、不是管工程,应当让给代码交付那条线。
@@ -56,6 +65,52 @@ const CODE_DELIVERY_MARKER = /(?:程序|代码|源码|结构化文本|IEC\s*6113
 
 const NO_MATCH_REASON = "本地规则未识别为 devuni 工程事务请求";
 const MATCH_REASON = "本地规则识别为 devuni 工程事务请求";
+
+function completedClarification(result: ToolResult): boolean {
+  if (!result.ok || !result.data || typeof result.data !== "object") return false;
+  const data = result.data as Record<string, unknown>;
+  return data.cancelled !== true;
+}
+
+function requestsProjectCreation(userText: string): boolean {
+  const currentActionText = userText.replace(HISTORICAL_CREATED_PROJECT_REFERENCE, "");
+  return DEVUNI_CREATE_PROJECT_ACTION.test(currentActionText);
+}
+
+export const DEVUNI_PROJECT_PIPELINE_PLAN: PipelineStagePlan = {
+  id: DEVUNI_PROJECT_WORKFLOW_ID,
+  resultTransitions: [
+    {
+      fromToolName: CLARIFICATION_TOOL_NAME,
+      toToolName: DEVUNI_CREATE_PROJECT_TOOL_NAME,
+      reason: "工程配置已由用户确认，下一轮必须实际调用 devuni_create_project",
+      canTransition: completedClarification,
+    },
+  ],
+};
+
+function createdWorkspaceFile(record: WorkflowToolRecord): string | undefined {
+  if (record.name !== DEVUNI_CREATE_PROJECT_TOOL_NAME || !record.result.ok) {
+    return undefined;
+  }
+  const data = record.result.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const workspaceFile = (data as Record<string, unknown>).workspaceFile;
+  return typeof workspaceFile === "string" && workspaceFile.trim()
+    ? workspaceFile.trim()
+    : undefined;
+}
+
+function createdProjectArtifact(record: WorkflowToolRecord): Artifact | undefined {
+  const workspaceFile = createdWorkspaceFile(record);
+  return workspaceFile
+    ? {
+        kind: "file",
+        name: "devUni 工程工作区",
+        uri: workspaceFile,
+      }
+    : undefined;
+}
 
 function localMatch(context: WorkflowDecisionContext): WorkflowLocalMatch {
   const text = context.userText.trim();
@@ -83,6 +138,26 @@ export class DevuniProjectWorkflow implements WorkflowRuntime {
   readonly title = DEVUNI_PROJECT_WORKFLOW.title;
   readonly businessToolNames = DEVUNI_PROJECT_TOOL_NAMES;
   readonly parallelToolCalls = true;
+  readonly requiredActionTool?: string;
+  readonly pipelinePlan?: PipelineStagePlan;
+  readonly completionAdapter?: WorkflowCompletionAdapter;
+
+  constructor(userText = "") {
+    const creationRequested = !userText.trim() || requestsProjectCreation(userText);
+    if (!creationRequested) return;
+    this.requiredActionTool = DEVUNI_CREATE_PROJECT_TOOL_NAME;
+    this.pipelinePlan = DEVUNI_PROJECT_PIPELINE_PLAN;
+    this.completionAdapter = {
+      collectArtifacts: (records) => records
+        .map(createdProjectArtifact)
+        .filter((artifact): artifact is Artifact => artifact !== undefined),
+      collectActionArtifact: createdProjectArtifact,
+      finalMessage: (records) => {
+        const workspaceFile = records.map(createdWorkspaceFile).filter(Boolean).at(-1);
+        return workspaceFile ? `工程已成功创建：${workspaceFile}` : undefined;
+      },
+    };
+  }
 
   initialTool(): string | undefined {
     return undefined;
@@ -117,5 +192,6 @@ export const DEVUNI_PROJECT_WORKFLOW: WorkflowDescriptor = {
   workflowRoute: DEVUNI_PROJECT_WORKFLOW_ID,
   businessToolNames: DEVUNI_PROJECT_TOOL_NAMES,
   localMatch,
-  createRuntime: () => new DevuniProjectWorkflow(),
+  createRuntime: (_contract, _state, context) =>
+    new DevuniProjectWorkflow(context?.userText),
 };

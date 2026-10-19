@@ -273,6 +273,9 @@ export type HistoricalToolArgumentGuard = (
   input: unknown,
 ) => string | undefined;
 
+/** Host-authored context facts may be reused without being treated as stale model output. */
+export const TRUSTED_CONTEXT_PROVIDER_DATA_KEY = "plcAgentTrustedContext";
+
 const HISTORICAL_REFERENCE_PATTERN =
   /(?:继续|接着|续上|基于(?:上面|之前|前面|刚才|上述)|刚才|上一轮|上一次|之前|前面|上述|前述|该(?:文件|路径|结果|内容|对象|程序)|这个(?:文件|路径|结果|内容|对象|程序)|continue|previous|that file|this file)/iu;
 
@@ -303,7 +306,7 @@ const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
 
 /**
  * 只有这些词出现在开头时才尝试拆成“动词 + 文件名”。是否真的削掉请求词，
- * 由后半段是否像文件或目录路径决定，这样无空格的“读取日志.st”也能识别。
+ * 由后半段是否像文件或目录路径决定，这样无空格的“读取日志.txt”也能识别。
  */
 const LEADING_REQUEST_WORD_PATTERN =
   /^(?:(?:上一轮|上一次|刚才|之前|前面|上述|前述)的?)?(?:读取|查看|打开|列出|列一下|搜索|查找|分析|检查|总结|导入|导出|保存|加载|修改|编辑|写入|更新|确认|读一下|看一下|看看)/u;
@@ -453,6 +456,12 @@ function isActiveReferenceItem(item: unknown): boolean {
     value.type === "apply_patch_call";
 }
 
+function isTrustedContextItem(item: unknown): boolean {
+  const value = item as { providerData?: unknown };
+  if (!value.providerData || typeof value.providerData !== "object") return false;
+  return (value.providerData as Record<string, unknown>)[TRUSTED_CONTEXT_PROVIDER_DATA_KEY] === true;
+}
+
 function historicalReferenceRecords(
   historyItems: readonly AgentInputItem[],
   currentUserText: string,
@@ -471,6 +480,7 @@ function historicalReferenceRecords(
   for (let index = 0; index < currentUserIndex; index += 1) {
     const item = historyItems[index];
     if (isUserMessage(item)) turnIndex += 1;
+    if (isTrustedContextItem(item)) continue;
     const references = new Map<string, string>();
     collectHistoricalResourceReferences(item, references);
     for (const [normalized, display] of references) {

@@ -11,9 +11,18 @@ import * as vscode from "vscode";
 import * as bridge from "../../vendor/vscode-command-bridge";
 import type { DevuniCommandPort } from "../runtime/plugins/devuni/devuniCommandPort";
 
+export interface CreatedDevuniProject {
+  workspaceFile: string;
+  projectName?: string;
+  parentDirectory?: string;
+  deviceModel?: string;
+  language?: string;
+  projectType?: string;
+}
+
 export interface DevuniCommandPortOptions {
   /** Called after a project was created successfully by the external plugin. */
-  onProjectCreated?: (workspaceFile: string) => Promise<void> | void;
+  onProjectCreated?: (project: CreatedDevuniProject) => Promise<void> | void;
 }
 
 /**
@@ -44,7 +53,21 @@ export function createDevuniCommandPort(
       ) {
         const workspaceFile = (result as { wsUri?: unknown }).wsUri;
         if (typeof workspaceFile === "string" && workspaceFile.trim()) {
-          await options.onProjectCreated?.(workspaceFile.trim());
+          const input = args[0] && typeof args[0] === "object" && !Array.isArray(args[0])
+            ? args[0] as Record<string, unknown>
+            : {};
+          const readText = (key: string): string | undefined => {
+            const value = input[key];
+            return typeof value === "string" && value.trim() ? value.trim() : undefined;
+          };
+          await options.onProjectCreated?.({
+            workspaceFile: workspaceFile.trim(),
+            ...(readText("projectName") ? { projectName: readText("projectName") } : {}),
+            ...(readText("projectPath") ? { parentDirectory: readText("projectPath") } : {}),
+            ...(readText("deviceModel") ? { deviceModel: readText("deviceModel") } : {}),
+            ...(readText("lan") ? { language: readText("lan") } : {}),
+            ...(readText("prjType") ? { projectType: readText("prjType") } : {}),
+          });
         }
       }
       return result;

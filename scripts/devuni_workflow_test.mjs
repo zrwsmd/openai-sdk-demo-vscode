@@ -3,9 +3,11 @@ import {
   AgentDecisionService,
   DEVUNI_COMMANDS,
   DEVUNI_PROJECT_TOOL_NAMES,
+  DEVUNI_PROJECT_PIPELINE_PLAN,
   DEVUNI_PROJECT_WORKFLOW,
   DEVUNI_PROJECT_WORKFLOW_ID,
   WorkflowDecisionService,
+  PipelineStageRuntime,
   createAppToolRegistry,
   createAppWorkflowRegistry,
   createWorkflowRuntime,
@@ -205,6 +207,8 @@ const runtime = DEVUNI_PROJECT_WORKFLOW.createRuntime?.(
 assert(runtime, 'devuni 工程事务工作流必须能建出运行时');
 assert.deepEqual([...runtime.businessToolNames], [...DEVUNI_PROJECT_TOOL_NAMES]);
 assert.equal(runtime.parallelToolCalls, true);
+assert.equal(runtime.requiredActionTool, 'devuni_create_project');
+assert.equal(runtime.pipelinePlan, DEVUNI_PROJECT_PIPELINE_PLAN);
 assert.equal(runtime.initialTool({ isResume: false }), undefined);
 assert.match(runtime.instructions(), /devuni_project_options/u);
 assert.match(runtime.instructions(), /request_clarification/u);
@@ -235,6 +239,82 @@ assert.deepEqual(
   [...genericRuntime.businessToolNames],
   [...DEVUNI_PROJECT_TOOL_NAMES],
   '规范化之后的运行时仍要原样带着完整名单',
+);
+const nonCreateRuntime = createWorkflowRuntime(
+  DEVUNI_PROJECT_WORKFLOW_ID,
+  undefined,
+  createWorkflowRuntimeState(),
+  createAppWorkflowRegistry(),
+  { userText: '打开刚刚创建的工程' },
+);
+assert.equal(
+  nonCreateRuntime?.requiredActionTool,
+  undefined,
+  '非创建类工程事务不能被误强制成 devuni_create_project',
+);
+
+const pipelineRuntime = new PipelineStageRuntime(runtime.pipelinePlan);
+const clarified = pipelineRuntime.nextToolAfterResult(
+  'request_clarification',
+  {
+    protocolVersion: 1,
+    ok: true,
+    data: {
+      cancelled: false,
+      sequenceCompleted: true,
+      answers: {
+        projectType: { selectedOptionId: 'standard' },
+        language: { selectedOptionId: 'st' },
+        deviceModel: { selectedOptionId: 'SC5100' },
+        projectPath: { customText: 'D:\\\\' },
+        projectName: { customText: 'new1' },
+      },
+    },
+    diagnostics: [],
+    effect: 'none',
+    risk: 'plan',
+  },
+  new Set(DEVUNI_PROJECT_TOOL_NAMES),
+);
+assert.equal(
+  clarified?.toolName,
+  'devuni_create_project',
+  '五步配置完成后必须把下一次模型调用约束为创建工具',
+);
+const cancelled = pipelineRuntime.nextToolAfterResult(
+  'request_clarification',
+  {
+    protocolVersion: 1,
+    ok: true,
+    data: { cancelled: true, sequenceCompleted: true },
+    diagnostics: [],
+    effect: 'none',
+    risk: 'plan',
+  },
+  new Set(DEVUNI_PROJECT_TOOL_NAMES),
+);
+assert.equal(cancelled, undefined, '用户取消配置时不能强制创建工程');
+
+const createdRecord = {
+  name: 'devuni_create_project',
+  args: JSON.stringify({ projectName: 'new1', projectPath: 'D:\\\\' }),
+  result: {
+    protocolVersion: 1,
+    ok: true,
+    data: { workspaceFile: 'D:\\\\new1\\\\new1.code-workspace', opened: false },
+    diagnostics: [],
+    effect: 'filesystem',
+    risk: 'write',
+  },
+};
+assert.equal(
+  runtime.completionAdapter.collectActionArtifact?.(createdRecord)?.uri,
+  'D:\\\\new1\\\\new1.code-workspace',
+  '创建成功回执必须成为工作流完成证据',
+);
+assert.match(
+  runtime.completionAdapter.finalMessage?.([createdRecord]) ?? '',
+  /工程已成功创建/u,
 );
 
 /* ------------------------------------------------------------------ */

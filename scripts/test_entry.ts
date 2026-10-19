@@ -13,6 +13,7 @@ export {
 export * from '../src/runtime/toolRegistry';
 export * from '../src/runtime/session';
 export * from '../src/app/chatSessions';
+export * from '../src/app/projectWindowHandoff';
 export * from '../src/tools/workspaceTools';
 export * from '../src/runtime/runStore';
 export * from '../src/tools/commandRisk';
@@ -47,6 +48,7 @@ export * from '../src/runtime/output';
 export * from '../src/policy/actionPolicy';
 export * from '../src/workspace/workspaceScope';
 export * from '../src/runtime/modelAdapter';
+export * from '../src/runtime/oneShotToolChoiceModel';
 export * from '../src/runtime/taskPlan';
 export * from '../src/runtime/contextManager';
 export * from '../src/runtime/contextSession';

@@ -10,15 +10,21 @@ import {
   createStAnalyzerConfigExtension,
   createStRuntimeServicesFactory,
 } from './analyzerHost';
-import { createDevuniCommandPort } from './devuniHost';
+import { createDevuniCommandPort, type CreatedDevuniProject } from './devuniHost';
 import { DEVUNI_COMMAND_PORT_SERVICE } from '../runtime/plugins/devuni/devuniCommandPort';
 import { workspaceRootsFromWorkspaceFile } from '../runtime/plugins/devuni/devuniProjectRoots';
 import { createRuntimeServiceContainer } from '../runtime/services';
 import { JsonFileSession } from '../runtime/session';
 import { JsonRunStore, type DurableRunConfig } from '../runtime/runStore';
 import { RunCoordinator, type RuntimeEvent } from '../runtime/runCoordinator';
+import type { AgentProtocolEvent } from '../protocol/events';
 import { JsonAuditSink } from '../observability/audit';
 import { ChatSessionCatalog, titleFromUserText } from './chatSessions';
+import {
+  createProjectHandoffSession,
+  ProjectWindowHandoffStore,
+  type ProjectWindowHandoffInput,
+} from './projectWindowHandoff';
 import { AgentDecisionService } from '../runtime/decision/agentDecision';
 import { createAppWorkflowRegistry } from './workflowRegistry';
 import { createAppToolRegistry } from './toolRegistry';
@@ -115,6 +121,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * context.subscriptions 上，扩展停用时自动关。
    */
   private readonly mcpPool: McpConnectionPool;
+  private readonly projectHandoffStore: ProjectWindowHandoffStore;
+  private readonly activeProtocolRunIds = new Map<string, string>();
+  private readonly pendingProjectWindows = new Map<
+    string,
+    { runId?: string; completed: boolean; input: ProjectWindowHandoffInput }
+  >();
   /**
    * Project roots discovered during this chat. The newest created project is
    * kept first so relative file operations naturally target it, while the
@@ -129,6 +141,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const storage = this.context.storageUri ?? this.context.globalStorageUri;
     this.storageRoot = storage.fsPath;
     this.sessionCatalog = new ChatSessionCatalog(this.storageRoot);
+    this.projectHandoffStore = new ProjectWindowHandoffStore(this.context.globalStorageUri.fsPath);
     // 诊断日志:视图 → 输出(OUTPUT) → 选 "PLC Agent"。网关返回空文本/报错时在这里能看到原始情况
     this.log = vscode.window.createOutputChannel('PLC Agent');
     setAgentLogger((line) => this.log.appendLine(line)); // 网关原始请求结构 / SSE 解析摘要也进这个面板
@@ -225,6 +238,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.postSessions();
   }
 
+  /**
+   * A newly opened project window starts with an isolated session containing
+   * only the deterministic project summary carried through global storage.
+   */
+  async restoreProjectWindowHandoff(): Promise<boolean> {
+    const claim = await this.projectHandoffStore.claimForWorkspace(
+      vscode.workspace.workspaceFile?.fsPath,
+      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+    );
+    if (!claim) return false;
+    try {
+      const session = await createProjectHandoffSession(this.sessionCatalog, claim.handoff);
+      this.sessionWorkspaceRoots.set(session.id, [...claim.handoff.projectRoots]);
+      await claim.complete();
+      this.log.appendLine(
+        `[workspace] 已在新工程窗口创建独立会话: ${claim.handoff.workspaceFile}`,
+      );
+      return true;
+    } catch (error) {
+      await claim.release().catch(() => undefined);
+      throw error;
+    }
+  }
+
   private post(msg: RuntimeEvent | Record<string, unknown>): void {
     void this.view?.webview.postMessage(msg);
   }
@@ -254,6 +291,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       store: runStore,
       emit: (event) => {
         if (this.activeSessionId === sessionId) this.post(event);
+        this.handleProjectWindowRuntimeEvent(sessionId, event);
       },
       log: (line) => this.log.appendLine(line),
       decisionService: this.decisionService,
@@ -274,8 +312,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           [
             DEVUNI_COMMAND_PORT_SERVICE,
             createDevuniCommandPort({
-              onProjectCreated: async (workspaceFile) => {
-                const createdRoots = await this.registerCreatedProjectRoots(sessionId, workspaceFile);
+              onProjectCreated: async (project) => {
+                const createdRoots = await this.registerCreatedProjectRoots(
+                  sessionId,
+                  project.workspaceFile,
+                );
                 if (!createdRoots.length) return;
                 const existingRoots = config.workspaceRoots?.length
                   ? config.workspaceRoots
@@ -287,6 +328,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 // an approval pause/resume cannot fall back to the old root.
                 config.workspaceRoot = mergedRoots[0] ?? '';
                 config.workspaceRoots = mergedRoots;
+                this.rememberProjectWindow(sessionId, project, createdRoots);
               },
             }),
           ] as const,
@@ -294,6 +336,78 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
       audit,
     });
+  }
+
+  private rememberProjectWindow(
+    sessionId: string,
+    project: CreatedDevuniProject,
+    projectRoots: readonly string[],
+  ): void {
+    this.pendingProjectWindows.set(sessionId, {
+      runId: this.activeProtocolRunIds.get(sessionId),
+      completed: false,
+      input: {
+        workspaceFile: project.workspaceFile,
+        projectRoots,
+        ...(project.projectName ? { projectName: project.projectName } : {}),
+        ...(project.parentDirectory ? { parentDirectory: project.parentDirectory } : {}),
+        ...(project.deviceModel ? { deviceModel: project.deviceModel } : {}),
+        ...(project.language ? { language: project.language } : {}),
+        ...(project.projectType ? { projectType: project.projectType } : {}),
+      },
+    });
+  }
+
+  private handleProjectWindowRuntimeEvent(sessionId: string, event: RuntimeEvent): void {
+    if (event.type === 'agentEvent') {
+      const protocolEvent = event.event as AgentProtocolEvent;
+      if (protocolEvent.type === 'run.started') {
+        this.activeProtocolRunIds.set(sessionId, protocolEvent.runId);
+        return;
+      }
+      const pending = this.pendingProjectWindows.get(sessionId);
+      if (!pending || (pending.runId && pending.runId !== protocolEvent.runId)) return;
+      if (protocolEvent.type === 'run.completed') {
+        pending.completed = true;
+        return;
+      }
+      if (
+        protocolEvent.type === 'run.failed' ||
+        protocolEvent.type === 'run.cancelled' ||
+        protocolEvent.type === 'run.refused'
+      ) {
+        this.pendingProjectWindows.delete(sessionId);
+        this.activeProtocolRunIds.delete(sessionId);
+      }
+      return;
+    }
+
+    if (event.type !== 'done') return;
+    const pending = this.pendingProjectWindows.get(sessionId);
+    if (!pending?.completed) return;
+    this.pendingProjectWindows.delete(sessionId);
+    this.activeProtocolRunIds.delete(sessionId);
+    void this.openProjectInNewWindow(pending.input);
+  }
+
+  private async openProjectInNewWindow(input: ProjectWindowHandoffInput): Promise<void> {
+    let handoffId: string | undefined;
+    try {
+      const handoff = await this.projectHandoffStore.enqueue(input);
+      handoffId = handoff.id;
+      const port = createDevuniCommandPort();
+      await port.invoke('bridgeOpenPrj', handoff.workspaceFile, true);
+      this.log.appendLine(`[workspace] 已在新窗口打开工程: ${handoff.workspaceFile}`);
+    } catch (error) {
+      if (handoffId) await this.projectHandoffStore.discard(handoffId).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.appendLine(`[workspace] 自动打开新工程窗口失败: ${message}`);
+      this.post({
+        type: 'error',
+        message: `工程已创建，但自动打开新工程窗口失败：${message}`,
+        canRetry: false,
+      });
+    }
   }
 
   private async postSessions(): Promise<void> {

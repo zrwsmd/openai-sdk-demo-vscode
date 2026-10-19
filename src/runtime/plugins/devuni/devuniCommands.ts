@@ -98,12 +98,6 @@ function readOptionList(value: unknown): DevuniOption[] {
   return options;
 }
 
-/** 从工作区文件路径取工程名:去掉目录和 .code-workspace 后缀。 */
-function projectNameFromWorkspaceFile(workspaceFile: string): string {
-  const base = workspaceFile.replace(/\\/g, "/").split("/").pop() ?? "";
-  return base.replace(/\.code-workspace$/i, "") || base || workspaceFile;
-}
-
 export interface DevuniProjectOptions {
   languages: DevuniOption[];
   machineList: DevuniOption[];
@@ -211,13 +205,6 @@ const createProjectParameters = z.object({
     .min(1)
     .optional()
     .describe("工程类型,例如 standard / HMI。不填则用第一个可用类型。"),
-  openAfterCreate: z
-    .boolean()
-    .optional()
-    .describe(
-      "建完之后是否把当前窗口切换到新工程。默认 false(保持当前窗口不动)。" +
-        "设为 true 会重启扩展宿主并中断当前会话,除非用户明确要求,否则不要设为 true。",
-    ),
 });
 
 type CreateProjectInput = z.infer<typeof createProjectParameters>;
@@ -231,7 +218,8 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     "projectPath 必须是已经存在的父目录。" +
     "工程类型、工程语言、设备型号、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
     "设备型号是必填项,必须从 devuni_project_options 的候选中选择,不能使用插件默认型号代替用户确认。" +
-    "默认不会切换窗口,创建完当前会话继续;属于写操作,执行前需要用户在界面批准。",
+    "创建成功后由运行时等待当前任务完整结束，再在新窗口打开工程并建立新的工程会话;" +
+    "属于写操作,执行前需要用户在界面批准。",
   capability: {
     name: "devuni_create_project",
     description: "在外部 devUni IDE 插件里创建一个真实工程。",
@@ -283,11 +271,11 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
       // 对方命令里叫 lan,不是 language。
       lan: language,
       prjType: projectType,
-      // 默认不切窗口:切了会把扩展宿主连同当前会话一起重启。
-      openAfterCreate: input.openAfterCreate ?? false,
+      // 窗口接力由宿主在整轮任务完成后执行，创建命令本身绝不能提前切走。
+      openAfterCreate: false,
     };
   },
-  toOutcome: (raw, input) => {
+  toOutcome: (raw) => {
     if (!isRecord(raw)) {
       return { ok: false, error: "devUni 插件返回了无法识别的内容。", data: raw };
     }
@@ -303,31 +291,12 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
       };
     }
     const workspaceFile = typeof raw.wsUri === "string" ? raw.wsUri : undefined;
-    const opened = input.openAfterCreate === true;
     return {
       ok: true,
-      data: { workspaceFile, opened },
+      data: { workspaceFile, opened: false },
       summary: workspaceFile
-        ? `工程已创建:${workspaceFile}` +
-          (opened ? "(已切换到新工程窗口)" : "(当前窗口保持不动)")
+        ? `工程已创建:${workspaceFile}`
         : "工程已创建。",
-      // 界面上那行「点工程名打开」由这条声明驱动:界面只认这份清单的形状,
-      // 不知道是谁给的、也不用知道 bridgeOpenPrj 是什么。
-      actions: workspaceFile
-        ? [
-            {
-              label: "项目已创建，可以在新窗口打开",
-              text: projectNameFromWorkspaceFile(workspaceFile),
-              title:
-                `在新窗口打开 ${workspaceFile}` +
-                "(在当前窗口打开会重启扩展宿主，本会话会中断)",
-              command: "bridgeOpenPrj",
-              // 第二个参数是"是否在新窗口打开"。当前窗口会重启扩展宿主、断掉本会话,
-              // 所以默认固定新窗口。
-              args: [workspaceFile, true],
-            },
-          ]
-        : [],
     };
   },
 });
