@@ -25,10 +25,12 @@ import {
   cachedToolsByServer,
   cachedMcpToolFromDefinition,
   MAX_CACHED_TOOL_SCHEMA_CHARS,
+  MAX_CACHED_TOOLS_PER_SERVER,
   mcpServerFingerprint,
   mcpToolCachePath,
   parseMcpToolCache,
   readMcpToolCache,
+  writeMcpToolCache,
   JsonFileSession,
   JsonRunStore,
   RunCoordinator,
@@ -237,11 +239,16 @@ const markerOf = (tag) => path.join(stubDir, `starts-${tag}.log`);
 // 这个文件一出现，对应那台就立刻退出：用来模拟"配置没变、服务器起不来"。
 // 参数位置固定，所以前后两次连接的配置指纹是一样的。
 const sentinelOf = (tag) => path.join(stubDir, `down-${tag}`);
-const makeServer = (name, tag) => ({
+const makeServer = (name, tag, toolCount) => ({
   name,
   transport: 'stdio',
   command: process.execPath,
-  args: [stubScript, markerOf(tag), sentinelOf(tag)],
+  args: [
+    stubScript,
+    markerOf(tag),
+    sentinelOf(tag),
+    ...(toolCount ? [String(toolCount)] : []),
+  ],
 });
 const stubServer = makeServer('stub', 'a');
 const otherServer = makeServer('other', 'b');
@@ -693,6 +700,114 @@ await selectedPool.dispose();
   assert.equal(await handshakesOf('i'), 1);
   await uncertainPool.dispose();
   await fs.rm(uncertainDir, { recursive: true, force: true });
+}
+
+// 条数上限：实时工具全量给模型，落盘那份只留前 N 条，免得工具很多的服务器把缓存撑大。
+{
+  const manyCount = MAX_CACHED_TOOLS_PER_SERVER + 10;
+  const manyServer = makeServer('many', 'j', manyCount);
+  const manyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-many-'));
+  const manyPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const manyLease = await manyPool.acquire({
+    settings: { enabled: true, servers: [manyServer] },
+    policyContext: { workspaceRoot: manyDir },
+  });
+  // 连上的时候一条都不能少。
+  assert.equal(manyLease.tools.length, manyCount);
+  assert.equal(manyLease.toolNames.length, manyCount);
+  manyLease.release();
+  // 落盘那份按上限截断（直接读原文件，别让读取侧的截断把写入侧的问题盖住）。
+  const manyRaw = JSON.parse(await fs.readFile(mcpToolCachePath(manyDir), 'utf8'));
+  assert.equal(manyRaw.servers.many.tools.length, MAX_CACHED_TOOLS_PER_SERVER);
+  await manyPool.dispose();
+  // 读取侧同样按上限过一遍：限制之前写进去的超长清单也要被裁掉。
+  const fatList = {
+    serverName: 'many',
+    fingerprint: 'abc',
+    fetchedAt: '2026-10-19T00:00:00.000Z',
+    tools: Array.from({ length: manyCount }, (_, index) => ({ name: `mcp_many_t${index}` })),
+  };
+  assert.equal(parseMcpToolCache({ version: 1, servers: { many: fatList } }).servers.many?.tools.length,
+    MAX_CACHED_TOOLS_PER_SERVER);
+  await fs.rm(manyDir, { recursive: true, force: true });
+}
+
+// 名单只列真造出来的工具：没有 definition 的旧缓存条目不该出现在 toolNames 里。
+{
+  const bareServer = makeServer('bare', 'k');
+  const bareDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-bare-'));
+  await writeMcpToolCache(bareDir, [{
+    serverName: 'bare',
+    fingerprint: mcpServerFingerprint(bareServer),
+    fetchedAt: new Date().toISOString(),
+    tools: [{ name: 'mcp_bare_stub_ping', description: '没有 definition 的旧缓存' }],
+  }]);
+  await fs.writeFile(sentinelOf('k'), '');
+  const barePool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const bareLease = await barePool.acquire({
+    settings: { enabled: true, servers: [bareServer] },
+    policyContext: { workspaceRoot: bareDir },
+  });
+  assert.deepEqual(bareLease.tools, []);
+  assert.deepEqual(bareLease.toolNames, []);
+  bareLease.release();
+  await barePool.dispose();
+  await fs.rm(sentinelOf('k'), { force: true });
+  await fs.rm(bareDir, { recursive: true, force: true });
+}
+
+// 缓存落后于服务器：工具还在但参数定义变了，调用时要说出来，并且把缓存刷新掉。
+{
+  const driftServer = makeServer('drift', 'l');
+  const driftDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-mcp-drift-'));
+  const warmPool = new McpConnectionPool({ idleTimeoutMs: 60_000 });
+  const warmLease = await warmPool.acquire({
+    settings: { enabled: true, servers: [driftServer] },
+    policyContext: { workspaceRoot: driftDir },
+  });
+  warmLease.release();
+  await warmPool.dispose();
+
+  // 把缓存里的 schema 改成"服务器已经换过参数"的样子；指纹不动，只有定义变。
+  const driftCache = await readMcpToolCache(driftDir);
+  const driftList = driftCache.servers.drift;
+  await writeMcpToolCache(driftDir, [{
+    ...driftList,
+    tools: driftList.tools.map((tool) => ({
+      ...tool,
+      definition: {
+        ...tool.definition,
+        inputSchema: { type: 'object', properties: { stale: { type: 'string' } } },
+      },
+    })),
+  }]);
+
+  await fs.writeFile(sentinelOf('l'), '');
+  const driftLogs = [];
+  const driftPool = new McpConnectionPool({
+    idleTimeoutMs: 60_000,
+    log: (line) => driftLogs.push(line),
+  });
+  const coldLease = await driftPool.acquire({
+    settings: { enabled: true, servers: [driftServer] },
+    policyContext: { workspaceRoot: driftDir },
+  });
+  const lazyTool = coldLease.tools.find((tool) => tool.name === 'mcp_drift_stub_ping');
+  assert.ok(lazyTool);
+
+  // 服务器恢复后再调用：这一刻能拿到实时清单，和缓存里的定义对不上。
+  await fs.rm(sentinelOf('l'), { force: true });
+  assert.match(JSON.stringify(await lazyTool.invoke({}, '{}')), /pong/);
+  assert.ok(driftLogs.some((line) => line.includes('参数定义与缓存不一致')));
+  // 缓存已经被刷新成服务器的真实定义，下一轮不会再报。
+  const refreshed = await readMcpToolCache(driftDir);
+  assert.deepEqual(refreshed.servers.drift?.tools[0]?.definition?.inputSchema, {
+    type: 'object',
+    properties: {},
+  });
+  coldLease.release();
+  await driftPool.dispose();
+  await fs.rm(driftDir, { recursive: true, force: true });
 }
 
 console.log('mcp client tests passed');

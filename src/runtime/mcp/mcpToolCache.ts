@@ -21,6 +21,15 @@ export const MCP_TOOL_CACHE_RELATIVE_PATH = '.plc-agent/mcp-tools-cache.json';
  */
 export const MAX_CACHED_TOOL_SCHEMA_CHARS = 8 * 1024;
 
+/**
+ * 单个服务器最多缓存多少条工具。
+ *
+ * 每条 schema 已经有 8K 上限，但没有条数上限的话，工具很多的服务器照样能把文件撑大。
+ * 真实服务器通常十几个到几十个工具，64 条足够覆盖。超出只影响"连不上时"的兜底：
+ * 连上时永远用实时清单，不受这个限制。
+ */
+export const MAX_CACHED_TOOLS_PER_SERVER = 64;
+
 export interface McpCachedTool {
   /** 暴露给模型的工具名，形如 mcp_<server>_<tool>，跟实际发出去的名字一致。 */
   name: string;
@@ -159,6 +168,7 @@ function parseServerToolList(name: string, value: unknown): McpServerToolList | 
     ? value.tools
       .map((item) => parseCachedTool(item))
       .filter((item): item is McpCachedTool => !!item)
+      .slice(0, MAX_CACHED_TOOLS_PER_SERVER)
     : [];
   return {
     serverName: typeof value.serverName === 'string' && value.serverName.trim()
@@ -239,6 +249,27 @@ function schemaWithinCacheBudget(schema: Record<string, unknown>): boolean {
     // 循环引用之类序列化不了的东西，本来也没法落盘。
     return false;
   }
+}
+
+/**
+ * schema 的内容指纹，用来比对"缓存里的定义"和"服务器现在的定义"是否一致。
+ *
+ * 不能拿 JSON.stringify 直接比：两份等价的对象键序可能不同，会误报。这里按键名排序
+ * 后再序列化，只关心内容。
+ */
+export function schemaFingerprint(schema: Record<string, unknown>): string {
+  return hashContent(stableJson(schema));
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (isRecord(value)) {
+    const entries = Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
 }
 
 function joinPath(root: string, relativePath: string): string {

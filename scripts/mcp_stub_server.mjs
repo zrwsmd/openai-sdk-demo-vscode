@@ -7,6 +7,8 @@ import fs from 'node:fs';
 
 const marker = process.argv[2];
 const downSentinel = process.argv[3];
+// 第四个参数可选：报告多少个工具。用来验证"缓存条数上限"这条路径。
+const toolCount = Math.max(1, Number(process.argv[4]) || 1);
 
 if (downSentinel) {
   try {
@@ -51,18 +53,17 @@ function handle(line) {
     return;
   }
   if (message.method === 'tools/list') {
+    const tools = Array.from({ length: toolCount }, (_, index) => ({
+      name: index === 0 ? 'stub_ping' : `stub_ping_${index + 1}`,
+      description: index === 0
+        ? '返回固定字符串，用于验证连接是否还活着'
+        : `第 ${index + 1} 个测试工具`,
+      inputSchema: { type: 'object', properties: {} },
+    }));
     send({
       jsonrpc: '2.0',
       id: message.id,
-      result: {
-        tools: [
-          {
-            name: 'stub_ping',
-            description: '返回固定字符串，用于验证连接是否还活着',
-            inputSchema: { type: 'object', properties: {} },
-          },
-        ],
-      },
+      result: { tools },
     });
     return;
   }

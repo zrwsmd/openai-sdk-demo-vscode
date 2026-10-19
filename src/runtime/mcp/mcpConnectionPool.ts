@@ -13,8 +13,10 @@ import {
   cachedToolsByServer,
   mcpServerFingerprint,
   readMcpToolCache,
+  schemaFingerprint,
   writeMcpToolCache,
   type McpCachedTool,
+  type McpCachedToolDefinition,
   type McpServerToolList,
 } from './mcpToolCache';
 
@@ -30,8 +32,10 @@ export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export interface McpSessionLease {
   readonly tools: readonly FunctionTool<any, any, any>[];
   /**
-   * 这一轮"有哪些 MCP 工具"的名字：本次连上的取真清单，
-   * 本次没连上的服务器用缓存里那份补。名单因此不再吊在连接上。
+   * 这一轮"有哪些 MCP 工具"的名字。
+   *
+   * 直接从真造出来的工具里取，不再单独维护一份名单：名单和工具一一对应，
+   * 不会出现"名单里有、实际调不到"的名字。
    */
   readonly toolNames: readonly string[];
   /** 本轮用完归还：连接留在池里，只重置空闲计时。 */
@@ -167,9 +171,11 @@ export class McpConnectionPool {
       );
       const cachedTools = failedServers.flatMap((server) => {
         const cached = cachedByServer.get(server.name) ?? [];
+        // 没有 definition 的条目（旧缓存、或 schema 超限）造不出工具，直接不参与。
         const available = cached.filter((tool) => tool.definition && !reserved.has(tool.name));
         for (const tool of available) reserved.add(tool.name);
         if (!available.length) return [];
+        this.log(`[mcp] ${server.name} 本次没连上，用缓存里的 ${available.length} 个工具兜底`);
         const invoke = async (
           toolName: string,
           args: Parameters<MCPServer['callTool']>[1],
@@ -177,13 +183,13 @@ export class McpConnectionPool {
           callOptions?: Parameters<MCPServer['callTool']>[3],
         ) => {
           const cachedTool = available.find((tool) => tool.definition?.name === toolName);
-          if (!cachedTool) {
+          if (!cachedTool?.definition) {
             throw new Error(`缓存的 MCP 工具 ${server.name}.${toolName} 已不存在`);
           }
           return this.invokeCachedMcpTool(
             server,
             cachedTool.name,
-            toolName,
+            cachedTool.definition,
             args,
             meta,
             callOptions,
@@ -205,8 +211,9 @@ export class McpConnectionPool {
           },
         });
       });
-      const toolNames = await this.toolNamesFor(options, connections, cachedByServer);
-      return { tools: [...liveTools, ...cachedTools], toolNames, release };
+      const tools = [...liveTools, ...cachedTools];
+      // 名单从真造出来的工具里取：不会出现"名单里有、实际调不到"的名字。
+      return { tools, toolNames: tools.map((tool) => tool.name), release };
     } catch (error) {
       // 借连接后任何一步失败都必须归还，否则清掉的 idle timer 永远不会恢复。
       release();
@@ -221,36 +228,13 @@ export class McpConnectionPool {
   }
 
   /**
-   * 这一轮"有哪些 MCP 工具"的名字。
-   *
-   * 本次连上的服务器取真清单；本次没连上的（服务器挂了、超时了），
-   * 用缓存里那份补上。补的意义是让名单不再依赖"这次一定连得上"——
-   * 将来改成按需连接时，名字也有出处。
-   */
-  private async toolNamesFor(
-    options: AcquireMcpSessionOptions,
-    connections: readonly McpServerConnection[],
-    cachedByServer: Map<string, McpCachedTool[]>,
-  ): Promise<string[]> {
-    const names = connections.flatMap((connection) => connection.tools.map((entry) => entry.name));
-    const live = new Set(connections.map((connection) => connection.serverName));
-    for (const [serverName, cached] of cachedByServer) {
-      if (options.serverNames !== undefined && !options.serverNames.includes(serverName)) continue;
-      if (live.has(serverName)) continue;
-      this.log(`[mcp] ${serverName} 本次没连上，用缓存里的 ${cached.length} 个工具名兜底`);
-      names.push(...cached.map((tool) => tool.name));
-    }
-    return names;
-  }
-
-  /**
    * 缓存工具的真正执行路径：借一条实时连接，验证缓存工具仍在清单里，
    * 直接调用 MCP server，最后按普通租约规则归还。调用失败由外层包装丢弃连接。
    */
   private async invokeCachedMcpTool(
     server: McpServerConfig,
     exposedToolName: string,
-    rawToolName: string,
+    cachedDefinition: McpCachedToolDefinition,
     args: Parameters<MCPServer['callTool']>[1],
     meta: Parameters<MCPServer['callTool']>[2] | undefined,
     callOptions: Parameters<MCPServer['callTool']>[3] | undefined,
@@ -269,12 +253,25 @@ export class McpConnectionPool {
       entry.leases += 1;
     }
     try {
+      // 先刷新缓存：不管下面比对结果如何，下一轮拿到的都是服务器现在的定义。
       await this.rememberToolLists(options, [connection.toolList]);
       const liveTool = connection.tools.find((tool) => (
-        tool.name === exposedToolName && tool.definition.name === rawToolName
+        tool.name === exposedToolName && tool.definition.name === cachedDefinition.name
       ));
       if (!liveTool) {
         throw new Error(`MCP 服务器 ${server.name} 已不再提供缓存工具 ${exposedToolName}`);
+      }
+      // 缓存可能落后于服务器：工具还在、参数定义变了的话，这一轮模型拿到的仍是旧 schema。
+      // 工具定义在 acquire 时就已经交给 SDK，无法追溯替换，所以这里只能让它可见——
+      // 缓存上面已经刷新，下一轮用的就是新定义。
+      if (
+        schemaFingerprint(cachedDefinition.inputSchema)
+        !== schemaFingerprint(liveTool.definition.inputSchema as unknown as Record<string, unknown>)
+      ) {
+        this.log(
+          `[mcp] ${server.name}.${exposedToolName} 的参数定义与缓存不一致，本次仍按缓存定义调用；` +
+            '缓存已刷新，下一轮使用最新定义',
+        );
       }
       return await connection.server.callTool(liveTool.definition.name, args, meta, callOptions);
     } finally {

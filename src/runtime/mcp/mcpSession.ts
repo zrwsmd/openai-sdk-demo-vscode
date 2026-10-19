@@ -22,6 +22,7 @@ import {
 import {
   cachedMcpToolFromDefinition,
   MAX_CACHED_TOOL_SCHEMA_CHARS,
+  MAX_CACHED_TOOLS_PER_SERVER,
   mcpServerFingerprint,
   type McpCachedTool,
   type McpServerToolList,
@@ -104,6 +105,7 @@ export async function openMcpServerConnection(
     const listed = await server.listTools();
     const tools: McpConnectedTool[] = [];
     const accepted: McpCachedTool[] = [];
+    let truncated = false;
     for (const mcpTool of listed) {
       const name = mcpFunctionToolName(spec.name, mcpTool.name);
       if (reserved.has(name)) {
@@ -111,7 +113,17 @@ export async function openMcpServerConnection(
         continue;
       }
       reserved.add(name);
+      // 实时工具全量保留，条数上限只约束落盘那份。
       tools.push({ name, serverName: spec.name, server, definition: mcpTool });
+      if (accepted.length >= MAX_CACHED_TOOLS_PER_SERVER) {
+        if (!truncated) {
+          truncated = true;
+          log(
+            `[mcp] ${spec.name} 的工具超过 ${MAX_CACHED_TOOLS_PER_SERVER} 个，缓存只保留前 ${MAX_CACHED_TOOLS_PER_SERVER} 个`,
+          );
+        }
+        continue;
+      }
       const cachedTool = cachedMcpToolFromDefinition(name, mcpTool);
       if (!cachedTool.definition) {
         log(
