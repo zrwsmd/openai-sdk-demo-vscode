@@ -103,10 +103,10 @@ export function inferCurrentActionIntent(userText: string): CurrentActionIntent 
 }
 
 function isProjectLifecycleRequest(text: string): boolean {
-  const lead = /^(?:请(?:帮我)?|帮我|我要|我想|想|想要|需要)?/u;
+  const lead = /^(?:请(?:帮我)?|帮我|我要|我想|想|想要|需要)?(?:再|继续|重新)?/u;
   const create = new RegExp(
-    `${lead.source}(?:在[^。！？\\r\\n]{0,24})?(?:新建|创建|建立|搭建|生成|建(?=个|一个|工程|项目))\\s*` +
-      `(?:一个|个|新的)?\\s*(?:[A-Za-z0-9_-]+\\s*)?(?:工程|项目)(?!的)`,
+    `${lead.source}(?:在[^。！？\\r\\n]{0,24})?(?:新建|创建|建立|搭建|生成|建(?=另(?:外)?一个|再一个|第二个|个|一个|工程|项目))\\s*` +
+      `(?:另(?:外)?一个|再一个|第二个|一个|个|新的)?\\s*(?:[A-Za-z0-9_-]+\\s*)?(?:工程|项目)(?!的)`,
     'u',
   );
   const open = new RegExp(

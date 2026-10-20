@@ -994,6 +994,17 @@ export async function runAgent(
       const result = payload.result as ToolResult | undefined;
       const recordedResult =
         result ?? syntheticToolFailureResult(name, call?.args ?? "", payload);
+      if (
+        name === "request_clarification" &&
+        recordedResult &&
+        recordedResult.ok &&
+        recordedResult.data &&
+        typeof recordedResult.data === "object" &&
+        !Array.isArray(recordedResult.data) &&
+        (recordedResult.data as Record<string, unknown>).cancelled !== true
+      ) {
+        historicalToolArgumentGuard?.allowConfirmedResources(recordedResult.data);
+      }
       recordToolResult(name, callId, recordedResult);
       refreshWorkflowCompletion();
       forceNextWorkflowToolAfterResult(name, recordedResult);

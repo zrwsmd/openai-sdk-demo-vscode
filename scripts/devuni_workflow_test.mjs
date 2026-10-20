@@ -25,6 +25,8 @@ const match = (text) => DEVUNI_PROJECT_WORKFLOW.localMatch({ userText: text });
 const shouldMatch = [
   '帮我建个工程',
   '新建一个工程',
+  '新建另一个工程',
+  '再建另一个工程',
   '创建一个 PLC 工程',
   '建工程',
   '在 E 盘建一个项目',
@@ -120,6 +122,10 @@ assert.equal(
   'local',
   '必须由本地规则认领,不能依赖模型分诊的运气',
 );
+const repeatedCreateDecision = await decisionService.decide(cfg, '新建另一个工程');
+assert.equal(repeatedCreateDecision.kind, 'workflow');
+assert.equal(repeatedCreateDecision.workflow.id, DEVUNI_PROJECT_WORKFLOW_ID);
+assert.equal(repeatedCreateDecision.source, 'local');
 
 // 代码交付类的请求不能被工程事务抢走。
 for (const text of ['生成一个水泵控制程序', '建个工程然后写个交通灯程序']) {

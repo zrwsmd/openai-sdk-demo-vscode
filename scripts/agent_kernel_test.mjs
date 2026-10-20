@@ -1267,6 +1267,33 @@ async function runTestTurn(
     throw new Error('明确的历史上下文续接被错误拦截');
   }
 
+  // 澄清问题本身没有副作用，不应因为问题文字提到旧路径而被拦；用户在
+  // 本轮弹窗中明确填写的路径，应允许后续工具使用。
+  const clarifiedGuard = createHistoricalToolArgumentGuard(
+    [
+      { type: 'message', role: 'user', content: '在 D:\\ 创建工程 old' },
+      {
+        type: 'function_call',
+        name: 'devuni_create_project',
+        callId: 'old-project',
+        arguments: JSON.stringify({ projectPath: 'D:\\', projectName: 'old' }),
+      },
+    ],
+    '新建另一个工程',
+  );
+  if (clarifiedGuard?.('request_clarification', { question: '父目录是否使用 D:\\？' }) !== undefined) {
+    throw new Error('澄清工具被历史资源守卫错误拦截');
+  }
+  if (clarifiedGuard?.('devuni_create_project', { projectPath: 'D:\\', projectName: 'new' }) === undefined) {
+    throw new Error('用户确认前不应允许副作用工具复用历史路径');
+  }
+  clarifiedGuard?.allowConfirmedResources({
+    answers: { projectPath: { customText: 'd://' } },
+  });
+  if (clarifiedGuard?.('devuni_create_project', { projectPath: 'D:\\', projectName: 'new' }) !== undefined) {
+    throw new Error('用户在本轮澄清中确认的路径仍被当成历史参数');
+  }
+
   // 最近只有一个活动文件时，省略式追问也允许只读工具继续使用它；
   // 非只读工具仍然需要显式表达继续操作。
   const implicitFollowUpGuard = createHistoricalToolArgumentGuard(

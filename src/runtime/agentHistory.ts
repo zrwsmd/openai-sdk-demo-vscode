@@ -268,10 +268,11 @@ export function createNewTurnModelInputSession(session: Session): Session {
   });
 }
 
-export type HistoricalToolArgumentGuard = (
-  toolName: string,
-  input: unknown,
-) => string | undefined;
+export interface HistoricalToolArgumentGuard {
+  (toolName: string, input: unknown): string | undefined;
+  /** Resources explicitly supplied or selected by the user during this run. */
+  allowConfirmedResources(value: unknown): void;
+}
 
 /** Host-authored context facts may be reused without being treated as stale model output. */
 export const TRUSTED_CONTEXT_PROVIDER_DATA_KEY = "plcAgentTrustedContext";
@@ -288,6 +289,8 @@ const IMPLICIT_HISTORY_READ_TOOLS = new Set([
   "search_files",
   "list_files",
 ]);
+/** Asking the user has no side effect; its response is what authorizes later use. */
+const HISTORY_GUARD_EXEMPT_TOOLS = new Set(["request_clarification"]);
 /**
  * 这些字段装的是查询条件，不是路径。search_files 的 text 是要搜的字，
  * 不是文件；glob 仍然是路径筛选，照常检查。
@@ -547,8 +550,10 @@ export function createHistoricalToolArgumentGuard(
       .map(([reference]) => reference),
   );
   const explicitContinuation = HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
+  const confirmedReferences = new Set<string>();
 
-  return (toolName, input) => {
+  const guard: HistoricalToolArgumentGuard = (toolName, input) => {
+    if (HISTORY_GUARD_EXEMPT_TOOLS.has(toolName)) return undefined;
     const ignoredFields = IGNORED_RESOURCE_ARGUMENT_FIELDS[toolName];
     const currentReferences = new Map<string, string>();
     collectHistoricalResourceReferences(
@@ -557,6 +562,7 @@ export function createHistoricalToolArgumentGuard(
     );
     const staleReferences = [...currentReferences.keys()]
       .filter((reference) => historicalReferences.has(reference))
+      .filter((reference) => !confirmedReferences.has(reference))
       .filter(
         (reference) =>
           !resourceMentionedInText(reference, normalizedUserText),
@@ -588,6 +594,12 @@ export function createHistoricalToolArgumentGuard(
       "如果这是对最近唯一资源的追问，请明确写出文件或路径；写入、编辑和执行类工具还需要明确表达继续操作。"
     );
   };
+  guard.allowConfirmedResources = (value) => {
+    const references = new Map<string, string>();
+    collectHistoricalResourceReferences(value, references);
+    for (const reference of references.keys()) confirmedReferences.add(reference);
+  };
+  return guard;
 }
 
 export async function loadHistoricalToolArgumentGuard(

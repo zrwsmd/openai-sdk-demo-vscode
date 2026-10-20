@@ -327,6 +327,10 @@ assert.equal(
 );
 assert.equal(inferRequiredTool('查看 config.json'), 'read_file');
 assert.equal(inferCurrentActionIntent('帮我在 E 盘建个工程'), 'project');
+assert.equal(inferCurrentActionIntent('新建另一个工程'), 'project');
+assert.equal(inferCurrentActionIntent('再新建一个工程'), 'project');
+assert.equal(inferCurrentActionIntent('再建另一个工程'), 'project');
+assert.equal(inferCurrentActionIntent('继续新建一个项目'), 'project');
 assert.equal(
   inferCurrentActionIntent('在刚刚新建的工程下面写入 asd.txt'),
   'file_edit',
