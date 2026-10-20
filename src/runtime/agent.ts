@@ -2231,14 +2231,17 @@ export async function runAgent(
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
         assertPlanCompleted();
-        const gate = runCompletionGate(output);
-        await reviewCompletionGateDecision(output, [], gate);
+        const message = stripHistoricalContextMarker(
+          authoritativeWorkflowMessage() ?? output,
+        );
+        const gate = runCompletionGate(message);
+        await reviewCompletionGateDecision(message, [], gate);
         if (!gate.passed) {
           continueAfterCompletionGateFailure(state, gate);
           continue;
         }
         const canonicalOutput: IndustrialAgentOutput = {
-          message: output,
+          message,
           diagnostics: [],
           artifacts: [],
           data: null,
@@ -2256,7 +2259,7 @@ export async function runAgent(
         });
         return {
           result,
-          output,
+          output: message,
           usage,
           status: "completed",
         };

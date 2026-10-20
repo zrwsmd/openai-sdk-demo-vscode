@@ -312,10 +312,10 @@ assert.equal(
   'D:\\\\new1\\\\new1.code-workspace',
   '创建成功回执必须成为工作流完成证据',
 );
-assert.match(
-  runtime.completionAdapter.finalMessage?.([createdRecord]) ?? '',
-  /工程已成功创建/u,
-);
+const createdMessage = runtime.completionAdapter.finalMessage?.([createdRecord]) ?? '';
+assert.match(createdMessage, /工程已成功创建/u);
+assert.match(createdMessage, /本轮结束后将自动在新窗口打开/u);
+assert.doesNotMatch(createdMessage, /尚未|手动打开|是否需要打开/u);
 
 /* ------------------------------------------------------------------ */
 /* [5] 模拟第 4 站:按名单从注册表里挑出这一轮真正发给模型的工具         */
