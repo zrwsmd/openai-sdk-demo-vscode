@@ -186,6 +186,66 @@ periodMs * 1,000,000 = devUni interval（纳秒）
 
 这一步还必须执行目标能力检查。例如目标 profile 不支持 event Task、实例级 retain 或某种网络协议时，应在调用 start.exe 之前明确报错。
 
+传给 start.exe -i 的路径是一次编译的输入工作目录，不是 project/build 输出目录。调用 start.exe 前，适配器需要把目录准备成类似下面的结构：
+
+<compileDir>/
+  plc_config.json                 必需；devUni 任务、实例、设备树、数据区和工具链配置
+  iec-lib.json                    必需；启用的 IEC/Runtime 库，例如 Native、Motion、Etherlab
+  Main.st                         必需；参与编译的 PROGRAM/FUNCTION_BLOCK/FUNCTION 源码
+  OtherPou.st                     可选；其他参与编译的 ST 源码
+  gloval_var.global.st            可选；轴等设备生成的全局变量，现有插件文件名就是 gloval_var
+  slave_config_master_0.json      可选；EtherCAT 等设备或主站的协议专用配置
+  hmi_lvgl.json                   可选；工程包含运行时 HMI 时生成
+  transLd.txt                     可选；梯形图转换流程使用的中间描述
+
+其中 plc_config.json 至少包含：
+
+- tool_dep_path：matiec、交叉编译器、头文件和库的位置。
+- toolchain_gcc：编译器、链接器、CFLAGS、LDFLAGS 和输出扩展名。
+- configuration：Resource、Task、实例和 var_mapped。
+- device_tree：设备驱动及其协议配置文件引用。
+- retain：保持区策略。
+- data_area：输入、输出和内存区大小。
+
+当前 devUni 插件只会从工程代码目录复制顶层 .st 文件。若 v2 支持子目录、.gvl 或 .dut，Agent 适配器需要先把它们转换或汇总成 start.exe 能读取的 IEC 源文件，并处理同名文件冲突。
+
+ST 文件是否参与编译，与 PROGRAM 是否绑定 Task 是两件事。当前插件在编译前枚举工程代码目录中的全部顶层 .st 文件，并逐个复制到 .depworkspace。start.exe 再扫描这些 .st，将其中的 PROGRAM、FUNCTION_BLOCK、FUNCTION、TYPE 和全局声明汇总到 generated_plc.st/plc.st。plc_config.json 中的 instances 只决定哪些 PROGRAM 被实例化并由哪个 Task 周期调用；没有直接绑定 Task 的 FUNCTION_BLOCK 和 FUNCTION 仍会作为被调用的类型参与编译。
+
+例如工程代码目录包含：
+
+PLC_PRG.st
+FB_Motor.st
+ScaleValue.st
+
+调用 start.exe 前，.depworkspace 中也应出现这三个文件。当前检查到的 .depworkspace 只有 PLC_PRG.st，是因为留下该编译快照的示例工程和历史日志都只处理了 PLC_PRG.st。
+
+现有复制逻辑不递归扫描子目录，并且只匹配 .st 后缀。放在子目录中的 ST、独立 .gvl、独立 .dut 不会通过这条路径自动进入编译。这是后续 Agent 编译适配器必须补齐的边界，不能简单复用当前顶层文件枚举。
+
+调用示例：
+
+start.exe -i C:\build\run-123\input
+
+start.exe 执行后会在同一个输入目录下创建 project 和 project/build：
+
+<compileDir>/
+  plc_config.json
+  iec-lib.json
+  *.st
+  project/
+    plc.xml                       从 IEC 源码生成的 PLCopen XML
+    build/
+      generated_plc.st            汇总后的 POU 和 CONFIGURATION
+      plc.st                      加入运行库后的 matiec 完整输入
+      POUS.c / POUS.h             matiec 生成的 POU C 代码
+      plc_resource_all_in_one.c   Resource 和 Task 调度代码
+      plc_task_debugger_data.c    调试变量描述代码
+      VARIABLES.csv               变量表
+      VARIABLES_DEBUG.csv         在线调试变量表
+      Application.so              AArch64 PLC 用户程序动态库
+      Application.data            Task、IO、保持区和运行时元数据
+
+compileHash 不属于 start.exe 的必需输入。现有插件在编译完成后生成它，用于判断输入文件是否发生变化和是否需要重新编译。
+
 
 8. matiec 编译
 -------------
