@@ -1,0 +1,254 @@
+PLC Agent 完整工程交付流程
+===========================
+
+总体链路
+--------
+
+用户完整描述需求
+  -> Agent 识别工程、代码、设备、网络意图
+  -> 补问缺失参数
+  -> 创建 devUni 工程
+  -> 生成 plc-runtime.json v2
+  -> 生成 POU 源码和 devUni 原生工程对象
+  -> 校验 ST、任务组态、设备组态和 IO 映射
+  -> 转换为 devUni 编译输入
+  -> matiec 和 ARM GCC 编译
+  -> 打包并部署到 PLC
+  -> PLC Runtime 加载运行并在线验收
+
+
+1. 用户给出完整需求
+-------------------
+
+例如：
+
+创建一个 SC5100 的 standard ST 工程，工程名 PumpStation，放在 D:\PLC。
+主任务周期 20ms，CPU1，优先级1。实现水泵起保停、低液位停机和故障复位。
+启动按钮接 %IX0.0，停止按钮接 %IX0.1，接触器接 %QX0.0。
+通过 Modbus RTU 控制 1 号变频器，站号1，频率给定寄存器 40001。编译后下发到 PLC。
+
+Agent 先把自然语言整理成内部工程需求：
+
+- 工程信息
+- Task 和周期
+- POU 与程序实例
+- 控制逻辑
+- PLC、模块和远程设备
+- 网络参数
+- IO 映射
+- 是否需要编译、部署和启动
+
+地址、寄存器、设备型号或安全行为不明确时，必须向用户澄清，不能自行猜测。
+
+
+2. Agent 路由任务
+----------------
+
+Jev、工作流规则和分类器共同判断请求包含哪些动作，例如：
+
+- devuni_project：创建工程
+- st_workspace_delivery：生成或修改 ST 程序
+- PLC 组态生成
+- 编译与部署
+
+当前工程创建和 ST 交付是两个独立工作流。为了支持“一句话完成整个工程”，后续应增加总工作流：
+
+plc_project_delivery
+
+该工作流依次调度创建工程、生成组态、生成源码、编译和部署，避免不同工作流互相抢占。
+
+
+3. 创建工程并切换窗口
+---------------------
+
+Agent 查询 devUni 候选项并确认：
+
+- 工程类型
+- 工程语言
+- 设备型号
+- 父目录
+- 工程名
+
+然后调用 devuni_create_project。
+
+工程创建成功后：
+
+- 新窗口打开新工程。
+- 旧窗口继续保留。
+- 新窗口创建干净会话。
+- 界面只显示一条工程摘要。
+- 未完成任务以结构化运行状态保存，不依赖旧聊天历史继续记忆。
+
+
+4. 生成统一工程模型
+-------------------
+
+Agent 在新工程中生成 plc-runtime.json v2，核心结构为：
+
+{
+  "schemaVersion": 2,
+  "configuration": {},
+  "pous": [],
+  "devices": [],
+  "networks": [],
+  "ioMappings": []
+}
+
+它是 Agent、IDE 和编译器之间的统一交换格式。
+
+同时生成各个 POU 的 .st 源码。JSON 中只保存 POU 名称、类型和源码路径，POU 正文保存在 .st 文件中。
+
+
+5. 创建 devUni 原生工程对象
+--------------------------
+
+IDE 侧需要提供类似下面的接口：
+
+applyPlcProjectModel(projectRoot, plcRuntimeV2)
+
+该接口根据 v2 创建：
+
+- POU 节点和 .st 文件
+- Task
+- 程序实例及 Task 绑定
+- 设备树
+- 网络组态
+- IO 映射
+
+用户打开 devUni IDE 后，应看到完整的原生工程树，而不是只有 JSON 和 ST 文件。
+
+
+6. 校验整个工程
+---------------
+
+编译前完成四类检查：
+
+1) ST 语法检查。
+2) Task、实例和 POU 引用一致性检查。
+3) IO 地址冲突、数据类型和方向检查。
+4) 设备型号、网络和协议参数检查。
+
+当前 ST 交付按照以下流水线执行：
+
+validate_st_code
+  -> commit_st_delivery
+  -> write_file
+
+复杂工程还需要增加多文件工程级事务，保证多个 POU 和组态一起成功或一起失败。
+
+
+7. 转换成 devUni 编译输入
+-------------------------
+
+编译侧实现统一接口，例如：
+
+compilePlcProject({
+  projectRoot,
+  configPath,
+  targetProfile
+})
+
+适配器读取 v2 和 .st 文件，生成：
+
+- plc_config.json
+- POU、GVL、DUT 等 IEC 源文件
+- device_tree
+- EtherCAT 等协议专用配置文件
+- var_mapped
+- 目标工具链参数
+
+周期转换规则：
+
+periodMs * 1,000,000 = devUni interval（纳秒）
+
+一个包含多个 Task 的 v2 resource，需要展平成 devUni 使用的多个 resource。
+
+
+8. matiec 编译
+-------------
+
+适配器执行：
+
+start.exe -i <临时编译目录>
+
+start.exe 汇总生成 plc.st，然后调用：
+
+iec2c.exe plc.st
+
+matiec 输出：
+
+- POUS.c
+- Resource 和 Task 对应的 C 文件
+- 调试变量描述
+- 配置头文件
+
+随后 ARM GCC 把生成的 C 代码编译为 AArch64 的 Application.so。
+
+任务周期、CPU 核、优先级、数据区、IO 驱动和保持区等运行信息被写入 Application.data。
+
+
+9. 打包和部署
+-------------
+
+部署侧建议提供统一接口：
+
+deployPlcApplication({
+  device,
+  applicationSo,
+  applicationData,
+  expectedHashes
+})
+
+执行顺序：
+
+1) 连接 PLC。
+2) 查询当前运行状态。
+3) 停止旧应用。
+4) 上传 Application.so 和 Application.data。
+5) 校验文件哈希。
+6) 加载新应用。
+7) 启动运行。
+8) 读取 Task 状态和诊断。
+9) 失败时恢复上一版本。
+
+部署属于高影响操作，Agent 应明确显示目标设备、IP、程序版本和将要执行的动作。
+
+
+10. PLC Runtime 执行与在线验收
+------------------------------
+
+设备端 PLC Runtime：
+
+- 加载 Application.so。
+- 读取 Application.data。
+- 初始化输入、输出和保持区。
+- 按周期、优先级和 CPU 核运行 Task。
+- 调用 RESOURCE_*_run__。
+- 驱动 EtherCAT、Modbus 和本地 IO。
+- 提供变量监控、强制值、诊断和调试接口。
+
+Agent 或 IDE 随后读取 Task 状态、关键变量和设备诊断，确认程序已经加载、Task 正常运行、IO 映射正确。验收失败时停止新应用并执行回滚。
+
+
+当前完成度
+----------
+
+目前已经具备：
+
+- 工程创建工作流
+- 新窗口和新会话交接
+- ST 生成、校验和正式写入
+- v1 plc-runtime.json 同步和审计
+- matiec CONFIGURATION 文本生成器
+
+后续仍需实现：
+
+- v2 的正式解析与保存
+- plc_project_delivery 总工作流
+- v2 导入 devUni 原生工程对象的接口
+- v2 到 plc_config.json 的适配器
+- start.exe 编译执行器
+- 设备、网络和 IO 转换器
+- PLC 部署、启动、状态检查和回滚工具
+
+完整架构已经可以确定。当前 Agent 实际走到“生成 ST + v1 任务组态”附近；从 v2 到 Application.so、Application.data，以及后面的设备部署，还需要与 IDE、编译器和 PLC Runtime 分别对接。
