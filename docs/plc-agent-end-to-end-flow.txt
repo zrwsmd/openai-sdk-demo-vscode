@@ -221,6 +221,8 @@ ScaleValue.st
 
 现有复制逻辑不递归扫描子目录，并且只匹配 .st 后缀。放在子目录中的 ST、独立 .gvl、独立 .dut 不会通过这条路径自动进入编译。这是后续 Agent 编译适配器必须补齐的边界，不能简单复用当前顶层文件枚举。
 
+这里的“工程代码目录第一层”具体指 devUni 工程根目录。插件的组件配置文件位于 <projectRoot>/.devUni，编译时先取得 .devUni，再取它的父目录作为 codeDir，最终枚举的是 <projectRoot>/*.st。例如工程位于 D:\PLC\PumpStation，则当前扫描 D:\PLC\PumpStation\ 直属的 .st 文件，不扫描 D:\PLC\PumpStation\src\ 或其他子目录。
+
 调用示例：
 
 start.exe -i C:\build\run-123\input
