@@ -41,7 +41,7 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
 
 ## 2. 完整示例
 
-下面的示例覆盖 v2 的全部结构。可选字段在没有值时直接省略，不写 `null`。
+下面的示例覆盖 v2 的主要结构和常用可选字段。可选字段在没有值时直接省略，不写 `null`。
 
 ```json
 {
@@ -142,7 +142,10 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "points": [
         {
           "id": "di_16.ch0",
-          "address": "%IX0.0",
+          "address": {
+            "kind": "direct",
+            "address": "%IX0.0"
+          },
           "direction": "input",
           "dataType": "BOOL",
           "module": "di_16",
@@ -151,7 +154,10 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
         },
         {
           "id": "ai_8.ch0",
-          "address": "%IW64",
+          "address": {
+            "kind": "direct",
+            "address": "%IW64"
+          },
           "direction": "input",
           "dataType": "INT",
           "module": "ai_8",
@@ -174,10 +180,9 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
           "address": {
             "kind": "protocol",
             "networkId": "mb_rtu_1",
-            "unitId": 1,
             "area": "holdingRegister",
             "offset": 8192,
-            "dataType": "UINT16"
+            "wireType": "UINT16"
           },
           "direction": "output",
           "dataType": "UINT16",
@@ -185,7 +190,35 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
         }
       ],
       "connections": [
-        { "networkId": "mb_rtu_1", "role": "slave", "unitId": 1 }
+        { "networkId": "mb_rtu_1", "unitId": 1 }
+      ]
+    },
+    {
+      "id": "rio_1",
+      "name": "远程 IO 站",
+      "role": "remote",
+      "model": "SC-RIO8",
+      "points": [
+        {
+          "id": "do0",
+          "address": {
+            "kind": "protocol",
+            "networkId": "mb_tcp_1",
+            "area": "coil",
+            "offset": 0,
+            "wireType": "BOOL"
+          },
+          "direction": "output",
+          "dataType": "BOOL",
+          "description": "现场指示灯"
+        }
+      ],
+      "connections": [
+        {
+          "networkId": "mb_tcp_1",
+          "endpoint": { "host": "192.168.1.10", "port": 502 },
+          "unitId": 1
+        }
       ]
     },
     {
@@ -199,10 +232,9 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
           "address": {
             "kind": "protocol",
             "networkId": "ecat_1",
-            "slaveIndex": 1,
             "index": "0x6040",
             "subIndex": 0,
-            "dataType": "UINT16"
+            "wireType": "UINT16"
           },
           "direction": "output",
           "dataType": "UINT16",
@@ -210,7 +242,7 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
         }
       ],
       "connections": [
-        { "networkId": "ecat_1", "role": "slave", "slaveIndex": 1 }
+        { "networkId": "ecat_1", "slaveIndex": 1 }
       ]
     }
   ],
@@ -219,15 +251,13 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "id": "mb_tcp_1",
       "name": "车间以太网",
       "protocol": "modbusTcp",
-      "role": "master",
+      "mode": "master",
       "interface": {
         "name": "eth0",
         "ip": "192.168.1.5",
         "netmask": "255.255.255.0",
         "gateway": "192.168.1.1"
       },
-      "host": "192.168.1.10",
-      "port": 502,
       "timeoutMs": 1000,
       "retries": 3,
       "pollIntervalMs": 50
@@ -236,7 +266,7 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "id": "mb_rtu_1",
       "name": "变频器总线",
       "protocol": "modbusRtu",
-      "role": "master",
+      "mode": "master",
       "serial": {
         "port": "COM3",
         "baudRate": 19200,
@@ -252,7 +282,7 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "id": "ecat_1",
       "name": "伺服总线",
       "protocol": "ethercat",
-      "role": "master",
+      "mode": "master",
       "interface": { "name": "eth1" },
       "cycleMs": 2,
       "distributedClock": true
@@ -264,8 +294,6 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "task": "MainTask",
       "instance": "instance_Main",
       "point": "cpu_main/di_16.ch0",
-      "dataType": "BOOL",
-      "direction": "input",
       "invert": false
     },
     {
@@ -273,8 +301,6 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "task": "MainTask",
       "instance": "instance_Main",
       "point": "cpu_main/ai_8.ch0",
-      "dataType": "INT",
-      "direction": "input",
       "scale": 0.01,
       "unit": "MPa"
     },
@@ -283,18 +309,20 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "task": "MainTask",
       "instance": "instance_Main",
       "point": "vfd_1/freq_set",
-      "dataType": "UINT16",
-      "direction": "output",
       "scale": 100,
       "unit": "Hz"
+    },
+    {
+      "variable": "RunLamp",
+      "task": "MainTask",
+      "instance": "instance_Main",
+      "point": "rio_1/do0"
     },
     {
       "variable": "ServoControlWord",
       "task": "FastTask",
       "instance": "instance_FastLoop",
-      "point": "servo_1/control_word",
-      "dataType": "UINT16",
-      "direction": "output"
+      "point": "servo_1/control_word"
     }
   ]
 }
@@ -451,7 +479,7 @@ source == name + ".st"
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `id` | 是 | 点位标识，设备内唯一 |
-| `address` | 是 | 本地 IEC 地址字符串或远程协议地址对象 |
+| `address` | 是 | 带 `kind` 判别字段的本地或远程地址对象 |
 | `direction` | 是 | `input` 或 `output` |
 | `dataType` | 是 | IEC 变量类型 |
 | `module` | 否 | 所属模块 id |
@@ -459,34 +487,39 @@ source == name + ".st"
 | `range` | 否 | 量程 |
 | `description` | 否 | 展示说明 |
 
-本地点位地址直接使用 IEC 地址字符串：
+本地点位使用 `direct` 地址对象：
 
 ```json
-"%IX0.0"
+{
+  "kind": "direct",
+  "address": "%IX0.0"
+}
 ```
 
-远程协议地址使用对象：
+远程点位使用 `protocol` 地址对象：
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `kind` | 是 | 固定为 `protocol` |
 | `networkId` | 是 | 引用 `networks[].id` |
-| `unitId` | Modbus 从站需要 | Modbus 站号 |
-| `slaveIndex` | EtherCAT 从站需要 | EtherCAT 从站序号 |
 | `area` | Modbus 需要 | `coil`、`discreteInput`、`holdingRegister`、`inputRegister` |
 | `offset` | Modbus 需要 | 寄存器或线圈偏移 |
 | `index` | EtherCAT 对象需要 | 对象字典索引，如 `0x6040` |
 | `subIndex` | EtherCAT 对象需要 | 对象字典子索引 |
-| `dataType` | 是 | 协议侧数据类型 |
+| `wireType` | 是 | 协议线上使用的数据类型或编码 |
+
+`points[].dataType` 是 PLC 逻辑点位类型，`address.wireType` 是协议传输类型。两者允许不同，例如寄存器以 `UINT16` 传输，再按缩放规则提供为 `REAL`。适配器必须验证转换是否受支持。
 
 ### 5.4 Connection
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `networkId` | 是 | 引用 `networks[].id` |
-| `role` | 是 | `master` 或 `slave` |
+| `endpoint` | TCP 对端需要 | `{ host, port }`，描述这台设备自己的网络端点 |
 | `unitId` | Modbus 从站需要 | Modbus 站号 |
 | `slaveIndex` | EtherCAT 从站需要 | EtherCAT 从站序号 |
+
+连接的对端角色由 Network 的本地 `mode` 反推，不重复保存。站号、从站序号和 TCP 端点只保存在 connection 中，不在每个 Point 的 address 中重复。Point 通过 `networkId` 找到所属设备上唯一的 connection，再取得这些设备级参数。
 
 ## 6. networks
 
@@ -497,7 +530,7 @@ source == name + ".st"
 | `id` | 是 | 网络唯一标识 |
 | `name` | 否 | 展示名 |
 | `protocol` | 是 | `modbusTcp`、`modbusRtu`、`ethercat`、`opcUa` 或 `profinet` |
-| `role` | 是 | `master` 或 `slave` |
+| `mode` | 是 | 本地控制器在该网络中的模式，`master` 或 `slave` |
 | `timeoutMs` | 否 | 单次请求超时 |
 | `retries` | 否 | 重试次数 |
 | `pollIntervalMs` | 否 | 主站轮询间隔 |
@@ -508,12 +541,11 @@ source == name + ".st"
 | --- | --- | --- |
 | `interface` | TCP、EtherCAT、Profinet | `name` 必填，`ip`、`netmask`、`gateway` 可选 |
 | `serial` | Modbus RTU | `port`、`baudRate`、`dataBits`、`parity`、`stopBits` |
-| `host` | Modbus TCP、OPC UA | 对端地址 |
-| `port` | Modbus TCP、OPC UA | 对端端口 |
+| `listenPort` | TCP slave/server | 本地监听端口；master/client 的远程端点写在设备 connection 中 |
 | `cycleMs` | EtherCAT | 总线周期，毫秒 |
 | `distributedClock` | EtherCAT | 是否启用分布式时钟 |
 
-设备归属不在网络里重复保存。设备通过 `connections` 声明自己接入哪条网络。
+Network 保存本地接口和共享通信参数。设备通过 `connections` 声明自己接入哪条网络，并保存该设备独有的 IP、端口、站号或从站序号。这样同一条 Modbus TCP 主站网络可以连接多台不同 IP 的设备。
 
 ## 7. ioMappings
 
@@ -523,17 +555,15 @@ source == name + ".st"
 | `task` | 是 | Task 名 |
 | `instance` | 是 | PROGRAM 实例名 |
 | `point` | 是 | `<deviceId>/<pointId>` |
-| `dataType` | 是 | ST 变量类型 |
-| `direction` | 是 | `input` 或 `output` |
 | `scale` | 否 | 原始值到工程值的缩放系数 |
 | `unit` | 否 | 工程单位 |
 | `invert` | 否 | BOOL 是否取反，默认 false |
 
-`ioMappings` 同时保存本地点和远程点，但适配器必须按点位地址类型走不同通道。
+`ioMappings` 同时保存本地点和远程点，但适配器必须按点位地址类型走不同通道。映射不重复保存 `dataType` 和 `direction`：变量类型从 ST 声明读取，点位类型和方向从 `devices[].points[]` 读取，审计器负责检查两边是否兼容。
 
 ### 7.1 本地点
 
-本地点的 `devices[].points[].address` 是 `%IX`、`%QX`、`%IW` 等 IEC 直接地址。适配器将映射生成到 `VAR_CONFIG`：
+本地点的 `devices[].points[].address.address` 是 `%IX`、`%QX`、`%IW` 等 IEC 直接地址。适配器将映射生成到 `VAR_CONFIG`：
 
 ```text
 VAR_CONFIG
@@ -562,6 +592,10 @@ END_VAR
 - `resources[].deviceId` 必须引用存在的 `devices[].id`；
 - `instances[].pou` 必须引用 `pouType: "program"` 的 POU；
 - `connections[].networkId` 和协议地址的 `networkId` 必须引用存在的网络；
+- 协议地址的 `networkId` 必须在该 Point 所属设备的 connections 中恰好匹配一项；
+- Modbus TCP master 网络上的每台远程设备必须在 connection 中提供 `endpoint`；
+- TCP slave/server 网络必须提供本地 `listenPort`；
+- `unitId`、`slaveIndex` 和 `endpoint` 必须从匹配的 connection 读取，Point 地址不得重复保存；
 - `ioMappings[].task` 和 `instance` 必须能定位到唯一实例；
 - `ioMappings[].point` 中的设备和点位必须存在；
 - `ioMappings[].variable` 必须在实例对应的 PROGRAM 中声明；
@@ -571,10 +605,12 @@ END_VAR
 
 - 设备 id、网络 id、POU 名、Task 名和实例名按各自作用域唯一；
 - 同一设备内模块 id、槽位号和点位 id 唯一；
+- 同一设备内每个 `networkId` 最多对应一条 connection；
 - 同一个输出点不能映射给多个变量；
 - 输入点允许多个变量只读，但应给出重复映射提示；
 - 本地 IEC 地址不能发生位宽重叠；
-- 同一 Modbus 网络内 `unitId` 唯一，同一 EtherCAT 网络内 `slaveIndex` 唯一。
+- 同一 Modbus RTU 网络内 `unitId` 唯一，同一 EtherCAT 网络内 `slaveIndex` 唯一；
+- Modbus TCP 连接按 `endpoint.host`、`endpoint.port` 和 `unitId` 的组合唯一。
 
 ### 8.4 调度和运行时
 
@@ -642,21 +678,24 @@ export interface PlcModule {
   resolutionBits?: number;
 }
 
+export interface PlcDirectAddress {
+  kind: 'direct';
+  address: string;
+}
+
 export interface PlcProtocolAddress {
   kind: 'protocol';
   networkId: string;
-  unitId?: number;
-  slaveIndex?: number;
   area?: 'coil' | 'discreteInput' | 'holdingRegister' | 'inputRegister';
   offset?: number;
   index?: string;
   subIndex?: number;
-  dataType: string;
+  wireType: string;
 }
 
 export interface PlcPoint {
   id: string;
-  address: string | PlcProtocolAddress;
+  address: PlcDirectAddress | PlcProtocolAddress;
   direction: PlcPointDirection;
   dataType: string;
   module?: string;
@@ -667,7 +706,7 @@ export interface PlcPoint {
 
 export interface PlcDeviceConnection {
   networkId: string;
-  role: 'master' | 'slave';
+  endpoint?: { host: string; port: number };
   unitId?: number;
   slaveIndex?: number;
 }
@@ -692,7 +731,7 @@ export interface PlcNetwork {
   id: string;
   name?: string;
   protocol: PlcNetworkProtocol;
-  role: 'master' | 'slave';
+  mode: 'master' | 'slave';
   interface?: { name: string; ip?: string; netmask?: string; gateway?: string };
   serial?: {
     port: string;
@@ -701,8 +740,7 @@ export interface PlcNetwork {
     parity: 'none' | 'even' | 'odd';
     stopBits: 1 | 2;
   };
-  host?: string;
-  port?: number;
+  listenPort?: number;
   timeoutMs?: number;
   retries?: number;
   pollIntervalMs?: number;
@@ -715,8 +753,6 @@ export interface PlcIoMapping {
   task: string;
   instance: string;
   point: string;
-  dataType: string;
-  direction: PlcPointDirection;
   scale?: number;
   unit?: string;
   invert?: boolean;
@@ -745,6 +781,8 @@ v2 不是 devUni 的 `plc_config.json`。适配器按下表转换：
 | 本地 `ioMappings` | 生成 IEC `VAR_CONFIG` |
 | 远程 `ioMappings` | 生成设备变量映射或 `var_mapped` |
 | `devices`、`networks` | 生成 `device_tree` 和协议运行时配置 |
+| `connections[].endpoint` | 写入 `device_tree[].config_file` 指向的独立 TCP 协议配置文件 |
+| `connections[].unitId/slaveIndex` | 写入对应设备的 Modbus 或 EtherCAT 配置 |
 
 devUni 当前固定生成：
 
