@@ -27,50 +27,38 @@ if (
 }
 
 const config = {
-  schemaVersion: 1,
-  configuration: {
-    name: 'CONFIG_IEC',
-    resources: [
-      {
-        name: 'resource_Main',
-        target: 'PLC',
-        tasks: [
+  schemaVersion: 2,
+  tasks: [
           {
             name: 'MainTask',
+            deviceId: 'plc',
             type: 'cyclic',
             periodMs: 20,
             priority: 1,
-            cpuCore: 1,
-            programs: [
-              {
-                instanceName: 'instance_Main',
-                typeName: 'MainProgram',
-                source: 'src/Main.st',
-              },
-            ],
+            cpuCore: 0,
+            instances: [{ name: 'instance_Main', pou: 'MainProgram' }],
           },
           {
             name: 'SecondaryTask',
+            deviceId: 'plc',
             type: 'cyclic',
             periodMs: 100,
             priority: 2,
-            cpuCore: 1,
-            programs: [
-              {
-                instanceName: 'instance_Secondary',
-                typeName: 'Secondary',
-                source: 'src/Other.st',
-              },
-            ],
+            cpuCore: 0,
+            instances: [{ name: 'instance_Secondary', pou: 'Secondary' }],
           },
-        ],
-      },
-    ],
-  },
+  ],
+  pous: [
+    { name: 'MainProgram', pouType: 'program', source: 'src/MainProgram.st' },
+    { name: 'Secondary', pouType: 'program', source: 'src/Secondary.st' },
+  ],
+  devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+  networks: [],
+  ioMappings: [],
 };
 
 let inspection = inspectPlcProgramBindings(config, {
-  source: 'src/Main.st',
+  source: 'src/MainProgram.st',
   text: source,
 });
 if (
@@ -92,14 +80,10 @@ if (inspection.resolutions[0]?.status !== 'unbound') {
 }
 
 const duplicated = structuredClone(config);
-duplicated.configuration.resources[0].tasks[1].programs[0].source = 'src/Main.st';
-duplicated.configuration.resources[0].tasks[0].programs.push({
-  instanceName: 'instance_SecondaryDuplicate',
-  typeName: 'Secondary',
-  source: 'src/Main.st',
-});
+duplicated.pous[1].source = 'src/MainProgram.st';
+duplicated.tasks[0].instances.push({ name: 'instance_SecondaryDuplicate', pou: 'Secondary' });
 inspection = inspectPlcProgramBindings(duplicated, {
-  source: 'src/Main.st',
+  source: 'src/MainProgram.st',
   text: 'PROGRAM Secondary\nEND_PROGRAM',
 });
 if (inspection.resolutions[0]?.status !== 'ambiguous') {
@@ -107,7 +91,7 @@ if (inspection.resolutions[0]?.status !== 'ambiguous') {
 }
 
 const taskBindings = taskProgramBindings(config, 'MainTask');
-if (taskBindings.length !== 1 || taskBindings[0].binding.instanceName !== 'instance_Main') {
+if (taskBindings.length !== 1 || taskBindings[0].instance.name !== 'instance_Main') {
   throw new Error('任务程序绑定查询失败');
 }
 

@@ -1,6 +1,6 @@
 # plc-runtime.json v2 格式
 
-状态：格式提案，尚未实现。
+状态：已实现。运行时校验、任务组态写入、POU 绑定审计和 matiec 临时配置均使用本格式；旧版 v1 可读取并在下次保存时迁移为 v2。
 
 ## 1. 定位和边界
 
@@ -769,7 +769,7 @@ start.exe -i <compileDir>
 
 ## 12. 版本和兼容策略
 
-- v2 文件必须包含 `tasks`、`pous`、`devices`、`networks`、`ioMappings`；没有设备、网络或映射时写空数组；
+- v2 文件必须包含 `tasks`、`pous`、`devices`、`networks`、`ioMappings`；Task 引用的本地设备必须存在，没有网络或映射时写空数组；
 - `runtimeOverrides` 可选，迁移和普通 Agent 生成流程不得为了凑字段而添加；
 - v1 读取后可迁移为 v2：将所有 Resource 下的 Task 展平到顶层，并把原 Resource 的目标设备迁移为 `task.deviceId`；
 - v1 迁移必须显式补齐 `pous`、`devices`、`networks` 和 `ioMappings`；

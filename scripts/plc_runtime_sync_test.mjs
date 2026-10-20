@@ -45,13 +45,30 @@ function clarification(select) {
     throw new Error('missing config did not create a 100ms task plan');
   }
   await plan.commit();
-  const config = await readPlcRuntimeConfig(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME));
-  const task = config?.configuration.resources[0].tasks[0];
+  const rawConfig = JSON.parse(await fs.readFile(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME), 'utf8'));
   if (
+    rawConfig.schemaVersion !== 2 ||
+    rawConfig.configuration !== undefined ||
+    rawConfig.runtimeOverrides !== undefined ||
+    !Array.isArray(rawConfig.tasks) ||
+    !Array.isArray(rawConfig.pous) ||
+    !Array.isArray(rawConfig.devices) ||
+    !Array.isArray(rawConfig.networks) ||
+    !Array.isArray(rawConfig.ioMappings)
+  ) {
+    throw new Error('任务组态弹窗没有写出完整的 v2 顶层结构');
+  }
+  const config = await readPlcRuntimeConfig(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME));
+  const task = config?.tasks[0];
+  if (
+    config?.schemaVersion !== 2 ||
     task?.name !== 'SlowMonitorTask' ||
     task.periodMs !== 100 ||
-    task.programs[0].typeName !== 'Pump' ||
-    task.programs[0].source !== 'src/Pump.st'
+    task.instances[0].pou !== 'Pump' ||
+    config.pous[0].source !== 'src/Pump.st' ||
+    config.networks.length !== 0 ||
+    config.ioMappings.length !== 0 ||
+    'runtimeOverrides' in config
   ) {
     throw new Error('created plc-runtime.json does not contain expected task binding');
   }
@@ -107,7 +124,7 @@ function clarification(select) {
   }
   await plan.commit();
   const config = await readPlcRuntimeConfig(path.join(suggestionWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME));
-  const suggestedTask = config?.configuration.resources[0].tasks[0];
+  const suggestedTask = config?.tasks[0];
   if (suggestedTask?.name !== 'MainControlTask' || suggestedTask.periodMs !== 20) {
     throw new Error('selected model task suggestion was not persisted');
   }
@@ -116,29 +133,23 @@ function clarification(select) {
 {
   const otherWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-sync-bind-test-'));
   await writePlcRuntimeConfig(path.join(otherWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME), {
-    schemaVersion: 1,
-    configuration: {
-      name: 'CONFIG_IEC',
-      resources: [{
-        name: 'resource_MainTask',
-        target: 'PLC',
-        tasks: [{
+    schemaVersion: 2,
+    tasks: [{
           name: 'MainTask',
+          deviceId: 'plc',
           type: 'cyclic',
           periodMs: 20,
           priority: 1,
-          cpuCore: 1,
-          programs: [{
-            instanceName: 'instance_Existing',
-            typeName: 'Existing',
-            source: 'src/Existing.st',
-          }],
-        }],
-      }],
-    },
+          cpuCore: 0,
+          instances: [{ name: 'instance_Existing', pou: 'Existing' }],
+    }],
+    pous: [{ name: 'Existing', pouType: 'program', source: 'src/Existing.st' }],
+    devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+    networks: [],
+    ioMappings: [],
   });
   const fake = clarification((request) => {
-    const bind = request.options.find((item) => item.id === 'bind:resource_MainTask:MainTask');
+    const bind = request.options.find((item) => item.id === 'bind:MainTask');
     if (!bind || bind.label !== '绑定到 MainTask (20 ms)') {
       throw new Error('existing task option did not preserve its current period');
     }
@@ -155,8 +166,11 @@ function clarification(select) {
   }
   await plan.commit();
   const config = await readPlcRuntimeConfig(path.join(otherWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME));
-  const programs = config?.configuration.resources[0].tasks[0].programs ?? [];
-  if (!programs.some((item) => item.typeName === 'NewProgram' && item.source === 'src/NewProgram.st')) {
+  const instances = config?.tasks[0].instances ?? [];
+  if (
+    !instances.some((item) => item.pou === 'NewProgram') ||
+    !config?.pous.some((item) => item.name === 'NewProgram' && item.source === 'src/NewProgram.st')
+  ) {
     throw new Error('program was not added to the selected existing task');
   }
 }

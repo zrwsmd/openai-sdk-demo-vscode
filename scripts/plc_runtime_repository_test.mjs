@@ -18,43 +18,23 @@ if (repository.getSnapshot()?.status !== 'missing') {
 }
 
 const config = {
-  schemaVersion: 1,
-  configuration: {
-    name: 'CONFIG_IEC',
-    resources: [
-      {
-        name: 'resource_MainTask',
-        target: 'PLC',
-        tasks: [
-          {
-            name: 'MainTask',
-            type: 'cyclic',
-            periodMs: 20,
-            priority: 1,
-            cpuCore: 1,
-            programs: [
-              {
-                instanceName: 'instance_Main',
-                typeName: 'Main',
-                source: 'src/Main.st',
-              },
-            ],
-          },
-        ],
-      },
-    ],
-  },
+  schemaVersion: 2,
+  tasks: [{ name: 'MainTask', deviceId: 'plc', type: 'cyclic', periodMs: 20, priority: 1, cpuCore: 0, instances: [{ name: 'instance_Main', pou: 'Main' }] }],
+  pous: [{ name: 'Main', pouType: 'program', source: 'src/Main.st' }],
+  devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+  networks: [],
+  ioMappings: [],
 };
 
 const saved = await repository.save(config);
-if (saved.status !== 'ready' || saved.config.configuration.name !== 'CONFIG_IEC') {
+if (saved.status !== 'ready' || saved.config.schemaVersion !== 2) {
   throw new Error('保存后的仓库状态错误');
 }
 
 const ready = await repository.refresh();
 if (
   ready.status !== 'ready' ||
-  ready.config.configuration.resources[0].tasks[0].periodMs !== 20
+  ready.config.tasks[0].periodMs !== 20
 ) {
   throw new Error('有效配置刷新失败');
 }
@@ -78,13 +58,13 @@ if (!assertFailed) throw new Error('损坏配置不应被 assertReady 静默放�
 
 await fs.writeFile(
   repository.filePath,
-  JSON.stringify({ schemaVersion: 1, configuration: { name: 'BROKEN', resources: [] } }),
+  JSON.stringify({ schemaVersion: 2, tasks: [], pous: [], devices: [], networks: [], ioMappings: [] }),
   'utf8',
 );
 const invalidSchema = await repository.refresh();
 if (
   invalidSchema.status !== 'invalid' ||
-  !invalidSchema.error.message.includes('resources')
+  !invalidSchema.error.message.includes('tasks')
 ) {
   throw new Error('schema 错误没有被识别为 invalid');
 }

@@ -4,8 +4,9 @@ import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
   validatePlcRuntimeConfig,
-  type PlcProgramBinding,
+  type PlcPouConfig,
   type PlcRuntimeConfig,
+  type PlcTaskInstance,
 } from './plcRuntimeConfig';
 import {
   createPlcRuntimeConfigRepository,
@@ -42,7 +43,7 @@ export interface PlcRuntimeAuditIssue {
   message: string;
   source?: string;
   programName?: string;
-  resourceName?: string;
+  deviceId?: string;
   taskName?: string;
   instanceName?: string;
   details?: string;
@@ -85,15 +86,13 @@ export interface InitialPlcRuntimeProgram {
   source: string;
   programName: string;
   instanceName?: string;
-  retain?: boolean;
 }
 
 export interface CreateInitialPlcRuntimeConfigDraftOptions {
   programs: readonly InitialPlcRuntimeProgram[];
   periodMs: number;
-  configurationName?: string;
-  resourceName?: string;
-  target?: string;
+  deviceId?: string;
+  deviceModel?: string;
   taskName?: string;
   priority?: number;
   cpuCore?: number;
@@ -212,7 +211,7 @@ function issueFromResolution(
       programName,
       message: `PROGRAM ${programName} 已在其他源文件绑定，当前文件没有唯一任务绑定。`,
       details: resolution.typeMatches
-        .map((match) => `${match.resourceName}/${match.taskName}: ${match.binding.source}`)
+        .map((match) => `${match.deviceId}/${match.taskName}: ${match.pou.source}`)
         .join('; '),
     };
   }
@@ -226,16 +225,17 @@ function issueFromResolution(
 }
 
 function allBindings(config: PlcRuntimeConfig): Array<{
-  resourceName: string;
+  deviceId: string;
   taskName: string;
-  binding: PlcProgramBinding;
+  instance: PlcTaskInstance;
+  pou: PlcPouConfig;
 }> {
-  const result: Array<{ resourceName: string; taskName: string; binding: PlcProgramBinding }> = [];
-  for (const resource of config.configuration.resources) {
-    for (const task of resource.tasks) {
-      for (const binding of task.programs) {
-        result.push({ resourceName: resource.name, taskName: task.name, binding });
-      }
+  const result: Array<{ deviceId: string; taskName: string; instance: PlcTaskInstance; pou: PlcPouConfig }> = [];
+  const pous = new Map(config.pous.map((pou) => [pou.name.toLocaleUpperCase(), pou]));
+  for (const task of config.tasks) {
+    for (const instance of task.instances) {
+      const pou = pous.get(instance.pou.toLocaleUpperCase());
+      if (pou) result.push({ deviceId: task.deviceId, taskName: task.name, instance, pou });
     }
   }
   return result;
@@ -247,15 +247,15 @@ function bindingIssues(
 ): PlcRuntimeAuditIssue[] {
   const fileBySource = new Map(files.map((file) => [sourceKey(file.source), file]));
   const issues: PlcRuntimeAuditIssue[] = [];
-  for (const { resourceName, taskName, binding } of allBindings(config)) {
-    const source = normalizeSource(binding.source);
+  for (const { deviceId, taskName, instance, pou } of allBindings(config)) {
+    const source = normalizeSource(pou.source);
     const file = fileBySource.get(sourceKey(source));
     const base = {
       source,
-      resourceName,
+      deviceId,
       taskName,
-      instanceName: binding.instanceName,
-      programName: binding.typeName,
+      instanceName: instance.name,
+      programName: pou.name,
     };
     if (!file) {
       issues.push({
@@ -276,13 +276,13 @@ function bindingIssues(
       continue;
     }
     if (!file.declarations.some(
-      (declaration) => declaration.name.toLocaleUpperCase() === binding.typeName.toLocaleUpperCase(),
+      (declaration) => declaration.name.toLocaleUpperCase() === pou.name.toLocaleUpperCase(),
     )) {
       issues.push({
         ...base,
         code: 'binding_type_missing',
         severity: 'error',
-        message: `任务 ${taskName} 绑定的源文件没有 PROGRAM ${binding.typeName}。`,
+        message: `任务 ${taskName} 绑定的源文件没有 PROGRAM ${pou.name}。`,
         details: `当前声明: ${file.declarations.map((item) => item.name).join(', ')}`,
       });
     }
@@ -292,17 +292,15 @@ function bindingIssues(
 
 function eventTaskIssues(config: PlcRuntimeConfig): PlcRuntimeAuditIssue[] {
   const issues: PlcRuntimeAuditIssue[] = [];
-  for (const resource of config.configuration.resources) {
-    for (const task of resource.tasks) {
+  for (const task of config.tasks) {
       if (task.type !== 'event') continue;
       issues.push({
         code: 'event_task_runtime_only',
         severity: 'warning',
-        resourceName: resource.name,
+        deviceId: task.deviceId,
         taskName: task.name,
         message: `事件任务 ${task.name} 需要运行时触发适配，第一版不会生成 matiec cyclic TASK。`,
       });
-    }
   }
   return issues;
 }
@@ -422,28 +420,35 @@ export function createInitialPlcRuntimeConfigDraft(
     throw new PlcRuntimeConfigError('periodMs: 必须是大于 0 的有限数字');
   }
   const usedNames = new Set<string>();
+  const pous = options.programs.map((program) => ({
+    name: program.programName,
+    pouType: 'program' as const,
+    source: normalizeSource(program.source),
+  }));
   const config = {
     schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
-    configuration: {
-      name: options.configurationName ?? 'CONFIG_IEC',
-      resources: [{
-        name: options.resourceName ?? 'resource_MainTask',
-        target: options.target ?? 'PLC',
-        tasks: [{
+    tasks: [{
           name: options.taskName ?? 'MainTask',
+          deviceId: options.deviceId ?? 'plc',
           type: 'cyclic',
           periodMs: options.periodMs,
           priority: options.priority ?? 1,
-          cpuCore: options.cpuCore ?? 1,
-          programs: options.programs.map((program) => ({
-            instanceName: program.instanceName ?? uniqueInstanceName(program.programName, usedNames),
-            typeName: program.programName,
-            source: normalizeSource(program.source),
-            ...(program.retain === undefined ? {} : { retain: program.retain }),
+          cpuCore: options.cpuCore ?? 0,
+          instances: options.programs.map((program) => ({
+            name: program.instanceName ?? uniqueInstanceName(program.programName, usedNames),
+            pou: program.programName,
           })),
-        }],
-      }],
-    },
+    }],
+    pous,
+    devices: [{
+      id: options.deviceId ?? 'plc',
+      role: 'local',
+      model: options.deviceModel ?? 'PLC',
+      points: [],
+      connections: [],
+    }],
+    networks: [],
+    ioMappings: [],
   };
   return validatePlcRuntimeConfig(config);
 }

@@ -158,8 +158,8 @@ compilePlcProject({
 
 适配器读取 v2 和 .st 文件，按以下规则转换：
 
-- configuration.name -> configuration.configuration_name。
-- configuration.resources[].tasks[] -> 每个 Task 展平为一个 devUni resources[] 条目。
+- 适配器固定生成 configuration.configuration_name = CONFIG_IEC。
+- 顶层 tasks[] -> 每个 Task 生成一个 devUni resources[] 条目。
 - task.name/type/priority/cpuCore -> task_name/task_type/priority/cpu_core。
 - task.periodMs -> interval，单位从毫秒换算成纳秒。
 - instances[].name/pou -> instances[].name/type。
@@ -167,7 +167,7 @@ compilePlcProject({
 - devices 和 networks -> device_tree 及 EtherCAT、Modbus 等协议专用配置。
 - ioMappings 中的本机点位 -> VAR_CONFIG 或 resources[].var_mapped。
 - ioMappings 中的远程点位 -> PLC Runtime 的设备驱动通道配置。
-- devices[].runtime.adapter/profile -> 选择 devUni 适配器、交叉编译工具链和 Runtime ABI。
+- tasks[].deviceId 与 devices[] -> 选择目标设备配置和适配器；当前 devUni 适配固定生成 resource_on = plc。
 
 转换后生成：
 
@@ -182,7 +182,7 @@ compilePlcProject({
 
 periodMs * 1,000,000 = devUni interval（纳秒）
 
-一个包含多个 Task 的 v2 resource，需要在这一层展平成 devUni 使用的多个 resource。v2 本身仍保留标准的 Resource -> Tasks 层级，不为了适配 devUni 而改成一 Task 一 Resource。
+v2 不保存 Resource 外壳。适配器按 resource_<Task 名> 生成一个 Resource，并把对应 Task 和实例放入其中。
 
 这一步还必须执行目标能力检查。例如目标 profile 不支持 event Task、实例级 retain 或某种网络协议时，应在调用 start.exe 之前明确报错。
 

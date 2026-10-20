@@ -8,41 +8,34 @@ import {
 } from './agent.testbundle.mjs';
 
 const config = {
-  schemaVersion: 1,
-  configuration: {
-    name: 'CONFIG_IEC',
-    resources: [{
-      name: 'resource_MainTask',
-      target: 'PLC',
-      tasks: [
+  schemaVersion: 2,
+  tasks: [
         {
           name: 'FastTask',
+          deviceId: 'plc',
           type: 'cyclic',
           periodMs: 20,
           priority: 0,
           cpuCore: 0,
-          programs: [{
-            instanceName: 'instance_Pump',
-            typeName: 'PumpControl',
-            source: 'src/PumpControl.st',
-          }],
+          instances: [{ name: 'instance_PumpControl', pou: 'PumpControl' }],
         },
         {
           name: 'SlowTask',
+          deviceId: 'plc',
           type: 'cyclic',
           periodMs: 1000,
           priority: 2,
           cpuCore: 1,
-          programs: [{
-            instanceName: 'instance_Log',
-            typeName: 'DataLogger',
-            source: 'src/DataLogger.st',
-            retain: true,
-          }],
+          instances: [{ name: 'instance_DataLogger', pou: 'DataLogger' }],
         },
-      ],
-    }],
-  },
+  ],
+  pous: [
+    { name: 'PumpControl', pouType: 'program', source: 'src/PumpControl.st' },
+    { name: 'DataLogger', pouType: 'program', source: 'src/DataLogger.st' },
+  ],
+  devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+  networks: [],
+  ioMappings: [],
 };
 
 if (iecTimeLiteralFromPeriodMs(20) !== 'T#20ms') {
@@ -54,11 +47,13 @@ if (iecTimeLiteralFromPeriodMs(2.5) !== 'T#2.5ms') {
 
 const expectedConfiguration = [
   'CONFIGURATION CONFIG_IEC',
-  '  RESOURCE resource_MainTask ON PLC',
+  '  RESOURCE resource_FastTask ON plc',
   '    TASK FastTask(INTERVAL := T#20ms, PRIORITY := 0);',
+  '    PROGRAM instance_PumpControl WITH FastTask : PumpControl;',
+  '  END_RESOURCE',
+  '  RESOURCE resource_SlowTask ON plc',
   '    TASK SlowTask(INTERVAL := T#1000ms, PRIORITY := 2);',
-  '    PROGRAM instance_Pump WITH FastTask : PumpControl;',
-  '    PROGRAM RETAIN instance_Log WITH SlowTask : DataLogger;',
+  '    PROGRAM instance_DataLogger WITH SlowTask : DataLogger;',
   '  END_RESOURCE',
   'END_CONFIGURATION',
   '',
@@ -72,8 +67,8 @@ if (rendered !== expectedConfiguration) {
 const deployment = runtimeDeploymentFromConfig(config);
 if (
   deployment.configurationName !== 'CONFIG_IEC' ||
-  deployment.resources[0].tasks[1].cpuCore !== 1 ||
-  deployment.resources[0].tasks[1].programs[0].retain !== true
+  deployment.resources[1].tasks[0].cpuCore !== 1 ||
+  deployment.resources[1].tasks[0].programs[0].source !== 'src/DataLogger.st'
 ) {
   throw new Error('runtime deployment summary lost scheduling metadata');
 }
@@ -95,17 +90,14 @@ if (sourceFiles[0].path !== 'src\\PumpControl.st') {
 }
 
 const eventConfig = structuredClone(config);
-eventConfig.configuration.resources[0].tasks[0] = {
+eventConfig.tasks[0] = {
   name: 'EventTask',
+  deviceId: 'plc',
   type: 'event',
+  periodMs: 100,
   priority: 1,
   cpuCore: 0,
-  trigger: { kind: 'variable', ref: 'StartButton', edge: 'rising' },
-  programs: [{
-    instanceName: 'instance_Event',
-    typeName: 'EventProgram',
-    source: 'src/EventProgram.st',
-  }],
+  instances: [{ name: 'instance_PumpControl', pou: 'PumpControl' }],
 };
 let eventRejected = false;
 try {
@@ -115,14 +107,14 @@ try {
 }
 if (!eventRejected) throw new Error('event task should not be rendered as a cyclic matiec task');
 
-const badTarget = structuredClone(config);
-badTarget.configuration.resources[0].target = 'PLC 1';
-let badTargetRejected = false;
+const badInstance = structuredClone(config);
+badInstance.tasks[0].instances[0].name = 'custom_name';
+let badInstanceRejected = false;
 try {
-  renderMatiecConfiguration(badTarget);
+  renderMatiecConfiguration(badInstance);
 } catch (error) {
-  badTargetRejected = error instanceof PlcRuntimeConfigError && /target/.test(error.message);
+  badInstanceRejected = error instanceof PlcRuntimeConfigError && /instance_PumpControl/.test(error.message);
 }
-if (!badTargetRejected) throw new Error('non-IEC resource target should be rejected by matiec adapter');
+if (!badInstanceRejected) throw new Error('devUni-incompatible instance name should be rejected');
 
 console.log('plc matiec adapter tests passed');

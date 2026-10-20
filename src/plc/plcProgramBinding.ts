@@ -1,6 +1,7 @@
 import type {
-  PlcProgramBinding,
+  PlcPouConfig,
   PlcRuntimeConfig,
+  PlcTaskInstance,
   PlcTaskConfig,
 } from './plcRuntimeConfig';
 
@@ -12,9 +13,10 @@ export interface PlcProgramDeclaration {
 }
 
 export interface PlcProgramBindingMatch {
-  resourceName: string;
+  deviceId: string;
   taskName: string;
-  binding: PlcProgramBinding;
+  instance: PlcTaskInstance;
+  pou: PlcPouConfig;
 }
 
 export type PlcProgramBindingStatus =
@@ -163,15 +165,17 @@ export function extractPlcProgramDeclarations(text: string): PlcProgramDeclarati
 
 function allProgramBindings(config: PlcRuntimeConfig): PlcProgramBindingMatch[] {
   const matches: PlcProgramBindingMatch[] = [];
-  for (const resource of config.configuration.resources) {
-    for (const task of resource.tasks) {
-      for (const binding of task.programs) {
-        matches.push({
-          resourceName: resource.name,
-          taskName: task.name,
-          binding,
-        });
-      }
+  const pous = new Map(config.pous.map((pou) => [nameKey(pou.name), pou]));
+  for (const task of config.tasks) {
+    for (const instance of task.instances) {
+      const pou = pous.get(nameKey(instance.pou));
+      if (!pou) continue;
+      matches.push({
+        deviceId: task.deviceId,
+        taskName: task.name,
+        instance,
+        pou,
+      });
     }
   }
   return matches;
@@ -183,11 +187,11 @@ function matchingBindings(
   source: string,
 ): { typeMatches: PlcProgramBindingMatch[]; matches: PlcProgramBindingMatch[] } {
   const typeMatches = bindings.filter(
-    (item) => nameKey(item.binding.typeName) === nameKey(declaration.name),
+    (item) => nameKey(item.pou.name) === nameKey(declaration.name),
   );
   const currentSource = sourceKey(source);
   const matches = typeMatches.filter(
-    (item) => sourceKey(item.binding.source) === currentSource,
+    (item) => sourceKey(item.pou.source) === currentSource,
   );
   return { typeMatches, matches };
 }
@@ -216,16 +220,18 @@ export function taskProgramBindings(
   taskName: string,
 ): PlcProgramBindingMatch[] {
   const result: PlcProgramBindingMatch[] = [];
-  for (const resource of config.configuration.resources) {
-    for (const task of resource.tasks) {
-      if (task.name !== taskName) continue;
-      for (const binding of task.programs) {
-        result.push({
-          resourceName: resource.name,
-          taskName: task.name,
-          binding,
-        });
-      }
+  const pous = new Map(config.pous.map((pou) => [nameKey(pou.name), pou]));
+  for (const task of config.tasks) {
+    if (task.name !== taskName) continue;
+    for (const instance of task.instances) {
+      const pou = pous.get(nameKey(instance.pou));
+      if (!pou) continue;
+      result.push({
+        deviceId: task.deviceId,
+        taskName: task.name,
+        instance,
+        pou,
+      });
     }
   }
   return result;
@@ -234,11 +240,8 @@ export function taskProgramBindings(
 export function findPlcTask(
   config: PlcRuntimeConfig,
   taskName: string,
-): { resourceName: string; task: PlcTaskConfig } | undefined {
-  for (const resource of config.configuration.resources) {
-    const task = resource.tasks.find((candidate) => candidate.name === taskName);
-    if (task) return { resourceName: resource.name, task };
-  }
-  return undefined;
+): { deviceId: string; task: PlcTaskConfig } | undefined {
+  const task = config.tasks.find((candidate) => candidate.name === taskName);
+  return task ? { deviceId: task.deviceId, task } : undefined;
 }
 

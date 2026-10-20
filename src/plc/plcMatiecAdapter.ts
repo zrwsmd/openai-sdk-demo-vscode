@@ -1,8 +1,6 @@
 import {
   PlcRuntimeConfigError,
   validatePlcRuntimeConfig,
-  type PlcEventTrigger,
-  type PlcProgramBinding,
   type PlcRuntimeConfig,
   type PlcTaskConfig,
 } from './plcRuntimeConfig';
@@ -25,7 +23,6 @@ export interface PlcRuntimeProgramDeployment {
   instanceName: string;
   typeName: string;
   source: string;
-  retain: boolean;
 }
 
 export interface PlcRuntimeTaskDeployment {
@@ -33,8 +30,7 @@ export interface PlcRuntimeTaskDeployment {
   type: PlcTaskConfig['type'];
   priority: number;
   cpuCore: number;
-  periodMs?: number;
-  trigger?: PlcEventTrigger;
+  periodMs: number;
   programs: PlcRuntimeProgramDeployment[];
 }
 
@@ -92,27 +88,23 @@ function renderTask(task: PlcTaskConfig, taskPath: string): string {
   return `    TASK ${task.name}(INTERVAL := ${iecTimeLiteralFromPeriodMs(task.periodMs)}, PRIORITY := ${task.priority});`;
 }
 
-function renderProgram(task: PlcTaskConfig, program: PlcProgramBinding): string {
-  const retain = program.retain ? ' RETAIN' : '';
-  return `    PROGRAM${retain} ${program.instanceName} WITH ${task.name} : ${program.typeName};`;
+function renderProgram(task: PlcTaskConfig, instance: PlcTaskConfig['instances'][number]): string {
+  return `    PROGRAM ${instance.name} WITH ${task.name} : ${instance.pou};`;
 }
 
 export function renderMatiecConfiguration(value: unknown): string {
   const config = validatePlcRuntimeConfig(value);
-  assertIecIdentifier(config.configuration.name, 'configuration.name');
-
-  const lines: string[] = [`CONFIGURATION ${config.configuration.name}`];
-  config.configuration.resources.forEach((resource, resourceIndex) => {
-    const resourcePath = `configuration.resources[${resourceIndex}]`;
-    assertIecIdentifier(resource.target, `${resourcePath}.target`);
-    lines.push(`  RESOURCE ${resource.name} ON ${resource.target}`);
-    resource.tasks.forEach((task, taskIndex) => {
-      lines.push(renderTask(task, `${resourcePath}.tasks[${taskIndex}]`));
-    });
-    for (const task of resource.tasks) {
-      for (const program of task.programs) {
-        lines.push(renderProgram(task, program));
+  const lines: string[] = ['CONFIGURATION CONFIG_IEC'];
+  config.tasks.forEach((task, taskIndex) => {
+    const resourceName = `resource_${task.name}`;
+    assertIecIdentifier(resourceName, `tasks[${taskIndex}].name`);
+    lines.push(`  RESOURCE ${resourceName} ON plc`);
+    lines.push(renderTask(task, `tasks[${taskIndex}]`));
+    for (const instance of task.instances) {
+      if (instance.name !== `instance_${instance.pou}`) {
+        fail(`tasks[${taskIndex}].instances`, `devUni 目标要求实例名为 instance_${instance.pou}`);
       }
+      lines.push(renderProgram(task, instance));
     }
     lines.push('  END_RESOURCE');
   });
@@ -143,25 +135,24 @@ export function createMatiecCompileInputs(
 
 export function runtimeDeploymentFromConfig(value: unknown): PlcRuntimeDeployment {
   const config: PlcRuntimeConfig = validatePlcRuntimeConfig(value);
+  const pous = new Map(config.pous.map((pou) => [pou.name.toLocaleUpperCase(), pou]));
   return {
-    configurationName: config.configuration.name,
-    resources: config.configuration.resources.map((resource) => ({
-      name: resource.name,
-      target: resource.target,
-      tasks: resource.tasks.map((task) => ({
+    configurationName: 'CONFIG_IEC',
+    resources: config.tasks.map((task) => ({
+      name: `resource_${task.name}`,
+      target: 'plc',
+      tasks: [{
         name: task.name,
         type: task.type,
         priority: task.priority,
         cpuCore: task.cpuCore,
-        ...(task.periodMs === undefined ? {} : { periodMs: task.periodMs }),
-        ...(task.trigger === undefined ? {} : { trigger: { ...task.trigger } }),
-        programs: task.programs.map((program) => ({
-          instanceName: program.instanceName,
-          typeName: program.typeName,
-          source: program.source,
-          retain: program.retain === true,
+        periodMs: task.periodMs,
+        programs: task.instances.map((instance) => ({
+          instanceName: instance.name,
+          typeName: instance.pou,
+          source: pous.get(instance.pou.toLocaleUpperCase())?.source ?? '',
         })),
-      })),
+      }],
     })),
   };
 }

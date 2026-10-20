@@ -34,26 +34,20 @@ function issueCodes(report) {
 {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-audit-ready-'));
   await writePlcRuntimeConfig(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME), {
-    schemaVersion: 1,
-    configuration: {
-      name: 'CONFIG_IEC',
-      resources: [{
-        name: 'resource_MainTask',
-        target: 'PLC',
-        tasks: [{
+    schemaVersion: 2,
+    tasks: [{
           name: 'MainTask',
+          deviceId: 'plc',
           type: 'cyclic',
           periodMs: 20,
           priority: 1,
           cpuCore: 0,
-          programs: [{
-            instanceName: 'instance_Pump',
-            typeName: 'Pump',
-            source: 'src/Pump.st',
-          }],
-        }],
-      }],
-    },
+          instances: [{ name: 'instance_Pump', pou: 'Pump' }],
+    }],
+    pous: [{ name: 'Pump', pouType: 'program', source: 'src/Pump.st' }],
+    devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+    networks: [],
+    ioMappings: [],
   });
   const report = await auditPlcRuntimeConfigWorkspace({
     workspaceRoot: workspace,
@@ -71,40 +65,34 @@ function issueCodes(report) {
 {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-audit-mismatch-'));
   await writePlcRuntimeConfig(path.join(workspace, PLC_RUNTIME_CONFIG_FILE_NAME), {
-    schemaVersion: 1,
-    configuration: {
-      name: 'CONFIG_IEC',
-      resources: [{
-        name: 'resource_MainTask',
-        target: 'PLC',
-        tasks: [
+    schemaVersion: 2,
+    tasks: [
           {
             name: 'MainTask',
+            deviceId: 'plc',
             type: 'cyclic',
             periodMs: 100,
             priority: 1,
             cpuCore: 0,
-            programs: [{
-              instanceName: 'instance_Missing',
-              typeName: 'Missing',
-              source: 'src/Missing.st',
-            }],
+            instances: [{ name: 'instance_Missing', pou: 'Missing' }],
           },
           {
             name: 'EventTask',
+            deviceId: 'plc',
             type: 'event',
+            periodMs: 100,
             priority: 2,
             cpuCore: 1,
-            trigger: { kind: 'variable', ref: 'Alarm', edge: 'rising' },
-            programs: [{
-              instanceName: 'instance_Event',
-              typeName: 'EventProgram',
-              source: 'src/EventProgram.st',
-            }],
+            instances: [{ name: 'instance_EventProgram', pou: 'EventProgram' }],
           },
-        ],
-      }],
-    },
+    ],
+    pous: [
+      { name: 'Missing', pouType: 'program', source: 'src/Missing.st' },
+      { name: 'EventProgram', pouType: 'program', source: 'src/EventProgram.st' },
+    ],
+    devices: [{ id: 'plc', role: 'local', model: 'PLC', points: [], connections: [] }],
+    networks: [],
+    ioMappings: [],
   });
   const report = await auditPlcRuntimeConfigWorkspace({
     workspaceRoot: workspace,
@@ -147,14 +135,16 @@ function issueCodes(report) {
     periodMs: 50,
     programs: [
       { source: 'src/Pump.st', programName: 'Pump' },
-      { source: 'src/Pump2.st', programName: 'Pump' },
+      { source: 'src/Pump2.st', programName: 'Pump2' },
     ],
   });
-  const programs = draft.configuration.resources[0].tasks[0].programs;
+  const instances = draft.tasks[0].instances;
   if (
-    draft.configuration.resources[0].tasks[0].periodMs !== 50 ||
-    programs[0].instanceName !== 'instance_Pump' ||
-    programs[1].instanceName !== 'instance_Pump_2'
+    draft.schemaVersion !== 2 ||
+    draft.tasks[0].periodMs !== 50 ||
+    instances[0].name !== 'instance_Pump' ||
+    instances[1].name !== 'instance_Pump2' ||
+    draft.pous[1].source !== 'src/Pump2.st'
   ) {
     throw new Error('initial draft did not create stable task bindings');
   }

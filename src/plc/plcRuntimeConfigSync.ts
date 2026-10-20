@@ -6,7 +6,6 @@ import type { AgentConfig } from '../runtime/agentConfig';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
-  type PlcProgramBinding,
   type PlcRuntimeConfig,
   type PlcTaskConfig,
 } from './plcRuntimeConfig';
@@ -57,7 +56,7 @@ export interface PlcRuntimeConfigSyncPlan {
   programName: string;
   source: string;
   taskName: string;
-  resourceName: string;
+  deviceId: string;
   periodMs?: number;
   commit(): Promise<PlcRuntimeConfig>;
 }
@@ -161,16 +160,14 @@ function uniqueName(base: string, existing: Iterable<string>): string {
 }
 
 function allTaskNames(config: PlcRuntimeConfig | undefined): string[] {
-  return config?.configuration.resources.flatMap((resource) =>
-    resource.tasks.map((task) => task.name),
-  ) ?? [];
+  return config?.tasks.map((task) => task.name) ?? [];
 }
 
-function firstResource(config: PlcRuntimeConfig | undefined): { name: string; target: string } {
-  const resource = config?.configuration.resources[0];
+function firstLocalDevice(config: PlcRuntimeConfig | undefined): { id: string; model: string } {
+  const device = config?.devices.find((candidate) => candidate.role === 'local');
   return {
-    name: resource?.name ?? 'resource_MainTask',
-    target: resource?.target ?? 'PLC',
+    id: device?.id ?? 'plc',
+    model: device?.model ?? 'PLC',
   };
 }
 
@@ -184,13 +181,12 @@ function taskLabel(task: PlcTaskConfig): string {
 type Selection =
   | {
       action: 'bind_program';
-      resourceName: string;
       taskName: string;
     }
   | {
       action: 'create_config' | 'create_task';
-      resourceName: string;
-      target: string;
+      deviceId: string;
+      deviceModel: string;
       taskName: string;
       periodMs: number;
       priority: number;
@@ -207,17 +203,16 @@ function parseSelectionValue(value: unknown): Selection | undefined {
     : value;
   if (!isRecord(parsed) || typeof parsed.action !== 'string') return undefined;
   if (parsed.action === 'bind_program') {
-    if (typeof parsed.resourceName !== 'string' || typeof parsed.taskName !== 'string') return undefined;
+    if (typeof parsed.taskName !== 'string') return undefined;
     return {
       action: 'bind_program',
-      resourceName: parsed.resourceName,
       taskName: parsed.taskName,
     };
   }
   if (parsed.action === 'create_config' || parsed.action === 'create_task') {
     if (
-      typeof parsed.resourceName !== 'string' ||
-      typeof parsed.target !== 'string' ||
+      typeof parsed.deviceId !== 'string' ||
+      typeof parsed.deviceModel !== 'string' ||
       typeof parsed.taskName !== 'string' ||
       typeof parsed.periodMs !== 'number' ||
       typeof parsed.priority !== 'number' ||
@@ -227,8 +222,8 @@ function parseSelectionValue(value: unknown): Selection | undefined {
     }
     return {
       action: parsed.action,
-      resourceName: parsed.resourceName,
-      target: parsed.target,
+      deviceId: parsed.deviceId,
+      deviceModel: parsed.deviceModel,
       taskName: parsed.taskName,
       periodMs: parsed.periodMs,
       priority: parsed.priority,
@@ -405,17 +400,14 @@ function parseCustomSelection(
   if (!periodMs || !Number.isFinite(periodMs) || periodMs <= 0) return undefined;
   const taskName = /(?:task|任务)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
     fallback.taskName;
-  const resourceName = /(?:resource|资源)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
-    fallback.resourceName;
-  const target = /(?:target|plc|目标)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
-    fallback.target;
+  const deviceId = /(?:device|设备)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
+    fallback.deviceId;
   const priority = /(?:priority|优先级)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
   const cpuCore = /(?:cpu|core|核心)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
   return {
     ...fallback,
     taskName,
-    resourceName,
-    target,
+    deviceId,
     periodMs,
     priority: priority ? Number(priority) : fallback.priority,
     cpuCore: cpuCore ? Number(cpuCore) : fallback.cpuCore,
@@ -484,20 +476,15 @@ function normalizeTaskSuggestions(
   return normalized.slice(0, 4);
 }
 
-function createProgramBinding(
+function createTaskInstance(
   task: PlcTaskConfig | undefined,
   programName: string,
-  source: string,
-): PlcProgramBinding {
-  const instanceName = uniqueName(
+): PlcTaskConfig['instances'][number] {
+  const name = uniqueName(
     `instance_${programName}`,
-    task?.programs.map((item) => item.instanceName) ?? [],
+    task?.instances.map((item) => item.name) ?? [],
   );
-  return {
-    instanceName,
-    typeName: programName,
-    source,
-  };
+  return { name, pou: programName };
 }
 
 function cloneConfig(config: PlcRuntimeConfig): PlcRuntimeConfig {
@@ -513,33 +500,37 @@ function applySelection(
   config: PlcRuntimeConfig;
   action: PlcRuntimeConfigSyncPlan['action'];
   taskName: string;
-  resourceName: string;
+  deviceId: string;
   periodMs?: number;
 } {
   if (selection.action === 'create_config') {
     const task: PlcTaskConfig = {
       name: selection.taskName,
+      deviceId: selection.deviceId,
       type: 'cyclic',
       periodMs: selection.periodMs,
       priority: selection.priority,
       cpuCore: selection.cpuCore,
-      programs: [createProgramBinding(undefined, programName, source)],
+      instances: [createTaskInstance(undefined, programName)],
     };
     return {
       action: 'create_config',
       taskName: task.name,
-      resourceName: selection.resourceName,
+      deviceId: selection.deviceId,
       periodMs: task.periodMs,
       config: {
         schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
-        configuration: {
-          name: 'CONFIG_IEC',
-          resources: [{
-            name: selection.resourceName,
-            target: selection.target,
-            tasks: [task],
-          }],
-        },
+        tasks: [task],
+        pous: [{ name: programName, pouType: 'program', source }],
+        devices: [{
+          id: selection.deviceId,
+          role: 'local',
+          model: selection.deviceModel,
+          points: [],
+          connections: [],
+        }],
+        networks: [],
+        ioMappings: [],
       },
     };
   }
@@ -548,36 +539,40 @@ function applySelection(
     throw new PlcRuntimeConfigError('当前没有可更新的 plc-runtime.json。');
   }
   const config = cloneConfig(state.config);
-  const resource = config.configuration.resources.find((item) => item.name === selection.resourceName);
-  if (!resource) throw new PlcRuntimeConfigError(`未找到资源: ${selection.resourceName}`);
+  const existingPou = config.pous.find((item) => item.name.toLocaleUpperCase() === programName.toLocaleUpperCase());
+  if (existingPou && existingPou.source !== source) {
+    throw new PlcRuntimeConfigError(`POU ${programName} 已指向其他源文件: ${existingPou.source}`);
+  }
+  if (!existingPou) config.pous.push({ name: programName, pouType: 'program', source });
 
   if (selection.action === 'bind_program') {
-    const task = resource.tasks.find((item) => item.name === selection.taskName);
+    const task = config.tasks.find((item) => item.name === selection.taskName);
     if (!task) throw new PlcRuntimeConfigError(`未找到任务: ${selection.taskName}`);
-    task.programs.push(createProgramBinding(task, programName, source));
+    task.instances.push(createTaskInstance(task, programName));
     return {
       config,
       action: 'bind_program',
       taskName: task.name,
-      resourceName: resource.name,
+      deviceId: task.deviceId,
       periodMs: task.periodMs,
     };
   }
 
   const task: PlcTaskConfig = {
     name: selection.taskName,
+    deviceId: selection.deviceId,
     type: 'cyclic',
     periodMs: selection.periodMs,
     priority: selection.priority,
     cpuCore: selection.cpuCore,
-    programs: [createProgramBinding(undefined, programName, source)],
+    instances: [createTaskInstance(undefined, programName)],
   };
-  resource.tasks.push(task);
+  config.tasks.push(task);
   return {
     config,
     action: 'create_task',
     taskName: task.name,
-    resourceName: resource.name,
+    deviceId: task.deviceId,
     periodMs: task.periodMs,
   };
 }
@@ -591,17 +586,15 @@ async function optionsForState(
   createFallback: Extract<Selection, { action: 'create_config' | 'create_task' }>;
 }> {
   const config = state.status === 'ready' ? state.config : undefined;
-  const resource = firstResource(config);
+  const device = firstLocalDevice(config);
   const createAction = state.status === 'ready' ? 'create_task' : 'create_config';
   const fallbackSuggestions = defaultTaskSuggestions(config);
-  const existingTasks = config?.configuration.resources.flatMap((candidateResource) =>
-    candidateResource.tasks.map((task) => ({
+  const existingTasks = config?.tasks.map((task) => ({
       name: task.name,
       type: task.type,
       periodMs: task.periodMs,
-      programCount: task.programs.length,
-    })),
-  ) ?? [];
+      programCount: task.instances.length,
+    })) ?? [];
   const suggestionProvider = syncOptions.taskSuggestionProvider ??
     (syncOptions.modelConfig
       ? (input: PlcTaskSuggestionInput, signal?: AbortSignal) =>
@@ -633,32 +626,29 @@ async function optionsForState(
   const firstSuggestion = suggestions[0] ?? fallbackSuggestions[0];
   const createFallback = {
     action: createAction,
-    resourceName: resource.name,
-    target: resource.target,
+    deviceId: device.id,
+    deviceModel: device.model,
     taskName: firstSuggestion.taskName,
     periodMs: firstSuggestion.periodMs,
     priority: 1,
-    cpuCore: 1,
+    cpuCore: 0,
   } satisfies Extract<Selection, { action: 'create_config' | 'create_task' }>;
   const options: PlcClarificationOption[] = [];
   const usingFallbackSuggestions = suggestions === fallbackSuggestions;
 
   if (config) {
-    for (const candidateResource of config.configuration.resources) {
-      for (const task of candidateResource.tasks) {
+    for (const task of config.tasks) {
         options.push({
-          id: `bind:${candidateResource.name}:${task.name}`,
+          id: `bind:${task.name}`,
           label: `绑定到 ${taskLabel(task)}`,
           description:
-            `资源 ${candidateResource.name} / 目标 ${candidateResource.target}` +
-            `；当前已绑定 ${task.programs.length} 个 PROGRAM`,
+            `设备 ${task.deviceId}` +
+            `；当前已绑定 ${task.instances.length} 个 PROGRAM`,
           value: selectionValue({
             action: 'bind_program',
-            resourceName: candidateResource.name,
             taskName: task.name,
           }),
         });
-      }
     }
   }
 
@@ -670,8 +660,8 @@ async function optionsForState(
       id: defaultId,
       label: `创建 ${suggestion.taskName} · ${suggestion.periodMs} ms`,
       description: suggestion.reason
-        ? `${suggestion.reason} 资源 ${resource.name}`
-        : `资源 ${resource.name}`,
+        ? `${suggestion.reason} 设备 ${device.id}`
+        : `设备 ${device.id}`,
       value: selectionValue({
         ...createFallback,
         taskName: suggestion.taskName,
@@ -757,7 +747,7 @@ export async function preparePlcRuntimeConfigSync(
     programName,
     source,
     taskName: applied.taskName,
-    resourceName: applied.resourceName,
+    deviceId: applied.deviceId,
     ...(applied.periodMs === undefined ? {} : { periodMs: applied.periodMs }),
     commit: async () => (await repository.save(applied.config)).config,
   };
