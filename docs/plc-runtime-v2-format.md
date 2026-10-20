@@ -11,7 +11,7 @@
 ```json
 {
   "schemaVersion": 2,
-  "configuration": {},
+  "tasks": [],
   "pous": [],
   "devices": [],
   "networks": [],
@@ -23,11 +23,12 @@
 
 | 部分 | 职责 |
 | --- | --- |
-| `configuration` | 数据区、保持策略、Resource、Task 和程序实例 |
+| `tasks` | Task 调度参数、目标设备和 PROGRAM 实例 |
 | `pous` | POU 名称、类型和对应的 ST 源文件索引 |
 | `devices` | 本地 PLC、扩展模块、远程设备和设备点位 |
 | `networks` | Modbus、EtherCAT 等通信链路参数 |
 | `ioMappings` | ST 变量与本地或远程点位之间的映射 |
+| `runtimeOverrides` | 可选的高级运行时覆盖；普通工程不生成 |
 
 POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VAR`、`VAR RETAIN` 或实现代码。
 
@@ -46,65 +47,41 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
 ```json
 {
   "schemaVersion": 2,
-  "configuration": {
-    "name": "CONFIG_IEC",
-    "dataArea": {
-      "input": 4096,
-      "output": 4096,
-      "memory": 4096
+  "tasks": [
+    {
+      "name": "FastTask",
+      "deviceId": "cpu_main",
+      "type": "cyclic",
+      "periodMs": 5,
+      "priority": 0,
+      "cpuCore": 0,
+      "instances": [
+        { "name": "instance_FastLoop", "pou": "FastLoop" }
+      ]
     },
-    "retainPolicy": {
-      "enabled": false,
-      "intervalMs": 10000
+    {
+      "name": "MainTask",
+      "deviceId": "cpu_main",
+      "type": "cyclic",
+      "periodMs": 20,
+      "priority": 1,
+      "cpuCore": 1,
+      "instances": [
+        { "name": "instance_Main", "pou": "Main" }
+      ]
     },
-    "resources": [
-      {
-        "name": "MainResource",
-        "deviceId": "cpu_main",
-        "tasks": [
-          {
-            "name": "FastTask",
-            "type": "cyclic",
-            "periodMs": 5,
-            "priority": 0,
-            "cpuCore": 0,
-            "instances": [
-              {
-                "name": "instance_FastLoop",
-                "pou": "FastLoop"
-              }
-            ]
-          },
-          {
-            "name": "MainTask",
-            "type": "cyclic",
-            "periodMs": 20,
-            "priority": 1,
-            "cpuCore": 1,
-            "instances": [
-              {
-                "name": "instance_Main",
-                "pou": "Main"
-              }
-            ]
-          },
-          {
-            "name": "EventTask",
-            "type": "event",
-            "periodMs": 100,
-            "priority": 2,
-            "cpuCore": 1,
-            "instances": [
-              {
-                "name": "instance_AlarmHandler",
-                "pou": "AlarmHandler"
-              }
-            ]
-          }
-        ]
-      }
-    ]
-  },
+    {
+      "name": "EventTask",
+      "deviceId": "cpu_main",
+      "type": "event",
+      "periodMs": 100,
+      "priority": 2,
+      "cpuCore": 1,
+      "instances": [
+        { "name": "instance_AlarmHandler", "pou": "AlarmHandler" }
+      ]
+    }
+  ],
   "pous": [
     { "name": "FastLoop", "pouType": "program", "source": "FastLoop.st" },
     { "name": "Main", "pouType": "program", "source": "Main.st" },
@@ -328,61 +305,19 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
 }
 ```
 
-## 3. configuration
-
-### 3.1 基本字段
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `name` | 是 | IEC 配置名，必须是 IEC 标识符 |
-| `dataArea` | 是 | 运行时 I/Q/M 数据区大小 |
-| `retainPolicy` | 是 | 保持变量的运行时持久化策略，不声明哪些变量需要保持 |
-| `resources` | 是 | 逻辑资源和任务清单，至少一个 |
-
-`dataArea` 三个字段均为非负整数，v2 统一以字节表示：
-
-| 字段 | 含义 |
-| --- | --- |
-| `input` | 输入区大小 |
-| `output` | 输出区大小 |
-| `memory` | 内存区大小 |
-
-`retainPolicy`：
-
-| 字段 | 含义 |
-| --- | --- |
-| `enabled` | 是否启用运行时周期持久化 |
-| `intervalMs` | 持久化周期，毫秒；必须大于 0 |
-
-需要保持的变量必须在 ST 源码中使用 `VAR RETAIN` 声明。`retainPolicy` 只控制运行时如何刷新保持区，不能替代源码声明。
-
-### 3.2 Resource
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `name` | 是 | v2 中的逻辑资源名，IEC 标识符 |
-| `deviceId` | 是 | 逻辑资源所属设备，引用 `devices[].id` |
-| `tasks` | 是 | Task 数组，至少一个 |
-
-`name` 和 `deviceId` 是工程模型字段，不保证原样下发到每个目标。devUni 1.0.21 会为每个 Task 单独生成一个资源：
-
-```text
-resource_name = "resource_" + task.name
-resource_on   = "plc"
-```
-
-因此 devUni 适配器不会把 v2 的 `resources[].name` 和 `resources[].deviceId` 原样写入这两个目标字段，但仍使用 `deviceId` 做设备引用、IO 映射和一致性校验。
-
-### 3.3 Task
+## 3. tasks
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `name` | 是 | Task 名，IEC 标识符 |
+| `deviceId` | 是 | Task 运行的本地控制器，引用 `devices[].id` |
 | `type` | 是 | `cyclic` 或 `event` |
 | `periodMs` | 是 | 周期/间隔，毫秒，必须大于 0 |
 | `priority` | 是 | 优先级，0 到 31 |
 | `cpuCore` | 是 | CPU 核编号，非负整数 |
 | `instances` | 是 | 该 Task 调度的 PROGRAM 实例，至少一个 |
+
+Task 直接放在顶层，因为当前 devUni 1.0.21 会把每个 Task 自动展开成一个 Resource。v2 不保存没有独立编辑意义的 Resource 外壳。
 
 v2 不提供 `trigger`。当前 devUni 运行时的 event 任务只接收任务类型和正数 interval，没有可执行的触发器描述。不能把一个不会执行的 `trigger` 字段留在源配置中制造假能力。
 
@@ -393,11 +328,11 @@ v2 cyclic -> devUni build input cycle -> plc_config.task_type cyclic
 v2 event  -> devUni build input event -> plc_config.task_type event
 ```
 
-### 3.4 Instance
+### 3.1 Instance
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `name` | 是 | PROGRAM 实例名，配置内唯一 |
+| `name` | 是 | PROGRAM 实例名，在所属 Task 内唯一 |
 | `pou` | 是 | 被实例化的 PROGRAM POU 名，引用 `pous[].name` |
 
 实例不再保存 `source`。源码位置只由 `pous[].source` 管理。
@@ -412,7 +347,42 @@ instance.name == "instance_" + instance.pou
 
 如果同一个 POU 在多个 Task 中需要多个实例，而目标运行时不支持自定义实例名，适配器必须明确报错，不能静默合并。
 
-## 4. pous
+## 4. runtimeOverrides
+
+`runtimeOverrides` 是可选的高级覆盖项。普通工程和普通自然语言请求不得生成它；缺省值由 `tasks[].deviceId` 指向的设备型号配置和目标适配器提供。
+
+```json
+{
+  "dataArea": {
+    "input": 8192,
+    "output": 8192,
+    "memory": 16384
+  },
+  "retainPolicy": {
+    "enabled": true,
+    "intervalMs": 5000
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `dataArea` | 否 | 覆盖运行时 I/Q/M 数据区大小 |
+| `retainPolicy` | 否 | 覆盖保持变量的运行时持久化策略 |
+
+`dataArea` 的 `input`、`output`、`memory` 均为非负整数，v2 统一以字节表示。覆盖值必须处于设备型号允许的范围内。
+
+`retainPolicy.enabled` 控制是否周期性持久化，`intervalMs` 是毫秒周期且必须大于 0。需要保持哪些变量仍由 ST 源码中的 `VAR RETAIN` 决定；这里不声明变量。
+
+运行时参数的取值顺序是：
+
+1. 用户明确提供且通过设备能力校验的 `runtimeOverrides`；
+2. 设备型号配置中的默认值；
+3. 目标适配器明确声明的固定默认值。
+
+如果三处都没有可用值，适配器必须报错，不能让模型猜测。
+
+## 5. pous
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -438,9 +408,9 @@ source == name + ".st"
 
 例如 `Main` 只能对应工作区根目录下的 `Main.st`，不能写成 `src/Main.st`。这是 devUni 适配限制，不是其他目标适配器必须永久遵守的全局限制。
 
-## 5. devices
+## 6. devices
 
-### 5.1 Device
+### 6.1 Device
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -462,7 +432,7 @@ source == name + ".st"
 | `coreCount` | 否 | CPU 核数，正整数 |
 | `memoryMb` | 否 | 可用内存，MB，正整数 |
 
-### 5.2 Module
+### 6.2 Module
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -474,7 +444,7 @@ source == name + ".st"
 | `range` | 否 | 模拟量量程 |
 | `resolutionBits` | 否 | 模拟量分辨率位数 |
 
-### 5.3 Point
+### 6.3 Point
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -510,7 +480,7 @@ source == name + ".st"
 
 `points[].dataType` 是 PLC 逻辑点位类型，`address.wireType` 是协议传输类型。两者允许不同，例如寄存器以 `UINT16` 传输，再按缩放规则提供为 `REAL`。适配器必须验证转换是否受支持。
 
-### 5.4 Connection
+### 6.4 Connection
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -521,7 +491,7 @@ source == name + ".st"
 
 连接的对端角色由 Network 的本地 `mode` 反推，不重复保存。站号、从站序号和 TCP 端点只保存在 connection 中，不在每个 Point 的 address 中重复。Point 通过 `networkId` 找到所属设备上唯一的 connection，再取得这些设备级参数。
 
-## 6. networks
+## 7. networks
 
 公共字段：
 
@@ -547,7 +517,7 @@ source == name + ".st"
 
 Network 保存本地接口和共享通信参数。设备通过 `connections` 声明自己接入哪条网络，并保存该设备独有的 IP、端口、站号或从站序号。这样同一条 Modbus TCP 主站网络可以连接多台不同 IP 的设备。
 
-## 7. ioMappings
+## 8. ioMappings
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
@@ -561,7 +531,7 @@ Network 保存本地接口和共享通信参数。设备通过 `connections` 声
 
 `ioMappings` 同时保存本地点和远程点，但适配器必须按点位地址类型走不同通道。映射不重复保存 `dataType` 和 `direction`：变量类型从 ST 声明读取，点位类型和方向从 `devices[].points[]` 读取，审计器负责检查两边是否兼容。
 
-### 7.1 本地点
+### 8.1 本地点
 
 本地点的 `devices[].points[].address.address` 是 `%IX`、`%QX`、`%IW` 等 IEC 直接地址。适配器将映射生成到 `VAR_CONFIG`：
 
@@ -572,24 +542,24 @@ VAR_CONFIG
 END_VAR
 ```
 
-### 7.2 远程点
+### 8.2 远程点
 
 远程点的地址是协议对象。适配器不能把 Modbus 寄存器或 EtherCAT 对象硬塞进 `VAR_CONFIG`，而应生成目标运行时的设备变量映射、驱动通道或 `var_mapped`。
 
-## 8. 校验规则
+## 9. 校验规则
 
-### 8.1 命名和源码
+### 9.1 命名和源码
 
-- 所有配置名、资源名、Task 名、实例名和 POU 名必须是 IEC 标识符；
+- 所有 Task 名、实例名和 POU 名必须是 IEC 标识符；
 - `pous[].name` 不得包含点号；
 - POU 名、文件名去掉扩展名后的名称、ST 内声明名必须大小写完全一致；
 - `pous[].source` 必须唯一；
 - devUni 目标下，POU 文件必须位于工作区根目录，不能放入子目录；
 - `instances[].source`、`instances[].retain` 和 `tasks[].trigger` 都是不支持的字段。
 
-### 8.2 引用完整性
+### 9.2 引用完整性
 
-- `resources[].deviceId` 必须引用存在的 `devices[].id`；
+- `tasks[].deviceId` 必须引用 `role: "local"` 的设备；
 - `instances[].pou` 必须引用 `pouType: "program"` 的 POU；
 - `connections[].networkId` 和协议地址的 `networkId` 必须引用存在的网络；
 - 协议地址的 `networkId` 必须在该 Point 所属设备的 connections 中恰好匹配一项；
@@ -601,9 +571,9 @@ END_VAR
 - `ioMappings[].variable` 必须在实例对应的 PROGRAM 中声明；
 - IO 映射的数据类型和方向必须与设备点位兼容。
 
-### 8.3 唯一性和冲突
+### 9.3 唯一性和冲突
 
-- 设备 id、网络 id、POU 名、Task 名和实例名按各自作用域唯一；
+- 设备 id、网络 id、POU 名和 Task 名必须全局唯一，实例名按 Task 唯一；
 - 同一设备内模块 id、槽位号和点位 id 唯一；
 - 同一设备内每个 `networkId` 最多对应一条 connection；
 - 同一个输出点不能映射给多个变量；
@@ -612,17 +582,18 @@ END_VAR
 - 同一 Modbus RTU 网络内 `unitId` 唯一，同一 EtherCAT 网络内 `slaveIndex` 唯一；
 - Modbus TCP 连接按 `endpoint.host`、`endpoint.port` 和 `unitId` 的组合唯一。
 
-### 8.4 调度和运行时
+### 9.4 调度和运行时
 
 - `periodMs` 必须大于 0；
 - `priority` 必须为 0 到 31 的整数；
-- `cpuCore` 必须小于目标设备的 `runtime.coreCount`；
-- `dataArea` 三个值必须为非负整数；
+- `cpuCore` 必须小于 `task.deviceId` 所指设备的 `runtime.coreCount`；
+- `runtimeOverrides.dataArea` 出现时，三个值必须为非负整数并符合设备型号限制；
+- `runtimeOverrides.retainPolicy` 出现时，`intervalMs` 必须大于 0；
 - 数据区必须能容纳全部本地 IEC 地址；
 - devUni 目标下实例名必须为 `instance_<POU名>`；
 - 目标运行时不能执行的任务类型、协议或命名方式必须报错，不能只记录后继续编译。
 
-## 9. TypeScript 类型
+## 10. TypeScript 类型
 
 ```ts
 export type PlcTaskType = 'cyclic' | 'event';
@@ -632,28 +603,22 @@ export type PlcPointDirection = 'input' | 'output';
 
 export interface PlcRuntimeConfigV2 {
   schemaVersion: 2;
-  configuration: PlcConfiguration;
+  runtimeOverrides?: PlcRuntimeOverrides;
+  tasks: PlcTask[];
   pous: PlcPou[];
   devices: PlcDevice[];
   networks: PlcNetwork[];
   ioMappings: PlcIoMapping[];
 }
 
-export interface PlcConfiguration {
-  name: string;
-  dataArea: { input: number; output: number; memory: number };
-  retainPolicy: { enabled: boolean; intervalMs: number };
-  resources: PlcResource[];
-}
-
-export interface PlcResource {
-  name: string;
-  deviceId: string;
-  tasks: PlcTask[];
+export interface PlcRuntimeOverrides {
+  dataArea?: { input: number; output: number; memory: number };
+  retainPolicy?: { enabled: boolean; intervalMs: number };
 }
 
 export interface PlcTask {
   name: string;
+  deviceId: string;
   type: PlcTaskType;
   periodMs: number;
   priority: number;
@@ -759,17 +724,19 @@ export interface PlcIoMapping {
 }
 ```
 
-## 10. devUni 1.0.21 转换规则
+## 11. devUni 1.0.21 转换规则
 
 v2 不是 devUni 的 `plc_config.json`。适配器按下表转换：
 
 | v2 | devUni 输入/输出 |
 | --- | --- |
-| `configuration.name` | `configuration.configuration_name` |
-| `configuration.dataArea` | 顶层 `data_area` |
-| `configuration.retainPolicy.enabled` | `retain.cyclic` |
-| `configuration.retainPolicy.intervalMs` | `retain.interval` |
-| 每个 `tasks[]` | 一个原始 `configuration.resources[]` |
+| 无需源字段 | 固定生成 `configuration.configuration_name: "CONFIG_IEC"` |
+| 设备型号默认值 | 默认生成顶层 `data_area` 和 `retain` |
+| `runtimeOverrides.dataArea` | 通过设备能力校验后覆盖顶层 `data_area` |
+| `runtimeOverrides.retainPolicy.enabled` | 覆盖 `retain.cyclic` |
+| `runtimeOverrides.retainPolicy.intervalMs` | 覆盖 `retain.interval`，单位毫秒 |
+| 每个顶层 `tasks[]` 条目 | 一个原始 `configuration.resources[]` 条目 |
+| `task.deviceId` | 选择本地控制器、设备型号配置和运行时默认值，不写入 `resource_on` |
 | `task.name` | `task_name` |
 | `task.type: cyclic` | 构建输入 `cycle`，原始输出 `task_type: cyclic` |
 | `task.type: event` | 构建输入和原始输出均为 `event` |
@@ -787,6 +754,7 @@ v2 不是 devUni 的 `plc_config.json`。适配器按下表转换：
 devUni 当前固定生成：
 
 ```text
+configuration_name = CONFIG_IEC
 resource_name = resource_<Task名>
 resource_on   = plc
 ```
@@ -799,19 +767,21 @@ start.exe -i <compileDir>
 
 工具链路径、GCC 参数和编译缓存属于本机工具环境，不进入 v2。
 
-## 11. 版本和兼容策略
+## 12. 版本和兼容策略
 
-- v2 文件必须包含五个顶层业务块；没有设备、网络或映射时写空数组；
-- v1 读取后可迁移为 v2，但必须显式补齐 `pous`、`devices`、`networks`、`ioMappings`、`dataArea` 和 `retainPolicy`；
+- v2 文件必须包含 `tasks`、`pous`、`devices`、`networks`、`ioMappings`；没有设备、网络或映射时写空数组；
+- `runtimeOverrides` 可选，迁移和普通 Agent 生成流程不得为了凑字段而添加；
+- v1 读取后可迁移为 v2：将所有 Resource 下的 Task 展平到顶层，并把原 Resource 的目标设备迁移为 `task.deviceId`；
+- v1 迁移必须显式补齐 `pous`、`devices`、`networks` 和 `ioMappings`；
 - v1 的 `programs[].source` 迁移到唯一的 `pous[].source`；
 - v1 的 `programs[].retain` 不迁移为实例字段，应检查 ST 源码中是否存在对应的 `VAR RETAIN`；
 - 大于 2 的版本必须明确报“配置版本过新”，不能按 v2 猜测解析；
 - 解析器应拒绝未知字段，避免拼写错误被静默忽略；
 - 部署产物、编译生成文件和目标私有缓存不得反写进 v2。
 
-## 12. 建议落地顺序
+## 13. 建议落地顺序
 
-1. 实现 v2 类型、严格校验器和 v1 到 v2 的显式迁移。
+1. 实现顶层 Task 结构、可选运行时覆盖、严格校验器和 v1 到 v2 的显式迁移。
 2. 实现 POU 源码扫描与名称、文件名、声明名一致性检查。
 3. 实现 Task、实例、POU 引用和调度参数检查。
 4. 实现本地 IO 地址冲突、类型、方向和数据区范围检查。
