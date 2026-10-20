@@ -125,6 +125,9 @@ npm run test:agent   # SDK 工具链、审批、RunState 跨实例恢复、流�
 ## 打包发布(可选)
 
 ```bash
-npx @vscode/vsce package   # 生成 plc-agent-1.0.0.vsix
+npx @vscode/vsce package --out plc-agent-1.0.0.vsix
 code --install-extension plc-agent-1.0.0.vsix
 ```
+
+项目和界面名称为 `plc-agent` / `PLC Agent`。扩展内部标识继续使用
+`zrwsmd.plc-agent-vscode`，用于兼容已有的模型配置、全局状态和 SecretStorage。
