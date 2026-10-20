@@ -2,6 +2,10 @@
   "name": "plc-agent-vscode",
   "version": "1.0.0",
   "description": "面向 PLC 编程与工控工程任务的 VS Code 智能助手:侧边栏对话、工作流编排、工具调用与流式输出",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zrwsmd/plc-agent.git"
+  },
   "main": "./dist/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run compile",
