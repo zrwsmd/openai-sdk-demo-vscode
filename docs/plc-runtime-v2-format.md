@@ -37,7 +37,7 @@ POU 本身不进这个文件。POU 是 `.st` 源码里的 `PROGRAM` / `FUNCTION_
     "resources": [
       {
         "name": "resource_MainTask",
-        "target": "cpu_main",
+        "deviceId": "cpu_main",
         "tasks": [
           {
             "name": "FastControlTask",
@@ -45,10 +45,10 @@ POU 本身不进这个文件。POU 是 `.st` 源码里的 `PROGRAM` / `FUNCTION_
             "periodMs": 5,
             "priority": 0,
             "cpuCore": 0,
-            "programs": [
+            "instances": [
               {
-                "instanceName": "instance_FastLoop",
-                "typeName": "FastLoop",
+                "name": "instance_FastLoop",
+                "pou": "FastLoop",
                 "source": "src/FastLoop.st"
               }
             ]
@@ -59,15 +59,15 @@ POU 本身不进这个文件。POU 是 `.st` 源码里的 `PROGRAM` / `FUNCTION_
             "periodMs": 20,
             "priority": 1,
             "cpuCore": 1,
-            "programs": [
+            "instances": [
               {
-                "instanceName": "instance_StartStopControl",
-                "typeName": "StartStopControl",
+                "name": "instance_StartStopControl",
+                "pou": "StartStopControl",
                 "source": "src/StartStopControl.st"
               },
               {
-                "instanceName": "instance_PumpControl",
-                "typeName": "PumpControl",
+                "name": "instance_PumpControl",
+                "pou": "PumpControl",
                 "source": "src/PumpControl.st",
                 "retain": true
               }
@@ -83,10 +83,10 @@ POU 本身不进这个文件。POU 是 `.st` 源码里的 `PROGRAM` / `FUNCTION_
               "ref": "instance_StartStopControl.AlarmTrigger",
               "edge": "rising"
             },
-            "programs": [
+            "instances": [
               {
-                "instanceName": "instance_AlarmHandler",
-                "typeName": "AlarmHandler",
+                "name": "instance_AlarmHandler",
+                "pou": "AlarmHandler",
                 "source": "src/AlarmHandler.st"
               }
             ]
@@ -363,17 +363,61 @@ POU 本身不进这个文件。POU 是 `.st` 源码里的 `PROGRAM` / `FUNCTION_
 
 ### 4.1 configuration
 
-字段与 v1 完全一致，只改一处语义：`resources[].target` 从占位字符串 `"PLC"` 改成设备 id，指向 `devices[].id`。
+结构沿用 v1 的三层，改了两处命名：`resources[].target` 改成 `deviceId`，任务下面的 `programs` 改成 `instances`。
 
-`target` 最终会生成 matiec 的 `RESOURCE <name> ON <target>`，所以它必须是 IEC 标识符。设备 id 因此也必须是 IEC 标识符，不能带横杠、点号、中文。
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `configuration.name` | 是 | IEC 配置名，生成 `CONFIGURATION` |
+| `resources[].name` | 是 | 资源名，生成 `RESOURCE` |
+| `resources[].deviceId` | 是 | 资源跑在哪台设备上，指向 `devices[].id` |
+| `resources[].tasks[]` | 是 | 调度单位，至少一个 |
+| `tasks[].name` | 是 | 任务名，生成 `TASK` |
+| `tasks[].type` | 是 | `cyclic` 或 `event` |
+| `tasks[].periodMs` | cyclic 必填 | 周期，毫秒，必须大于 0 |
+| `tasks[].priority` | 是 | 调度优先级，0 到 31 |
+| `tasks[].cpuCore` | 是 | 运行时绑核，不写进 ST |
+| `tasks[].trigger` | event 必填 | 触发条件，cyclic 任务不允许出现 |
+| `tasks[].instances[]` | 是 | 挂在这个任务下的程序实例，至少一个 |
 
-没有设备块时（v1 升级上来的文件），`target` 保持原样，不做迁移，也不报错。
+实例字段：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 实例名，IEC 标识符，配置内唯一 |
+| `pou` | 是 | 程序类型名，对应 `.st` 里的 `PROGRAM` 名 |
+| `source` | 是 | 源文件相对路径，不能是绝对路径，不能带 `..` |
+| `retain` | 否 | 是否保持，默认 false |
+
+实例挂在任务下面，是上下级关系，不是平级引用。这和 IEC 的语义一致：实例必须由某个任务调用才会运行，脱离任务的实例是死代码。这也和 PLCopen XML 的结构一致，`pouInstance` 是 `task` 的子元素：
+
+```xml
+<task name="MainTask" interval="T#20ms" priority="1">
+  <pouInstance name="instance_Main" typeName="Main"/>
+</task>
+```
+
+一个 PROGRAM 类型可以有多个实例，每个实例有自己独立的变量内存，所以 `instances` 是数组。`pou` 相同的两个实例互不干扰：
+
+```json
+{
+  "instances": [
+    { "name": "instance_MotorA", "pou": "Motor", "source": "src/Motor.st" },
+    { "name": "instance_MotorB", "pou": "Motor", "source": "src/Motor.st" }
+  ]
+}
+```
+
+`deviceId` 最终生成 matiec 的 `RESOURCE <name> ON <deviceId>`，所以它必须是 IEC 标识符，不能带横杠、点号、中文。
+
+没有设备块时（v1 升级上来的文件），`deviceId` 沿用 v1 的字符串原样，不做迁移，也不报错。
+
+v1 到 v2 的字段对应：`programs` → `instances`，`instanceName` → `name`，`typeName` → `pou`，`target` → `deviceId`。语义没变，只是命名统一。
 
 ### 4.2 devices
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `id` | 是 | 设备唯一标识，IEC 标识符，被 `resource.target` 和 `ioMappings.point` 引用 |
+| `id` | 是 | 设备唯一标识，IEC 标识符，被 `resource.deviceId` 和 `ioMappings.point` 引用 |
 | `name` | 否 | 展示名，可中文 |
 | `role` | 是 | `local`（本机 CPU）或 `remote`（从站设备） |
 | `model` | 是 | 设备型号，来自 devuni 建工程时选的型号或用户填写 |
@@ -483,11 +527,13 @@ END_VAR
 - `device.id`、`network.id` 全局唯一。
 - 同一设备内模块 `id` 唯一、槽位号唯一、点位 `id` 唯一。
 - 同一网络内 `unitId` 唯一，EtherCAT 内 `slaveIndex` 唯一。
-- `programs[].instanceName` 从"任务内唯一"收紧为"配置内唯一"。`ioMappings` 要靠它定位变量，重名会导致映射指错。
+- `tasks[].instances[].name` 配置内唯一。`ioMappings` 要靠 `task` + `instance` 定位变量，重名会导致映射指错。
+- 同一任务下实例名不能重复；不同任务之间也不建议重复，生成 `VAR_CONFIG` 时是 `实例名.变量名` 的格式，重名会指到错的实例。
 
 引用完整性：
 
-- `resources[].target` 必须能在 `devices[].id` 里找到；没有设备块时放行。
+- `resources[].deviceId` 必须能在 `devices[].id` 里找到；没有设备块时放行。
+- `tasks[].instances[].pou` 必须能在 `source` 指向的 `.st` 文件里找到同名 `PROGRAM`，这条在审计阶段核对，JSON 校验阶段读不到源码。
 - `devices[].connections[].networkId` 必须能在 `networks[].id` 里找到。
 - `ioMappings[].point` 的设备和点位都必须存在。
 - `ioMappings[].task` + `ioMappings[].instance` 必须能在 configuration 里找到。
@@ -508,6 +554,51 @@ END_VAR
 ## 6. TypeScript 类型
 
 ```ts
+export type PlcTaskType = 'cyclic' | 'event';
+export type PlcTriggerEdge = 'rising' | 'falling' | 'both';
+
+export interface PlcEventTrigger {
+  kind: 'variable';
+  ref: string;
+  edge?: PlcTriggerEdge;
+}
+
+export interface PlcInstance {
+  name: string;
+  pou: string;
+  source: string;
+  retain?: boolean;
+}
+
+export interface PlcTask {
+  name: string;
+  type: PlcTaskType;
+  periodMs?: number;
+  priority: number;
+  cpuCore: number;
+  trigger?: PlcEventTrigger;
+  instances: PlcInstance[];
+}
+
+export interface PlcResource {
+  name: string;
+  deviceId: string;
+  tasks: PlcTask[];
+}
+
+export interface PlcConfiguration {
+  name: string;
+  resources: PlcResource[];
+}
+
+export interface PlcRuntimeConfigV2 {
+  schemaVersion: 2;
+  configuration: PlcConfiguration;
+  devices: PlcDevice[];
+  networks: PlcNetwork[];
+  ioMappings: PlcIoMapping[];
+}
+
 export type PlcDeviceRole = 'local' | 'remote';
 export type PlcPointDirection = 'input' | 'output';
 export type PlcModuleKind =
