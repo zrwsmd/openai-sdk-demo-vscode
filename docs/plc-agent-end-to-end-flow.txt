@@ -11,7 +11,7 @@ PLC Agent 完整工程交付流程
   -> 生成 plc-runtime.json v2
   -> 生成 POU 源码和 devUni 原生工程对象
   -> 校验 ST、任务组态、设备组态和 IO 映射
-  -> 转换为 devUni 编译输入
+  -> 把 plc-runtime.json v2 转换为 devUni plc_config.json 和设备配置
   -> matiec 和 ARM GCC 编译
   -> 打包并部署到 PLC
   -> PLC Runtime 加载运行并在线验收
@@ -137,8 +137,16 @@ validate_st_code
 复杂工程还需要增加多文件工程级事务，保证多个 POU 和组态一起成功或一起失败。
 
 
-7. 转换成 devUni 编译输入
--------------------------
+7. 将 plc-runtime.json v2 转换成 devUni 编译输入
+------------------------------------------------
+
+这是完整链路中必须存在的格式适配步骤。matiec 和 start.exe 都不能直接读取 plc-runtime.json v2。
+
+plc-runtime.json v2 是面向 Agent、产品和 IDE 的统一工程模型；plc_config.json 是 devUni/PLC Runtime 工具链使用的目标专用中间格式。因此编译前必须执行：
+
+plc-runtime.json v2
+  -> devUni 编译适配器
+  -> plc_config.json + ST 源文件 + 协议专用设备配置
 
 编译侧实现统一接口，例如：
 
@@ -148,7 +156,20 @@ compilePlcProject({
   targetProfile
 })
 
-适配器读取 v2 和 .st 文件，生成：
+适配器读取 v2 和 .st 文件，按以下规则转换：
+
+- configuration.name -> configuration.configuration_name。
+- configuration.resources[].tasks[] -> 每个 Task 展平为一个 devUni resources[] 条目。
+- task.name/type/priority/cpuCore -> task_name/task_type/priority/cpu_core。
+- task.periodMs -> interval，单位从毫秒换算成纳秒。
+- instances[].name/pou -> instances[].name/type。
+- pous[].source -> 从工程目录读取并复制对应 .st 源文件。
+- devices 和 networks -> device_tree 及 EtherCAT、Modbus 等协议专用配置。
+- ioMappings 中的本机点位 -> VAR_CONFIG 或 resources[].var_mapped。
+- ioMappings 中的远程点位 -> PLC Runtime 的设备驱动通道配置。
+- devices[].runtime.adapter/profile -> 选择 devUni 适配器、交叉编译工具链和 Runtime ABI。
+
+转换后生成：
 
 - plc_config.json
 - POU、GVL、DUT 等 IEC 源文件
@@ -161,7 +182,9 @@ compilePlcProject({
 
 periodMs * 1,000,000 = devUni interval（纳秒）
 
-一个包含多个 Task 的 v2 resource，需要展平成 devUni 使用的多个 resource。
+一个包含多个 Task 的 v2 resource，需要在这一层展平成 devUni 使用的多个 resource。v2 本身仍保留标准的 Resource -> Tasks 层级，不为了适配 devUni 而改成一 Task 一 Resource。
+
+这一步还必须执行目标能力检查。例如目标 profile 不支持 event Task、实例级 retain 或某种网络协议时，应在调用 start.exe 之前明确报错。
 
 
 8. matiec 编译
