@@ -5,11 +5,15 @@ import type {
   PlcTaskConfig,
 } from './plcRuntimeConfig';
 
-export interface PlcProgramDeclaration {
-  type: 'program';
+export interface PlcPouDeclaration {
+  type: 'program' | 'functionBlock' | 'function';
   name: string;
   line: number;
   character: number;
+}
+
+export interface PlcProgramDeclaration extends PlcPouDeclaration {
+  type: 'program';
 }
 
 export interface PlcProgramBindingMatch {
@@ -144,23 +148,34 @@ function lineAndCharacter(text: string, offset: number): { line: number; charact
   };
 }
 
-export function extractPlcProgramDeclarations(text: string): PlcProgramDeclaration[] {
+export function extractPlcPouDeclarations(text: string): PlcPouDeclaration[] {
   const masked = maskNonCode(text);
-  const declarations: PlcProgramDeclaration[] = [];
+  const declarations: PlcPouDeclaration[] = [];
   const declarationPattern =
-    /\bPROGRAM\s+(?:(?:RETAIN|NON_RETAIN)\s+)?([A-Za-z_][A-Za-z0-9_]*)/giu;
+    /\b(FUNCTION_BLOCK|PROGRAM|FUNCTION)\s+(?:(?:RETAIN|NON_RETAIN)\s+)?([A-Za-z_][A-Za-z0-9_]*)/giu;
   for (const match of masked.matchAll(declarationPattern)) {
-    const name = match[1];
-    const offset = match.index + match[0].toUpperCase().indexOf('PROGRAM');
+    const keyword = match[1].toUpperCase();
+    const name = match[2];
+    const offset = match.index + match[0].toUpperCase().indexOf(keyword);
     const location = lineAndCharacter(text, offset);
     declarations.push({
-      type: 'program',
+      type: keyword === 'PROGRAM'
+        ? 'program'
+        : keyword === 'FUNCTION_BLOCK'
+          ? 'functionBlock'
+          : 'function',
       name,
       line: location.line,
       character: location.character,
     });
   }
   return declarations;
+}
+
+export function extractPlcProgramDeclarations(text: string): PlcProgramDeclaration[] {
+  return extractPlcPouDeclarations(text).filter(
+    (declaration): declaration is PlcProgramDeclaration => declaration.type === 'program',
+  );
 }
 
 function allProgramBindings(config: PlcRuntimeConfig): PlcProgramBindingMatch[] {

@@ -390,23 +390,25 @@ instance.name == "instance_" + instance.pou
 | `pouType` | 是 | `program`、`functionBlock` 或 `function` |
 | `source` | 是 | 工作区相对的 `.st` 源文件路径 |
 
-`source` 只在 `pous` 中出现一次。保留它是为了让审计器、编辑器和不同目标适配器能可靠定位源码；`instances` 只引用 POU 名。
+`source` 只保存在 `pous` 中，不在 `instances` 重复保存。保留它是为了让审计器、编辑器和不同目标适配器能可靠定位源码；多个 POU 可以声明在同一个 `.st` 文件中，因此多个条目允许使用同一个 `source`。
 
 通用规则：
 
 - `name` 必须是 IEC 标识符，不能包含点号、斜杠或扩展名；
 - `source` 不能是绝对路径，不能包含 `.` 或 `..` 路径段；
 - `source` 必须以 `.st` 结尾；
-- POU 名、文件名去掉 `.st` 后的名称、ST 内的声明名必须完全一致，包括大小写；
-- 一个 `source` 只允许对应一个 `pous` 条目。
+- `name` 必须与 `source` 文件内对应的 ST 声明名完全一致，包括大小写；
+- 一个 `source` 可以包含多个 POU，每个 `PROGRAM`、`FUNCTION_BLOCK`、`FUNCTION` 都分别写入一个 `pous` 条目；
+- 一个 POU 名只能由一个源文件声明，不能跨文件重名。
 
-当前 devUni 1.0.21 只扫描工作区根目录第一层的 `*.st`，不递归扫描子目录，因此 devUni 目标额外要求：
+当前 devUni 1.0.21 只扫描编译目录根层的 `*.st`，不递归扫描子目录。devUni 适配器必须按不同的 `source` 去重，把每个源文件复制到临时编译目录根层；同一文件中声明的多个 POU 只复制一次。不同目录存在同名源文件时，适配器必须报冲突，不能静默覆盖。
 
 ```text
-source == name + ".st"
+src/control/Main.st  -> <compileDir>/Main.st
+src/library/Math.st  -> <compileDir>/Math.st
 ```
 
-例如 `Main` 只能对应工作区根目录下的 `Main.st`，不能写成 `src/Main.st`。这是 devUni 适配限制，不是其他目标适配器必须永久遵守的全局限制。
+工作区源码可以放在子目录；“编译目录根层平铺”是 devUni 目标适配器的输出限制，不是 v2 源配置的目录限制。
 
 ## 6. devices
 
@@ -552,9 +554,9 @@ END_VAR
 
 - 所有 Task 名、实例名和 POU 名必须是 IEC 标识符；
 - `pous[].name` 不得包含点号；
-- POU 名、文件名去掉扩展名后的名称、ST 内声明名必须大小写完全一致；
-- `pous[].source` 必须唯一；
-- devUni 目标下，POU 文件必须位于工作区根目录，不能放入子目录；
+- POU 名必须与 ST 内声明名大小写完全一致；
+- POU 名必须全局唯一；同一 `pous[].source` 可以承载多个 POU 声明；
+- devUni 目标适配器必须把不同源文件平铺到临时编译目录根层，并拒绝文件名冲突；
 - `instances[].source`、`instances[].retain` 和 `tasks[].trigger` 都是不支持的字段。
 
 ### 9.2 引用完整性
@@ -773,7 +775,7 @@ start.exe -i <compileDir>
 - `runtimeOverrides` 可选，迁移和普通 Agent 生成流程不得为了凑字段而添加；
 - v1 读取后可迁移为 v2：将所有 Resource 下的 Task 展平到顶层，并把原 Resource 的目标设备迁移为 `task.deviceId`；
 - v1 迁移必须显式补齐 `pous`、`devices`、`networks` 和 `ioMappings`；
-- v1 的 `programs[].source` 迁移到唯一的 `pous[].source`；
+- v1 的每个 `programs[].source` 迁移到对应 POU 条目的 `pous[].source`；
 - v1 的 `programs[].retain` 不迁移为实例字段，应检查 ST 源码中是否存在对应的 `VAR RETAIN`；
 - 大于 2 的版本必须明确报“配置版本过新”，不能按 v2 猜测解析；
 - 解析器应拒绝未知字段，避免拼写错误被静默忽略；

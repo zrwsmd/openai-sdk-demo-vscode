@@ -132,6 +132,12 @@ function clarification(select) {
 
 {
   const otherWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-sync-bind-test-'));
+  await fs.mkdir(path.join(otherWorkspace, 'src'), { recursive: true });
+  await fs.writeFile(
+    path.join(otherWorkspace, 'src', 'Existing.st'),
+    'PROGRAM Existing\nEND_PROGRAM\n',
+    'utf8',
+  );
   await writePlcRuntimeConfig(path.join(otherWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME), {
     schemaVersion: 2,
     tasks: [{
@@ -172,6 +178,94 @@ function clarification(select) {
     !config?.pous.some((item) => item.name === 'NewProgram' && item.source === 'src/NewProgram.st')
   ) {
     throw new Error('program was not added to the selected existing task');
+  }
+}
+
+{
+  const dependencyWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-dependencies-test-'),
+  );
+  await fs.mkdir(path.join(dependencyWorkspace, 'pous'), { recursive: true });
+  await fs.writeFile(
+    path.join(dependencyWorkspace, 'pous', 'MotorControl.st'),
+    'FUNCTION_BLOCK MotorControl\nVAR_INPUT Enable : BOOL; END_VAR\nEND_FUNCTION_BLOCK\n',
+    'utf8',
+  );
+  await fs.writeFile(
+    path.join(dependencyWorkspace, 'pous', 'ScaleValue.st'),
+    'FUNCTION ScaleValue : REAL\nVAR_INPUT Raw : INT; END_VAR\nEND_FUNCTION\n',
+    'utf8',
+  );
+  const fake = clarification(() => 'create:20ms');
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: dependencyWorkspace,
+    source: 'Main.st',
+    content: [
+      'PROGRAM Main',
+      'VAR controller : MotorControl; END_VAR',
+      'controller();',
+      'END_PROGRAM',
+      '',
+    ].join('\n'),
+    clarification: fake.service,
+  });
+  if (!plan || plan.action !== 'create_config') {
+    throw new Error('PROGRAM with separate POU files did not create a task plan');
+  }
+  await plan.commit();
+  const config = await readPlcRuntimeConfig(
+    path.join(dependencyWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME),
+  );
+  const pous = new Map((config?.pous ?? []).map((pou) => [pou.name, pou]));
+  if (
+    pous.get('Main')?.pouType !== 'program' ||
+    pous.get('MotorControl')?.pouType !== 'functionBlock' ||
+    pous.get('MotorControl')?.source !== 'pous/MotorControl.st' ||
+    pous.get('ScaleValue')?.pouType !== 'function' ||
+    config?.tasks[0].instances.length !== 1 ||
+    config.tasks[0].instances[0].pou !== 'Main'
+  ) {
+    throw new Error(`separate POU files were not fully indexed: ${JSON.stringify(config)}`);
+  }
+}
+
+{
+  const libraryWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-library-test-'),
+  );
+  let clarificationCalled = false;
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: libraryWorkspace,
+    source: 'ControlLibrary.st',
+    content: [
+      'FUNCTION_BLOCK ValveControl',
+      'END_FUNCTION_BLOCK',
+      'FUNCTION ClampValue : REAL',
+      'END_FUNCTION',
+      '',
+    ].join('\n'),
+    clarification: {
+      request: async () => {
+        clarificationCalled = true;
+        return { requestId: 'unexpected', cancelled: true };
+      },
+    },
+  });
+  if (!plan || plan.action !== 'sync_pous' || clarificationCalled) {
+    throw new Error('FB/FUNCTION-only source should update POU index without task dialog');
+  }
+  await plan.commit();
+  const config = await readPlcRuntimeConfig(
+    path.join(libraryWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME),
+  );
+  if (
+    config?.tasks.length !== 0 ||
+    config.devices.length !== 0 ||
+    config.pous.length !== 2 ||
+    !config.pous.some((pou) => pou.name === 'ValveControl' && pou.pouType === 'functionBlock') ||
+    !config.pous.some((pou) => pou.name === 'ClampValue' && pou.pouType === 'function')
+  ) {
+    throw new Error('FB/FUNCTION-only source was not persisted as a POU-only v2 config');
   }
 }
 

@@ -54,22 +54,26 @@
 当前接线入口是 `src/plc/plcRuntimeConfigSync.ts`：
 
 1. `write_file`、`edit_file` 或 `export_st_program` 准备写入工作区内的 `.st` 文件。
-2. 从完整源码识别 `PROGRAM` 声明。
-3. 读取工作区根目录的 `plc-runtime.json`。
-4. 已有唯一绑定时不弹窗，也不重复修改配置。
-5. 未绑定时生成任务建议并显示“任务组态确认”弹窗。
-6. 用户可以绑定已有 Task、选择建议周期，或填写自定义周期和调度参数。
-7. 用户取消时阻止本次交付，不写 ST，也不写 JSON。
-8. ST 文件成功落盘后，后置 effect 原子保存 v2 配置。
+2. 复用公共 ST 上下文收集器读取工作区内已有的 `.st` 文件，并用本次待写内容覆盖同路径的磁盘旧内容。
+3. 从完整文件池识别所有 `PROGRAM`、`FUNCTION_BLOCK` 和 `FUNCTION` 声明，重建 `pous[]` 索引。
+4. 读取工作区根目录的 `plc-runtime.json`。
+5. 本次文件没有 `PROGRAM` 时只同步 POU 索引，不显示任务弹窗。
+6. 本次 `PROGRAM` 已有唯一绑定时不弹窗，也不重复创建 Task。
+7. 未绑定时生成任务建议并显示“任务组态确认”弹窗。
+8. 用户可以绑定已有 Task、选择建议周期，或填写自定义周期和调度参数。
+9. 用户取消时阻止本次交付，不写 ST，也不写 JSON。
+10. ST 文件成功落盘后，后置 effect 原子保存 v2 配置。
 
 首次生成 v2 时会写入：
 
 - 一个顶层 Task；
-- 一个 PROGRAM 类型的 POU 索引；
+- 工作区内全部 POU 的索引，包括独立文件中的 PROGRAM、FUNCTION_BLOCK 和 FUNCTION；
 - 一个最小本地 PLC 设备；
 - 空的 `networks` 和 `ioMappings` 数组。
 
-后续同一工作区新增 PROGRAM 时，弹窗可把新实例绑定到已有 Task，或者创建新的顶层 Task。POU 的源码路径只写在 `pous[].source`，实例只保存 `name` 和 `pou`。
+后续同一工作区新增 PROGRAM 时，弹窗可把新实例绑定到已有 Task，或者创建新的顶层 Task。只有 PROGRAM 会进入 `tasks[].instances[]`；FUNCTION_BLOCK 和 FUNCTION 只进入 `pous[]`，即使它们由 PROGRAM 跨文件引用也不会被误建成任务实例。POU 的源码路径只写在 `pous[].source`，实例只保存 `name` 和 `pou`。
+
+`pous[]` 是工程 POU 清单，不是依赖闭包，因此不能只收录当前 PROGRAM 能沿依赖边到达的文件。`st_dependency_map`、`st_symbol_references` 和 `st_change_impact` 继续负责语义依赖、符号引用和反向影响分析；POU 索引同步复用相同的公共 ST 上下文收集器，但不会把语言服务可用性变成写文件的硬前置条件。
 
 ## 4. 旧版迁移
 
@@ -107,8 +111,9 @@ END_CONFIGURATION
 当前 devUni 1.0.21 的额外限制：
 
 - 实例名必须是 `instance_<POU名>`；
-- POU 文件必须位于工程根目录第一层；
-- `source` 必须是 `<POU名>.st`；
+- 适配器必须把不同 POU 源文件平铺到临时编译目录根层；
+- 同一个源文件可声明多个 POU，复制编译输入时必须按 `source` 去重；
+- 平铺后文件名冲突必须报错；
 - matiec 适配目前只生成 cyclic Task，event Task 会明确拒绝。
 
 这些是目标适配限制，不是通用 v2 的永久结构限制。

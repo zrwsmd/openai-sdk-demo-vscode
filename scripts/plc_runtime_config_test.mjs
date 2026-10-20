@@ -28,6 +28,26 @@ if (normalized.schemaVersion !== 2 || normalized.pous[0].source !== 'src/PLC_PRG
   throw new Error('v2 配置标准化失败');
 }
 
+const sharedSource = structuredClone(valid);
+sharedSource.pous.push({
+  name: 'MotorControl',
+  pouType: 'functionBlock',
+  source: 'src/PLC_PRG.st',
+});
+sharedSource.pous.push({
+  name: 'ScaleValue',
+  pouType: 'function',
+  source: 'src/PLC_PRG.st',
+});
+const normalizedSharedSource = validatePlcRuntimeConfig(sharedSource);
+if (
+  normalizedSharedSource.pous.length !== 3 ||
+  normalizedSharedSource.pous[1].pouType !== 'functionBlock' ||
+  normalizedSharedSource.pous[2].pouType !== 'function'
+) {
+  throw new Error('同一 ST 源文件中的多个 POU 没有通过 v2 校验');
+}
+
 const complete = structuredClone(valid);
 complete.devices[0].points.push({
   id: 'start',

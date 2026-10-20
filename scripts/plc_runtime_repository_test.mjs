@@ -58,7 +58,7 @@ if (!assertFailed) throw new Error('损坏配置不应被 assertReady 静默放�
 
 await fs.writeFile(
   repository.filePath,
-  JSON.stringify({ schemaVersion: 2, tasks: [], pous: [], devices: [], networks: [], ioMappings: [] }),
+  JSON.stringify({ schemaVersion: 2, tasks: 'invalid', pous: [], devices: [], networks: [], ioMappings: [] }),
   'utf8',
 );
 const invalidSchema = await repository.refresh();

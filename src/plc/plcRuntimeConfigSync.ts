@@ -3,9 +3,12 @@ import { Agent, Runner } from '@openai/agents';
 import { z } from 'zod';
 import { agentLog, buildModelAdapter } from '../runtime/modelGateway';
 import type { AgentConfig } from '../runtime/agentConfig';
+import { collectWorkspaceStContext } from '../analysis/workspaceStContext';
+import { WorkspaceScope } from '../workspace/workspaceScope';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
+  type PlcPouConfig,
   type PlcRuntimeConfig,
   type PlcTaskConfig,
 } from './plcRuntimeConfig';
@@ -14,6 +17,7 @@ import {
   type PlcRuntimeConfigState,
 } from './plcRuntimeConfigRepository';
 import {
+  extractPlcPouDeclarations,
   extractPlcProgramDeclarations,
   inspectPlcProgramBindings,
 } from './plcProgramBinding';
@@ -52,11 +56,12 @@ export interface PlcClarificationService {
 
 export interface PlcRuntimeConfigSyncPlan {
   filePath: string;
-  action: 'create_config' | 'create_task' | 'bind_program';
-  programName: string;
+  action: 'create_config' | 'create_task' | 'bind_program' | 'sync_pous';
+  pous: readonly PlcPouConfig[];
+  programName?: string;
   source: string;
-  taskName: string;
-  deviceId: string;
+  taskName?: string;
+  deviceId?: string;
   periodMs?: number;
   commit(): Promise<PlcRuntimeConfig>;
 }
@@ -118,6 +123,8 @@ class PlcRuntimeConfigSyncCancelledError extends PlcRuntimeConfigError {
 }
 
 const IEC_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const MAX_POU_INDEX_FILES = 1_000;
+const MAX_POU_SOURCE_BYTES = 2 * 1024 * 1024;
 const PLC_TASK_GROUP_NAMES: Record<PlcTaskGroup, string> = {
   fast_control: 'FastControlTask',
   main_control: 'MainControlTask',
@@ -491,11 +498,118 @@ function cloneConfig(config: PlcRuntimeConfig): PlcRuntimeConfig {
   return JSON.parse(JSON.stringify(config)) as PlcRuntimeConfig;
 }
 
-function applySelection(
+function pousForSource(content: string, source: string): PlcPouConfig[] {
+  const declarations = extractPlcPouDeclarations(content);
+  const seen = new Set<string>();
+  return declarations.map((declaration) => {
+    const key = declaration.name.toLocaleUpperCase();
+    if (seen.has(key)) {
+      throw new PlcRuntimeConfigError(`源文件 ${source} 中 POU 名称重复: ${declaration.name}`);
+    }
+    seen.add(key);
+    return {
+      name: declaration.name,
+      pouType: declaration.type,
+      source,
+    };
+  });
+}
+
+async function collectWorkspacePous(
+  workspaceRoot: string,
+  pendingSource: string,
+  pendingContent: string,
+): Promise<PlcPouConfig[]> {
+  const pendingKey = normalizeSource(pendingSource).toLocaleLowerCase();
+  const collected = await collectWorkspaceStContext(
+    new WorkspaceScope([workspaceRoot]),
+    {
+      maxFiles: MAX_POU_INDEX_FILES,
+      maxFileBytes: MAX_POU_SOURCE_BYTES,
+      excludePaths: [pendingSource],
+    },
+  );
+  if (collected.truncated) {
+    throw new PlcRuntimeConfigError(
+      `工作区包含超过 ${MAX_POU_INDEX_FILES} 个 ST 文件，无法可靠生成完整 POU 索引。`,
+    );
+  }
+  if (collected.skipped > 0) {
+    throw new PlcRuntimeConfigError(
+      `有 ${collected.skipped} 个 ST 文件无法读取或超过 ${MAX_POU_SOURCE_BYTES} 字节，` +
+        '无法可靠生成完整 POU 索引。',
+    );
+  }
+  const files = collected.files
+    .map((file) => ({
+      source: normalizeSource(path.relative(workspaceRoot, file.path)),
+      content: file.text,
+    }))
+    .filter((file) => file.source.toLocaleLowerCase() !== pendingKey)
+    .sort((left, right) => left.source.localeCompare(right.source));
+
+  const byName = new Map<string, PlcPouConfig>();
+  const addPous = (pous: readonly PlcPouConfig[]): void => {
+    for (const pou of pous) {
+      const key = pou.name.toLocaleUpperCase();
+      const existing = byName.get(key);
+      if (existing) {
+        throw new PlcRuntimeConfigError(
+          `POU ${pou.name} 在多个源文件中重复声明: ${existing.source}、${pou.source}`,
+        );
+      }
+      byName.set(key, pou);
+    }
+  };
+
+  for (const file of files) {
+    addPous(pousForSource(file.content, file.source));
+  }
+  addPous(pousForSource(pendingContent, pendingSource));
+  return [...byName.values()].sort((left, right) =>
+    left.source.localeCompare(right.source) || left.name.localeCompare(right.name),
+  );
+}
+
+function configWithWorkspacePous(
   state: PlcRuntimeConfigState,
+  pous: readonly PlcPouConfig[],
+): { config: PlcRuntimeConfig; changed: boolean } {
+  const config: PlcRuntimeConfig = state.status === 'ready'
+    ? cloneConfig(state.config)
+    : {
+        schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
+        tasks: [],
+        pous: [],
+        devices: [],
+        networks: [],
+        ioMappings: [],
+      };
+  const declaredNames = new Set(pous.map((pou) => pou.name.toLocaleUpperCase()));
+  const removed = config.pous.filter(
+    (existing) => !declaredNames.has(existing.name.toLocaleUpperCase()),
+  );
+  for (const pou of removed) {
+    const task = config.tasks.find((candidate) =>
+      candidate.instances.some((instance) =>
+        instance.pou.toLocaleUpperCase() === pou.name.toLocaleUpperCase(),
+      ),
+    );
+    if (task) {
+      throw new PlcRuntimeConfigError(
+        `不能从 POU 索引删除 ${pou.name}，任务 ${task.name} 仍在引用它；请恢复源文件或先解除任务绑定。`,
+      );
+    }
+  }
+  const before = JSON.stringify(config.pous);
+  config.pous = [...pous];
+  return { config, changed: JSON.stringify(config.pous) !== before };
+}
+
+function applySelection(
+  baseConfig: PlcRuntimeConfig,
   selection: Selection,
   programName: string,
-  source: string,
 ): {
   config: PlcRuntimeConfig;
   action: PlcRuntimeConfigSyncPlan['action'];
@@ -519,9 +633,8 @@ function applySelection(
       deviceId: selection.deviceId,
       periodMs: task.periodMs,
       config: {
-        schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
+        ...baseConfig,
         tasks: [task],
-        pous: [{ name: programName, pouType: 'program', source }],
         devices: [{
           id: selection.deviceId,
           role: 'local',
@@ -529,21 +642,11 @@ function applySelection(
           points: [],
           connections: [],
         }],
-        networks: [],
-        ioMappings: [],
       },
     };
   }
 
-  if (state.status !== 'ready') {
-    throw new PlcRuntimeConfigError('当前没有可更新的 plc-runtime.json。');
-  }
-  const config = cloneConfig(state.config);
-  const existingPou = config.pous.find((item) => item.name.toLocaleUpperCase() === programName.toLocaleUpperCase());
-  if (existingPou && existingPou.source !== source) {
-    throw new PlcRuntimeConfigError(`POU ${programName} 已指向其他源文件: ${existingPou.source}`);
-  }
-  if (!existingPou) config.pous.push({ name: programName, pouType: 'program', source });
+  const config = cloneConfig(baseConfig);
 
   if (selection.action === 'bind_program') {
     const task = config.tasks.find((item) => item.name === selection.taskName);
@@ -567,6 +670,15 @@ function applySelection(
     cpuCore: selection.cpuCore,
     instances: [createTaskInstance(undefined, programName)],
   };
+  if (!config.devices.some((device) => device.id === selection.deviceId)) {
+    config.devices.push({
+      id: selection.deviceId,
+      role: 'local',
+      model: selection.deviceModel,
+      points: [],
+      connections: [],
+    });
+  }
   config.tasks.push(task);
   return {
     config,
@@ -683,31 +795,49 @@ export async function preparePlcRuntimeConfigSync(
   ) {
     return undefined;
   }
-  const declarations = extractPlcProgramDeclarations(options.content);
-  if (declarations.length === 0) return undefined;
-  if (declarations.length > 1) {
+  const programs = extractPlcProgramDeclarations(options.content);
+  if (programs.length > 1) {
     throw new PlcRuntimeConfigError('一个 ST 文件包含多个 PROGRAM，第一版不会自动生成任务组态。');
   }
-  if (!options.clarification) return undefined;
 
   const repository = createPlcRuntimeConfigRepository(options.workspaceRoot);
   const state = await repository.refresh();
   if (state.status === 'invalid') {
     throw new PlcRuntimeConfigError(`plc-runtime.json 无法解析，先修复后再生成任务组态: ${state.error.message}`);
   }
+  const workspacePous = await collectWorkspacePous(
+    options.workspaceRoot,
+    source,
+    options.content,
+  );
+  if (workspacePous.length === 0 && state.status !== 'ready') return undefined;
+  const synchronized = configWithWorkspacePous(state, workspacePous);
+  const indexOnlyPlan = (): PlcRuntimeConfigSyncPlan => ({
+    filePath: repository.filePath,
+    action: 'sync_pous',
+    pous: workspacePous,
+    source,
+    commit: async () => (await repository.save(synchronized.config)).config,
+  });
+  if (programs.length === 0) {
+    return synchronized.changed ? indexOnlyPlan() : undefined;
+  }
 
-  const programName = declarations[0].name;
+  const programName = programs[0].name;
   if (state.status === 'ready') {
-    const inspection = inspectPlcProgramBindings(state.config, {
+    const inspection = inspectPlcProgramBindings(synchronized.config, {
       source,
       text: options.content,
     });
     const resolution = inspection.resolutions[0];
-    if (resolution?.status === 'bound') return undefined;
+    if (resolution?.status === 'bound') {
+      return synchronized.changed ? indexOnlyPlan() : undefined;
+    }
     if (resolution?.status === 'ambiguous') {
       throw new PlcRuntimeConfigError(`PROGRAM ${programName} 的任务绑定重复，请先修复 plc-runtime.json。`);
     }
   }
+  if (!options.clarification) return indexOnlyPlan();
 
   const { options: choices, createFallback } = await optionsForState(
     state,
@@ -740,10 +870,11 @@ export async function preparePlcRuntimeConfigSync(
     throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写类似 "20ms, priority=1, cpu=1" 的答案。');
   }
 
-  const applied = applySelection(state, selection, programName, source);
+  const applied = applySelection(synchronized.config, selection, programName);
   return {
     filePath: repository.filePath,
     action: applied.action,
+    pous: workspacePous,
     programName,
     source,
     taskName: applied.taskName,

@@ -1,4 +1,5 @@
 import {
+  extractPlcPouDeclarations,
   extractPlcProgramDeclarations,
   inspectPlcProgramBindings,
   taskProgramBindings,
@@ -24,6 +25,27 @@ if (
   declarations[1].name !== 'Secondary'
 ) {
   throw new Error(`PROGRAM 识别错误: ${JSON.stringify(declarations)}`);
+}
+
+const allPouDeclarations = extractPlcPouDeclarations(`
+FUNCTION_BLOCK MotorControl
+END_FUNCTION_BLOCK
+FUNCTION ScaleValue : REAL
+END_FUNCTION
+PROGRAM Main
+END_PROGRAM
+(* FUNCTION_BLOCK Ignored *)
+`);
+if (
+  allPouDeclarations.length !== 3 ||
+  allPouDeclarations[0].name !== 'MotorControl' ||
+  allPouDeclarations[0].type !== 'functionBlock' ||
+  allPouDeclarations[1].name !== 'ScaleValue' ||
+  allPouDeclarations[1].type !== 'function' ||
+  allPouDeclarations[2].name !== 'Main' ||
+  allPouDeclarations[2].type !== 'program'
+) {
+  throw new Error(`POU 识别错误: ${JSON.stringify(allPouDeclarations)}`);
 }
 
 const config = {

@@ -220,9 +220,6 @@ function parsePou(value: unknown, pathName: string): PlcPouConfig {
   }
   const name = identifier(raw.name, `${pathName}.name`);
   const source = relativeSource(raw.source, `${pathName}.source`);
-  if (path.posix.basename(source, path.posix.extname(source)) !== name) {
-    fail(`${pathName}.source`, `文件名必须与 POU 名完全一致，应为 ${name}.st`);
-  }
   return { name, pouType: raw.pouType, source };
 }
 function parseAddress(value: unknown, pathName: string): PlcPointAddress {
@@ -435,14 +432,13 @@ function validateV2(value: unknown): PlcRuntimeConfig {
   const raw = record(value, 'root');
   allowedKeys(raw, ['schemaVersion', 'tasks', 'pous', 'devices', 'networks', 'ioMappings', 'runtimeOverrides'], 'root');
   if (raw.schemaVersion !== PLC_RUNTIME_CONFIG_SCHEMA_VERSION) fail('schemaVersion', `只支持版本 ${PLC_RUNTIME_CONFIG_SCHEMA_VERSION}`);
-  const tasks = array(raw.tasks, 'tasks', false).map((item, index) => parseTask(item, `tasks[${index}]`));
-  const pous = array(raw.pous, 'pous', false).map((item, index) => parsePou(item, `pous[${index}]`));
-  const devices = array(raw.devices, 'devices', false).map((item, index) => parseDevice(item, `devices[${index}]`));
+  const tasks = array(raw.tasks, 'tasks').map((item, index) => parseTask(item, `tasks[${index}]`));
+  const pous = array(raw.pous, 'pous').map((item, index) => parsePou(item, `pous[${index}]`));
+  const devices = array(raw.devices, 'devices').map((item, index) => parseDevice(item, `devices[${index}]`));
   const networks = array(raw.networks, 'networks').map((item, index) => parseNetwork(item, `networks[${index}]`));
   const ioMappings = array(raw.ioMappings, 'ioMappings').map((item, index) => parseIoMapping(item, `ioMappings[${index}]`));
   uniqueNames(tasks.map((item) => item.name), 'tasks');
   uniqueNames(pous.map((item) => item.name), 'pous');
-  uniqueNames(pous.map((item) => item.source), 'pous sources');
   uniqueNames(devices.map((item) => item.id), 'devices');
   uniqueNames(networks.map((item) => item.id), 'networks');
   const result: PlcRuntimeConfig = { schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION, tasks, pous, devices, networks, ioMappings };
