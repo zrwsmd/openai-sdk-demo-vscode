@@ -1187,7 +1187,7 @@ async function runTestTurn(
   if (requestLines.some((line) => line.includes('assistant(tool_calls:old_tool)'))) {
     throw new Error('旧工具调用仍被发送给新请求模型');
   }
-  if (!rawItems.some(isToolHistoryItem) || !r.output.includes('PLC 编程助手')) {
+  if (!rawItems.some(isToolHistoryItem) || !r.output.includes('PLC Agent')) {
     throw new Error('历史隔离错误地修改了持久化会话或新请求没有完成');
   }
 }

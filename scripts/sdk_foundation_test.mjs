@@ -332,6 +332,10 @@ assert.equal(inferCurrentActionIntent('再新建一个工程'), 'project');
 assert.equal(inferCurrentActionIntent('再建另一个工程'), 'project');
 assert.equal(inferCurrentActionIntent('继续新建一个项目'), 'project');
 assert.equal(
+  inferCurrentActionIntent('PID_Pressure_Supply.st，在最后随便加一行注释'),
+  'file_edit',
+);
+assert.equal(
   inferCurrentActionIntent('在刚刚新建的工程下面写入 asd.txt'),
   'file_edit',
 );

@@ -217,6 +217,12 @@ export interface WorkflowLocalMatch {
   reason: string;
 }
 
+export interface WorkflowLocalFallback {
+  mode: WorkflowFallbackMode;
+  confidence: number;
+  reason: string;
+}
+
 export type WorkflowSignalValue = "yes" | "no" | "unknown";
 
 export interface WorkflowBooleanSignal {
@@ -268,6 +274,8 @@ export interface WorkflowDescriptor {
     reason?: string;
     source?: WorkflowDecisionSource;
   }): WorkflowContract | undefined;
+  /** Deterministic exclusions that should use a generic fallback instead. */
+  localFallback?(context: WorkflowDecisionContext): WorkflowLocalFallback | undefined;
   localMatch?(context: WorkflowDecisionContext): WorkflowLocalMatch;
   createRuntime?(
     contract: WorkflowContract | undefined,

@@ -1178,7 +1178,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;" />
   <link rel="stylesheet" href="${css}" />
-  <title>PLC 编程助手</title>
+  <title>PLC Agent</title>
 </head>
 <body>
   <div id="sessions" class="sessions">

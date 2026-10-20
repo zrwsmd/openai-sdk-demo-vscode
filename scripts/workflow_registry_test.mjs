@@ -12,6 +12,7 @@ import {
   createStToolProvider,
   createAppWorkflowRegistry,
   createAppToolRegistry,
+  WorkflowDecisionService,
 } from './agent.testbundle.mjs';
 
 const generic = {
@@ -61,6 +62,88 @@ assert.equal(
 );
 assert.equal(appRegistry.getByRoute('devuni_project'), appRegistry.get('devuni_project'));
 assert.equal(appRegistry.getByRoute('st_delivery'), ST_WORKSPACE_DELIVERY_WORKFLOW);
+assert.match(ST_WORKSPACE_DELIVERY_WORKFLOW.description, /仅修改注释/u);
+assert.equal(
+  ST_WORKSPACE_DELIVERY_WORKFLOW.localFallback?.({
+    userText: '格式化 PID_Pressure_Supply.st 并调整缩进',
+    actionIntent: 'file_edit',
+  })?.mode,
+  'file_edit',
+);
+assert.equal(
+  ST_WORKSPACE_DELIVERY_WORKFLOW.localFallback?.({
+    userText: '取消 PID_Pressure_Supply.st 里启动逻辑的注释并保存',
+    actionIntent: 'file_edit',
+  }),
+  undefined,
+  '取消代码注释会改变程序语义，不能降级为轻量编辑',
+);
+
+const stDeliveryHint = {
+  delivery: 'required',
+  deliveryConfidence: 0.9,
+  orchestration: 'single',
+  orchestrationConfidence: 0.98,
+  workflow: 'st_delivery',
+  workflowConfidence: 0.96,
+  toolNeeds: {
+    readFile: { value: 'yes', confidence: 0.8 },
+    writeFile: { value: 'yes', confidence: 0.9 },
+    runCommand: { value: 'no', confidence: 0.9 },
+  },
+  riskLevel: 'medium',
+  riskConfidence: 0.85,
+  needsApproval: { value: 'unknown', confidence: 0.2 },
+  evaluation: {},
+};
+let nonSemanticClassifierCalls = 0;
+const stRouting = new WorkflowDecisionService(
+  () => {},
+  { taskHint: async () => stDeliveryHint },
+  appRegistry,
+  createAppToolRegistry().getToolCatalog(),
+);
+const commentEditDecision = await stRouting.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: process.cwd(),
+    workspaceRoot: process.cwd(),
+  },
+  'PID_Pressure_Supply.st,在最后随便加一行注释',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      nonSemanticClassifierCalls += 1;
+      return {
+        kind: 'workflow',
+        workflowId: 'st_workspace_delivery',
+        confidence: 0.99,
+        reason: 'intentionally overbroad classifier result',
+      };
+    },
+  },
+);
+assert.equal(commentEditDecision.kind, 'fallback');
+assert.equal(commentEditDecision.mode, 'file_edit');
+assert.equal(commentEditDecision.source, 'local');
+assert.equal(nonSemanticClassifierCalls, 0, '明确的非语义 ST 编辑不应再调用独立模型分类器');
+assert(commentEditDecision.allowedTools.includes('edit_file'));
+
+const logicEditDecision = await stRouting.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: process.cwd(),
+    workspaceRoot: process.cwd(),
+  },
+  '修改 PID_Pressure_Supply.st 的压力控制逻辑并保存',
+);
+assert.equal(logicEditDecision.kind, 'workflow');
+assert.equal(logicEditDecision.workflow.id, 'st_workspace_delivery');
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
   'validate_st_code',
   'commit_st_delivery',

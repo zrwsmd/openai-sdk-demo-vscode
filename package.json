@@ -1,7 +1,7 @@
 {
-  "name": "plc-agent-vscode",
+  "name": "plc-agent",
   "version": "1.0.0",
-  "description": "基于 @openai/agents 的 PLC 编程助手 VSCode 插件:侧边栏对话 + agent 工具调用 + 流式输出",
+  "description": "面向 PLC 编程与工控工程任务的 VS Code 智能助手:侧边栏对话、工作流编排、工具调用与流式输出",
   "main": "./dist/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -41,7 +41,7 @@
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   },
-  "displayName": "PLC 编程助手 (OpenAI Agents SDK Demo)",
+  "displayName": "PLC Agent",
   "publisher": "zrwsmd",
   "engines": {
     "vscode": "^1.90.0",
@@ -69,14 +69,14 @@
         {
           "type": "webview",
           "id": "plcAgent.chatView",
-          "name": "PLC 编程助手"
+          "name": "PLC Agent"
         }
       ]
     },
     "commands": [
       {
         "command": "plcAgent.openChat",
-        "title": "打开 PLC 编程助手",
+        "title": "打开 PLC Agent",
         "category": "PLC Agent"
       },
       {

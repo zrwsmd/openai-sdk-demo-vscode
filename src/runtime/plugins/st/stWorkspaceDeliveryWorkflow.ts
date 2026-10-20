@@ -207,16 +207,44 @@ function stWorkspaceDeliveryLocalMatch(
   };
 }
 
+const ST_FILE_TARGET_PATTERN =
+  /(?:\.st\b|\bST\b\s*(?:文件|源码|代码)|结构化文本(?:文件|源码|代码)?)/iu;
+const NON_SEMANTIC_ST_EDIT_PATTERN =
+  /(?:(?:添加|增加|追加|加上?|插入|补上?|写上?|修改|改下?|替换|删除|删掉)[^。！？\r\n]{0,16}(?:注释|注解)|(?:注释|注解)[^。！？\r\n]{0,12}(?:修改|改下?|替换|删除|删掉)|格式化|调整?缩进|整理格式|调整?(?:空白|空格|换行)|(?:添加|增加|追加|删除|删掉)[^。！？\r\n]{0,10}(?:空行|换行))/iu;
+const SEMANTIC_UNCOMMENT_PATTERN =
+  /(?:取消|解除)[^。！？\r\n]{0,8}注释|去掉[^。！？\r\n]{0,8}注释(?:符|标记)|(?:把|将)[^。！？\r\n]{0,20}(?:代码|程序|逻辑)[^。！？\r\n]{0,8}注释掉/u;
+
+function stWorkspaceDeliveryLocalFallback(
+  context: WorkflowDecisionContext,
+) {
+  const text = context.userText.trim();
+  if (
+    ST_FILE_TARGET_PATTERN.test(text) &&
+    NON_SEMANTIC_ST_EDIT_PATTERN.test(text) &&
+    !SEMANTIC_UNCOMMENT_PATTERN.test(text)
+  ) {
+    return {
+      mode: "file_edit" as const,
+      confidence: 0.98,
+      reason: "仅修改 ST 文件的注释、格式或空白，不属于完整 ST 程序交付",
+    };
+  }
+  return undefined;
+}
+
 export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
   id: "st_workspace_delivery",
   title: "ST 代码交付",
-  description: "生成、修复、校验并保存 IEC 61131-3 ST/PLC 程序源码。",
+  description:
+    "生成完整 ST 程序、修改 PLC 控制逻辑或修复 ST 语法，并通过校验后正式保存。" +
+    "仅修改注释、格式、缩进、空白或换行等不改变程序语义的操作应使用 file_edit。",
   runtimeManaged: true,
   workflowRoute: "st_delivery",
   businessToolNames: ST_WORKSPACE_DELIVERY_TOOL_NAMES,
   pipelinePlan: ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,
   describe: describeStWorkspaceDelivery,
   matchesContract: isStWorkspaceDeliveryContract,
+  localFallback: stWorkspaceDeliveryLocalFallback,
   createContract: (options = {}) =>
     createStCodeDeliveryContract({
       reason:

@@ -8,7 +8,7 @@
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 
-const REPLY = '你好!我是 PLC 编程助手(插件内核验证),请告诉我你的控制任务。';
+const REPLY = '你好!我是 PLC Agent(插件内核验证),请告诉我你的控制任务。';
 const rejectCombined = process.env.MOCK_REJECT_COMBINED === '1';
 const rejectParallel = process.env.MOCK_REJECT_PARALLEL === '1';
 const ignoreCombinedToolChoice = process.env.MOCK_IGNORE_COMBINED === '1';

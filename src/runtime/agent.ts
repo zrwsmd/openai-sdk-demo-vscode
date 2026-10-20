@@ -743,7 +743,7 @@ export async function runAgent(
       return requiredTool ? team.executor : team.planner;
     }
     return new Agent({
-      name: "PLC 编程助手",
+      name: "PLC Agent",
       model,
       instructions,
       tools,

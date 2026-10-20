@@ -58,6 +58,14 @@ export class WorkflowDecisionService {
         })),
       mcpServerChoices: options.mcpServerChoices,
     });
+    const localFallbackDecision = this.workflowFromLocalFallbackDetectors(
+      userText,
+      history,
+      workflows,
+      jevHint,
+      actionIntent,
+    );
+    if (localFallbackDecision) return localFallbackDecision;
     const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(
       jevHint,
       actionIntent,
@@ -127,6 +135,35 @@ export class WorkflowDecisionService {
       this.log(
         `[workflow] 忽略 ${workflow.id}: 当前动作 ${actionIntent} 不在该 workflow 的兼容范围内`,
       );
+    }
+    return undefined;
+  }
+
+  private workflowFromLocalFallbackDetectors(
+    userText: string,
+    history: AgentInputItem[],
+    workflows: readonly WorkflowDescriptor[],
+    hint: TaskDecisionHint,
+    actionIntent: CurrentActionIntent,
+  ): WorkflowDecision | undefined {
+    for (const workflow of workflows) {
+      const fallback = workflow.localFallback?.({ userText, history, actionIntent });
+      if (!fallback) continue;
+      const allowedTools = this.allowedToolsForFallback(fallback.mode, userText);
+      this.log(
+        `[workflow] local fallback ${fallback.mode}(${fallback.confidence.toFixed(2)})` +
+          ` from ${workflow.id}: ${fallback.reason}` +
+          (allowedTools?.length ? ` | tools=${allowedTools.join("|")}` : ""),
+      );
+      return {
+        kind: "fallback",
+        mode: fallback.mode,
+        source: "local",
+        confidence: fallback.confidence,
+        reason: fallback.reason,
+        signals: signalsFromHint(hint),
+        allowedTools,
+      };
     }
     return undefined;
   }

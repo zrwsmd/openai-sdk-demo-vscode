@@ -1,14 +1,13 @@
-# PLC 编程助手 VSCode 插件(OpenAI Agents SDK Demo)
+# plc-agent
 
-CLI 版 demo(`F:\openai-sdk-demo` Python / `F:\openai-sdk-demo-node` JS)的 VSCode 插件形态:
-侧边栏聊天界面,输入框提问,agent 在扩展进程里跑 `@openai/agents`,流式回答 + 工具调用提示。
+面向 PLC 编程与工控工程任务的 VS Code 智能助手，提供侧边栏对话、工作流编排、流式回答和工具调用。
 
 界面参照主流 AI 助手面板:底部输入框(Enter 发送,Shift+Enter 换行)、模式/模型徽标、圆形发送按钮。
 
 ## 运行(F5 调试模式,无需打包)
 
 ```bash
-cd F:/openai-sdk-demo-vscode
+cd plc-agent
 npm install
 ```
 
@@ -126,7 +125,6 @@ npm run test:agent   # SDK 工具链、审批、RunState 跨实例恢复、流�
 ## 打包发布(可选)
 
 ```bash
-npm i -g @vscode/vsce
-vsce package   # 生成 plc-agent-vscode-0.1.0.vsix
-code --install-extension plc-agent-vscode-0.1.0.vsix
+npx @vscode/vsce package   # 生成 plc-agent-1.0.0.vsix
+code --install-extension plc-agent-1.0.0.vsix
 ```
