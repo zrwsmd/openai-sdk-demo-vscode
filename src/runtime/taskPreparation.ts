@@ -337,6 +337,17 @@ export async function classifyDeliveryContract(
       "可交付结果包括代码、文件、文档、报告、数据、项目、配置、方案文本等；普通问答、解释、读取、查询或只要状态信息不算强制交付。" +
       "如果用户说继续、接着、为什么停了等,必须结合历史判断是否仍在追一个未交付的结果。" +
       "requiresDeliverable=true 时列出 1 到 8 个必需交付物；每个交付物必须能用 artifacts 或成功工具回执验证。" +
+      "deliverables 每一项必须且只能使用下列字段名：" +
+      "kind（必填，只能是 code、file、report、data、project、text、unknown 之一）、" +
+      "title（必填，简短标题）、" +
+      "description（必填，说明这项交付物是什么）、" +
+      "required（必填，布尔值，表示是否必需）、" +
+      "acceptableEvidence（必填，非空数组，元素只能是 final_artifact、successful_tool、successful_write、successful_export、delivery_commit）、" +
+      "workspacePersistence（可选，required、not_required 或 optional）、" +
+      "workspaceFileExtension（可选，必须带前导点，例如 .st）、" +
+      "requiredVerificationTools（可选，字符串数组，最多 8 项）、" +
+      "runtimeEntry（可选，required、not_required 或 optional）。" +
+      "不要把 kind 写成 type，不要把 acceptableEvidence 写成 evidence、verification 或 artifacts，也不要自行发明 name、file、path 这类字段名。" +
       "不要默认把程序说明、运行说明、变量说明或使用说明列为独立必需交付物；只有用户明确要求文档、说明书、报告或使用指南时才列出这类交付物。" +
       "当用户强调重点看代码、主要看生成代码或变量模拟即可时，通常只需要代码交付物，不要额外制造说明文档交付物。" +
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
@@ -349,6 +360,9 @@ export async function classifyDeliveryContract(
         : "必须只返回一个 JSON 对象,不要输出 markdown,不要添加解释文字。" +
           "deliverables 中的 ST 代码交付可使用 runtimeEntry 字段，取值为 required、not_required 或 optional。" +
           "只允许字段 requiresDeliverable、reason、deliverables。" +
+          '完整示例：{"requiresDeliverable":true,"reason":"用户要求把给定文本写入 ssrt.txt",' +
+          '"deliverables":[{"kind":"file","title":"ssrt.txt","description":"包含用户给定文本的 ssrt.txt 文件",' +
+          '"required":true,"acceptableEvidence":["successful_write"],"workspacePersistence":"required"}]}。' +
           '不需要交付物时必须返回 {"requiresDeliverable":false,"reason":"...","deliverables":[]}。'),
     ...(useNativeStructuredOutput
       ? { outputType: deliveryContractDecisionSchema }

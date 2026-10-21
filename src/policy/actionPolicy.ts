@@ -44,7 +44,7 @@ export class DefaultActionPolicy implements ActionPolicy {
     // "which file was written just now?" must not be interpreted as a new
     // filesystem action, even when they contain action words.
     if (mentionsWorkspaceFile && isInformationalActionQuery(text)) return undefined;
-    const asksToEdit = /(?:编辑|局部修改|替换|修订|修改|添加|增加|追加|插入|加上?|补上?|删除|移除|格式化|调整?缩进|调整?(?:空白|空格|换行)|patch|edit|replace|append|insert|delete|format)/iu.test(text);
+    const asksToEdit = /(?:编辑|局部修改|替换|修订|修改|添加|增加|追加|插入|加上|补上|加(?:一|两|几)?(?:行|句|段|条)|删除|移除|格式化|调整?缩进|调整?(?:空白|空格|换行)|patch|edit|replace|append|insert|delete|format)/iu.test(text);
     const asksToWrite = /(?:写入|写到|写进|写文件|写|保存到|保存为|保存|落盘|创建|修改|覆盖|\bwrite\b|\bsave\b|\bcreate\b|\bmodify\b|\boverwrite\b)/iu.test(text);
     if (mentionsWorkspaceFile && asksToEdit) return 'edit_file';
     if (mentionsWorkspaceFile && asksToWrite) return 'write_file';

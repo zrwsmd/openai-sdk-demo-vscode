@@ -1228,6 +1228,16 @@ export async function runAgent(
       .some((call) => call.name === requiredActionTool);
   };
 
+  /** Tool names that already succeeded in this run, in first-success order. */
+  const completedToolNames = (): string[] => {
+    const names: string[] = [];
+    for (const call of toolResults.values()) {
+      if (!call.result.ok || names.includes(call.name)) continue;
+      names.push(call.name);
+    }
+    return names;
+  };
+
   const hasCancelledClarification = (): boolean =>
     [...historicalToolResults, ...toolResults.values()].some((call) => {
       if (call.name !== "request_clarification" || !call.result.ok) return false;
@@ -2048,6 +2058,7 @@ export async function runAgent(
   // checkpoint and resumes the same SDK RunState with explicit decisions.
   let approvalRounds = 0;
   let actionReminderUsed = false;
+  let runtimeReminderInput: string | undefined;
   while (true) {
     if (approvalRounds++ >= MAX_TURNS)
       throw new MaxTurnsExceededError("审批恢复次数超过上限");
@@ -2092,7 +2103,9 @@ export async function runAgent(
       }
     }
 
-    const stream = await runner.run(agent, state ?? userText, {
+    const turnInput = state ?? runtimeReminderInput ?? userText;
+    runtimeReminderInput = undefined;
+    const stream = await runner.run(agent, turnInput, {
       stream: true,
       maxTurns: modelTurnLimit,
       session: runnerSession,
@@ -2259,7 +2272,17 @@ export async function runAgent(
       state = undefined;
       structuredOutput = undefined;
       finalizerRequired = false;
-      output = "";
+      // `output` is intentionally kept: if this reminder round produces nothing
+      // usable, the answer already generated must still reach the final result.
+      const completed = completedToolNames();
+      runtimeReminderInput =
+        "【运行时提醒：接着上一轮继续，不要当成新任务】" +
+        (completed.length
+          ? `本轮已经成功执行过 ${completed.join("、")}，这些调用不要重复。`
+          : "") +
+        `系统判断用户请求里可能还需要 ${requiredActionTool}：如果确实需要就执行；` +
+        "如果已有工具回执已经满足用户要求，直接给出最终结论，不要重复相同的工具调用。" +
+        `用户原话：${userText}`;
       continue;
     }
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
