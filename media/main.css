@@ -572,56 +572,118 @@ body.settings-open { overflow: hidden; }
   line-height: 1.45;
 }
 
-.tool-result {
+/* 工具调用：一次调用就是一行。跑的时候 ◐ 在转，跑完变 ✓ 或 !，
+   文字从「正在写入」换成「已写入」，耗时落到行尾。补充信息挂在这行下面，默认收起。
+   连续的 run_command 会收进一个组里，只有一条时跟普通行没区别。 */
+.tool-line {
+  margin: 3px 4px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.tool-line-row {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 8px 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  background: color-mix(in srgb, var(--box) 78%, transparent);
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
-.tool-result.success { border-color: var(--vscode-testing-iconPassed, #4caf7d); border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #4caf7d) 55%, var(--border)); }
-.tool-result.failure { border-color: var(--vscode-errorForeground, #f66); }
-.tool-result.skipped { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
-.tool-result-icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  color: var(--vscode-editor-background, #1e1e1e);
-  background: var(--vscode-testing-iconPassed, #4caf7d);
-  font-size: 11px;
-  font-weight: 700;
+.tool-line-icon {
+  flex: 0 0 12px;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--muted);
 }
-.tool-result.failure .tool-result-icon { background: var(--vscode-errorForeground, #f66); }
-.tool-result.skipped .tool-result-icon {
+.tool-line[data-state='running'] .tool-line-icon {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--box));
-  border: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  animation: tool-line-spin 1.4s linear infinite;
 }
-.tool-result-body { min-width: 0; flex: 1; }
-.tool-result-title { color: var(--fg); line-height: 1.4; word-break: break-word; }
-.tool-result-summary { color: var(--fg); opacity: 0.88; font-size: 12px; line-height: 1.45; margin-top: 4px; word-break: break-word; }
-.tool-result-meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
-.tool-result details { margin-top: 6px; color: var(--muted); font-size: 11px; }
-.tool-result summary { cursor: pointer; user-select: none; }
-.tool-result pre {
+.tool-line[data-state='success'] .tool-line-icon { color: var(--vscode-testing-iconPassed, #4caf7d); }
+.tool-line[data-state='failure'] .tool-line-icon { color: var(--vscode-errorForeground, #f66); }
+@keyframes tool-line-spin {
+  to { transform: rotate(360deg); }
+}
+.tool-line-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-line[data-state='running'] .tool-line-text { color: var(--muted); }
+.tool-line[data-state='failure'] .tool-line-text { color: var(--vscode-errorForeground, #f66); }
+.tool-line-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-line-error {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 2px 0 0 18px;
+  color: var(--vscode-errorForeground, #f66);
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tool-line details {
+  margin: 4px 0 2px 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tool-line summary { cursor: pointer; user-select: none; }
+.tool-line-summary {
+  margin-top: 4px;
+  color: var(--fg);
+  opacity: 0.85;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tool-line pre {
   margin: 5px 0 0;
-  max-height: 160px;
+  max-height: 180px;
   overflow: auto;
   padding: 7px;
-  background: #1a1a1a;
   border: 1px solid var(--border);
   border-radius: 5px;
+  background: color-mix(in srgb, var(--box) 82%, transparent);
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 10px;
 }
+
+.tool-group { margin: 3px 4px; min-width: 0; }
+.tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  user-select: none;
+}
+.tool-group-header::before {
+  content: '▸';
+  width: 10px;
+  font-size: 9px;
+  transition: transform 0.12s ease;
+}
+.tool-group.expanded > .tool-group-header::before { transform: rotate(90deg); }
+.tool-group:not(.single) > .tool-group-header:hover { color: var(--fg); }
+.tool-group[data-failed='1'] > .tool-group-header { color: var(--vscode-errorForeground, #f66); }
+.tool-group-body { display: none; }
+.tool-group.single > .tool-group-header { display: none; }
+.tool-group.single > .tool-group-body { display: block; }
+.tool-group.expanded > .tool-group-body { display: block; padding-left: 12px; }
+.tool-group-body .tool-line { margin: 1px 0; }
 .tool-diff-details { color: var(--muted); }
 .tool-diff {
   max-height: 260px;

@@ -1167,16 +1167,165 @@ function finishWorkflowView(runId, status) {
   renderWorkflowStageView(view);
 }
 
-function startToolHeadline(name, args) {
-  const target = toolArgsSummary(name, args);
-  if (name === 'read_file') return `正在读取${target ? ` · ${target.replace(/^文件 /, '')}` : '文件'}`;
-  if (name === 'write_file') return `正在写入${target ? ` · ${target.replace(/^文件 /, '')}` : '文件'}`;
-  if (name === 'list_files') return `正在列出${target ? ` · ${target.replace(/^目录 /, '')}` : '文件'}`;
-  if (name === 'search_files') return `正在搜索${target ? ` · ${target.replace(/^搜索：/, '')}` : '文件'}`;
-  if (name === 'run_command') return `正在运行${target ? ` · ${target.replace(/^命令：/, '')}` : '命令'}`;
-  if (name === 'export_st_program') return '正在导出 ST 程序';
-  return `正在执行 · ${name}`;
+const TOOL_LINE_VERBS = {
+  read_file: ['正在读取', '已读取'],
+  write_file: ['正在写入', '已写入'],
+  list_files: ['正在列出', '已列出'],
+  search_files: ['正在搜索', '已搜索'],
+  run_command: ['正在运行', '已运行'],
+  export_st_program: ['正在导出', '已导出'],
+};
+
+const TOOL_LINE_MAX_TARGET = 80;
+
+function toolLineTarget(name, args) {
+  // export_st_program 的参数摘要是一句说明而不是具体目标，交给结果标题去说。
+  if (name === 'export_st_program') return '';
+  const summary = toolArgsSummary(name, args);
+  return summary.replace(/^(?:命令|文件|目录|搜索)：/, '');
 }
+
+function toolLineText(name, args, state) {
+  const target = toolLineTarget(name, args);
+  const short = target ? truncateText(target, TOOL_LINE_MAX_TARGET) : '';
+  const verbs = TOOL_LINE_VERBS[name];
+  if (!verbs) {
+    if (state === 'running') return `正在执行 · ${name}`;
+    if (state === 'failure') return short ? `执行失败 · ${name} · ${short}` : `执行失败 · ${name}`;
+    return short ? `已执行 · ${name} · ${short}` : `已执行 · ${name}`;
+  }
+  const verb = state === 'running'
+    ? verbs[0]
+    : state === 'failure'
+      ? `${verbs[0].replace(/^正在/, '')}失败`
+      : verbs[1];
+  return short ? `${verb} · ${short}` : verb;
+}
+
+// 完成后那半行小字：工具名已经在动词里说了，这里只留结果口径和耗时。
+function toolLineMeta(name, formatted, durationMs) {
+  const duration = durationLabel(durationMs);
+  const meta = typeof formatted?.meta === 'string' ? formatted.meta : '';
+  const parts = meta
+    .split(' · ')
+    .filter((part) => part && part !== name && !part.startsWith('耗时 '));
+  const headline = typeof formatted?.headline === 'string' ? formatted.headline : '';
+  const exit = name === 'run_command' ? headline.match(/退出码\s*(-?\d+)/) : null;
+  if (exit) parts.push(`退出码 ${exit[1]}`);
+  // 行数、条数、字节数这类「结果有多大」只在标题里，挪到行尾才有用。
+  const size = headline.match(/·\s*(\d+)\s*(行|项|条结果|条|字节|处)/);
+  if (size && !parts.includes(`${size[1]} ${size[2]}`)) parts.unshift(`${size[1]} ${size[2]}`);
+  if (duration) parts.push(duration);
+  return parts.join(' · ');
+}
+
+function createToolLine(name, args) {
+  const line = document.createElement('div');
+  line.className = 'tool-line';
+  line.dataset.tool = name;
+  line.dataset.state = 'running';
+  const row = document.createElement('div');
+  row.className = 'tool-line-row';
+  const icon = document.createElement('span');
+  icon.className = 'tool-line-icon';
+  icon.textContent = '◐';
+  const text = document.createElement('span');
+  text.className = 'tool-line-text';
+  text.textContent = toolLineText(name, args, 'running');
+  const target = toolLineTarget(name, args);
+  if (target) text.title = target;
+  const meta = document.createElement('span');
+  meta.className = 'tool-line-meta';
+  row.append(icon, text, meta);
+  line.append(row);
+  return line;
+}
+
+function commandGroupState(group) {
+  const body = group.querySelector('.tool-group-body');
+  const rows = body ? [...body.querySelectorAll('.tool-line')] : [];
+  return {
+    rows,
+    count: rows.length,
+    running: rows.filter((row) => row.dataset.state === 'running').length,
+    failed: rows.filter((row) => row.dataset.state === 'failure').length,
+  };
+}
+
+function refreshCommandGroup(group) {
+  if (!group || !group.isConnected) return;
+  const { count, running, failed } = commandGroupState(group);
+  if (!count) {
+    group.remove();
+    return;
+  }
+  group.classList.toggle('single', count === 1);
+  group.dataset.failed = failed > 0 ? '1' : '';
+  if (count === 1) {
+    group.classList.remove('expanded');
+  } else if (running > 0) {
+    group.classList.add('expanded');
+  } else if (!group.dataset.userToggled) {
+    group.classList.remove('expanded');
+  }
+  const header = group.querySelector('.tool-group-header');
+  if (!header) return;
+  header.textContent = running > 0
+    ? `正在运行 ${count} 条命令`
+    : failed > 0
+      ? `已运行 ${count} 条命令 · ${failed} 条失败`
+      : `已运行 ${count} 条命令`;
+}
+
+function createCommandGroup() {
+  const group = document.createElement('div');
+  group.className = 'tool-group single';
+  group.dataset.tool = 'run_command';
+  const header = document.createElement('div');
+  header.className = 'tool-group-header';
+  header.addEventListener('click', () => {
+    const { running } = commandGroupState(group);
+    if (running > 0) return;
+    group.dataset.userToggled = '1';
+    group.classList.toggle('expanded');
+  });
+  const body = document.createElement('div');
+  body.className = 'tool-group-body';
+  group.append(header, body);
+  return group;
+}
+
+function appendToolLine(name, line) {
+  if (name !== 'run_command') {
+    messagesEl.appendChild(line);
+    return line;
+  }
+  const last = messagesEl.lastElementChild;
+  let group;
+  if (last && last.classList.contains('tool-group') && last.dataset.tool === name) {
+    group = last;
+  } else {
+    group = createCommandGroup();
+    if (last && last.classList.contains('tool-line') && last.dataset.tool === name) {
+      messagesEl.insertBefore(group, last);
+      group.querySelector('.tool-group-body').appendChild(last);
+    } else {
+      messagesEl.appendChild(group);
+    }
+  }
+  group.querySelector('.tool-group-body').appendChild(line);
+  refreshCommandGroup(group);
+  return line;
+}
+
+function removeToolLine(run) {
+  const line = run?.startNote;
+  if (!line || !line.isConnected) return;
+  const group = line.closest('.tool-group');
+  line.remove();
+  if (group) refreshCommandGroup(group);
+}
+
 
 function formatToolInputError(name, rawError, meta, rawArgs) {
   const text = String(rawError ?? '').trim();
@@ -1387,35 +1536,37 @@ function formatToolResult(name, summary, result, run, durationMs) {
   };
 }
 
-function addToolResult(name, ok, summary, result, run, durationMs) {
-  const formatted = formatToolResult(name, summary, result, run, durationMs);
-  if (formatted.hidden) return null;
-  const status = formatted.status || (ok ? 'success' : 'failure');
-  const note = document.createElement('div');
-  note.className = `tool-result ${status}`;
-  const icon = document.createElement('span');
-  icon.className = 'tool-result-icon';
-  icon.textContent = status === 'success' ? '✓' : status === 'skipped' ? 'i' : '!';
-  const body = document.createElement('div');
-  body.className = 'tool-result-body';
-  if (status === 'failure' && !formatted.suppressFailurePrefix) formatted.headline = formatted.headline.startsWith('执行失败')
-    ? formatted.headline
-    : `执行失败：${formatted.headline}`;
-  const title = document.createElement('div');
-  title.className = 'tool-result-title';
-  title.textContent = formatted.headline;
-  body.appendChild(title);
-  if (formatted.summary) {
-    const summaryEl = document.createElement('div');
-    summaryEl.className = 'tool-result-summary';
-    summaryEl.textContent = formatted.summary;
-    body.appendChild(summaryEl);
+// 工具跑完之后就地改写那一行：图标、动词、耗时都在原处换掉，不再另起一张卡。
+// 补充信息（diff、结果摘要、完整 JSON、失败原因）挂在行下面，默认收起。
+function finishToolLine(line, name, formatted, state, durationMs, run) {
+  line.dataset.state = state;
+  const icon = line.querySelector('.tool-line-icon');
+  if (icon) icon.textContent = state === 'success' ? '✓' : state === 'failure' ? '!' : 'i';
+  const text = line.querySelector('.tool-line-text');
+  if (text) {
+    const composed = toolLineText(name, run?.args, state);
+    const headline = typeof formatted?.headline === 'string'
+      ? truncateText(formatted.headline, TOOL_LINE_MAX_TARGET + 20)
+      : '';
+    // 参数里没有具体目标时（导出、重放里缺 tool.started）用结果标题兜底，
+    // 否则这一行只剩一个光秃秃的动词。
+    text.textContent = composed.includes(' · ') || !headline ? composed : headline;
+    const target = toolLineTarget(name, run?.args);
+    if (target) text.title = target;
+    else text.removeAttribute('title');
   }
-  const meta = document.createElement('div');
-  meta.className = 'tool-result-meta';
-  meta.textContent = formatted.meta || name;
-  body.appendChild(meta);
-  if (formatted.diff) {
+  const meta = line.querySelector('.tool-line-meta');
+  if (meta) meta.textContent = toolLineMeta(name, formatted, durationMs);
+  if (state === 'failure') {
+    const reason = String(formatted?.headline || '').replace(/^执行失败[：:]\s*/, '').trim()
+      || String(formatted?.summary || '').trim()
+      || '执行失败';
+    const errorEl = document.createElement('div');
+    errorEl.className = 'tool-line-error';
+    errorEl.textContent = truncateText(reason, 400);
+    line.appendChild(errorEl);
+  }
+  if (formatted?.diff) {
     const diffDetails = document.createElement('details');
     diffDetails.className = 'tool-diff-details';
     diffDetails.open = true;
@@ -1423,37 +1574,64 @@ function addToolResult(name, ok, summary, result, run, durationMs) {
     diffSummary.textContent = '查看 Diff';
     const diffPre = document.createElement('pre');
     diffPre.className = 'tool-diff';
-    for (const line of String(formatted.diff).split('\n')) {
+    for (const diffLine of String(formatted.diff).split('\n')) {
       const lineEl = document.createElement('span');
-      lineEl.className = line.startsWith('+') && !line.startsWith('+++')
+      lineEl.className = diffLine.startsWith('+') && !diffLine.startsWith('+++')
         ? 'diff-add'
-        : line.startsWith('-') && !line.startsWith('---')
+        : diffLine.startsWith('-') && !diffLine.startsWith('---')
           ? 'diff-remove'
-          : line.startsWith('@@')
+          : diffLine.startsWith('@@')
             ? 'diff-hunk'
-            : line.startsWith('---') || line.startsWith('+++')
+            : diffLine.startsWith('---') || diffLine.startsWith('+++')
               ? 'diff-header'
               : '';
-      lineEl.textContent = line;
+      lineEl.textContent = diffLine;
       diffPre.appendChild(lineEl);
       diffPre.appendChild(document.createTextNode('\n'));
     }
     diffDetails.append(diffSummary, diffPre);
-    body.appendChild(diffDetails);
+    line.appendChild(diffDetails);
   }
-  if (formatted.detail) {
+  const summaryText = typeof formatted?.summary === 'string' ? formatted.summary.trim() : '';
+  const detail = formatted?.detail;
+  if (summaryText || detail) {
     const details = document.createElement('details');
-    const summaryEl = document.createElement('summary');
-    summaryEl.textContent = '查看执行详情';
-    const pre = document.createElement('pre');
-    pre.textContent = JSON.stringify(formatted.detail, null, 2);
-    details.append(summaryEl, pre);
-    body.appendChild(details);
+    details.className = 'tool-line-details';
+    const detailsSummary = document.createElement('summary');
+    detailsSummary.textContent = '查看详情';
+    details.appendChild(detailsSummary);
+    if (summaryText) {
+      const summaryEl = document.createElement('div');
+      summaryEl.className = 'tool-line-summary';
+      summaryEl.textContent = summaryText;
+      details.appendChild(summaryEl);
+    }
+    if (detail) {
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(detail, null, 2);
+      details.appendChild(pre);
+    }
+    line.appendChild(details);
   }
-  note.append(icon, body);
-  messagesEl.appendChild(note);
+}
+
+function addToolResult(name, ok, summary, result, run, durationMs) {
+  const formatted = formatToolResult(name, summary, result, run, durationMs);
+  if (formatted.hidden) {
+    removeToolLine(run);
+    return null;
+  }
+  const state = ok ? 'success' : 'failure';
+  let line = run?.startNote;
+  if (!line || !line.isConnected) {
+    // 历史回放里可能只有 tool.completed、没有 tool.started，这里补一行终态。
+    line = appendToolLine(name, createToolLine(name, run?.args ?? ''));
+  }
+  finishToolLine(line, name, formatted, state, durationMs, run);
+  const group = line.closest('.tool-group');
+  if (group) refreshCommandGroup(group);
   scrollBottom();
-  return note;
+  return line;
 }
 
 function addDiagnosticReport(report) {
@@ -2998,7 +3176,7 @@ function handleProtocolEvent(event) {
       closeThinkingAtBoundary(event.runId || currentRunId);
       const run = rememberToolRun(name, payload);
       updateWorkflowStage(event.runId, name, 'running');
-      run.startNote = addNote('tool-note', startToolHeadline(name, payload.arguments));
+      run.startNote = appendToolLine(name, createToolLine(name, payload.arguments));
       hadToolThisTurn = true;
       pendingToolCount += 1;
       break;
@@ -3015,7 +3193,7 @@ function handleProtocolEvent(event) {
         ? payload.durationMs
         : measuredDuration;
       if (isHistoricalArgumentGuardResult(summary, payload.result, payload.result)) {
-        if (run?.startNote?.isConnected) run.startNote.remove();
+        removeToolLine(run);
         updateWorkflowStage(event.runId, name, 'completed');
         pendingToolCount = Math.max(0, pendingToolCount - 1);
         flushPendingAgentText();
