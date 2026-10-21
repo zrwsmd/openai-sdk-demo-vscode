@@ -331,11 +331,42 @@ const GENERAL_WORKSPACE_PROMPT =
   "warning 不阻断交付，但要在最终答复里说明。" +
   '用户要求生成代码时，默认把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
   "如果用户明确给出目标目录或绝对路径，必须把它作为写入目标；不要把相对文件名静默解析到另一个工作区，目标不一致时先澄清。" +
-  "创建工程成功后，后续相对路径优先使用新工程授权根目录；其他已授权工作区仍可用。" +
   "当前工作区落盘时，如果 write_file 或 edit_file 可用，必须调用合适的文件工具；不要只用文字声称已经写入。" +
   "需要查看目录、读文件、搜索代码或执行命令时，只能在对应工具出现在当前可用工具列表时调用。" +
   "当用户明确要求把内容写入工作区文件时，必须调用 write_file；当用户要求局部修改、替换或编辑已有文件时，优先调用 edit_file；" +
   "只有收到工具成功回执后，才能在最终结果中报告写入完成。";
+
+/**
+ * 把工作区绝对路径写进提示词。
+ *
+ * 不写这一段时,提示词里只有"当前工作区"四个字,而工具回执全是相对路径:
+ * list_files 返回文件名,read_file 返回相对 path。模型从头到尾不知道自己在哪个
+ * 盘哪个目录,一旦在当前目录里找不到要找的东西,就只能退回去用历史对话里那条
+ * 绝对路径 —— 那是它手上唯一确定的位置。结果就是它跑去工作区外面找,触发目录授权。
+ *
+ * 把边界说清楚之后,"当前工作区"从一个空词变成一个具体目录:当前目录里没有就是
+ * 没有,不必再翻历史;真要去外面,它也知道那是外面。
+ */
+function renderWorkspaceContextPrompt(cfg: AgentConfig): string {
+  const roots = [
+    ...new Set(
+      (cfg.workspaceRoots?.length ? cfg.workspaceRoots : [cfg.workspaceRoot])
+        .map((root) => (typeof root === "string" ? root.trim() : ""))
+        .filter(Boolean),
+    ),
+  ];
+  if (!roots.length) return "";
+  const [primary, ...others] = roots;
+  return (
+    "\n\n当前工作区(文件工具的作用域边界):\n" +
+    `- 主工作区: ${primary}\n` +
+    others.map((root) => `- 其他已授权工作区: ${root}\n`).join("") +
+    "相对路径一律解析到主工作区;工具回执里的路径也是相对主工作区的,不是绝对路径。\n" +
+    '用户说"当前工作区"时指的就是上面这个目录。要找的东西不在里面就如实说明,' +
+    "不要因为当前目录里没有,就改用历史对话里出现过的其他绝对路径 —— 除非用户在本轮明确指定了那个目录。" +
+    "确实需要访问工作区以外的目录时,先向用户说明要去哪里、为什么。"
+  );
+}
 
 const WORKFLOW_EXECUTION_PROMPT =
   "\n\n当前请求由运行时 workflow 接管。必须严格按照 workflow 阶段、交付契约和工具回执执行。" +
@@ -667,7 +698,7 @@ export async function runAgent(
         : workflowRuntime
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
-  ) + fallbackModePrompt + (
+  ) + renderWorkspaceContextPrompt(cfg) + fallbackModePrompt + (
     availableToolNames.has(LOAD_SKILL_TOOL_NAME)
       ? renderSkillCatalogPrompt(skillCatalog)
       : ""
