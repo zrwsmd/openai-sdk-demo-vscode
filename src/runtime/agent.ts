@@ -140,6 +140,11 @@ import {
   stripHistoricalContextMarker,
   toolNameOf,
 } from "./agentHistory";
+import {
+  discoverSkillCatalog,
+  LOAD_SKILL_TOOL_NAME,
+  renderSkillCatalogPrompt,
+} from "./skills/skillCatalog";
 
 export {
   buildModelAdapter,
@@ -388,6 +393,11 @@ export async function runAgent(
     cfg.workspaceRoot,
     cfg.workspaceRoots,
   );
+  const skillCatalog = await discoverSkillCatalog({
+    workspaceRoot: cfg.workspaceRoot,
+    workspaceRoots: cfg.workspaceRoots,
+    enabled: cfg.skillsEnabled !== false,
+  });
   const modelAdapter = buildModelAdapter(cfg);
   const model = withOneShotToolChoice(modelAdapter.model);
   const promptCacheSettings = promptCacheModelSettings(cfg);
@@ -570,6 +580,7 @@ export async function runAgent(
   const createdTools = toolRegistry.createTools({
     cfg,
     userText,
+    skillCatalog,
     workflowContract: options.deliveryContract,
     workflow: workflowRuntime,
     diagnosticReporter: reportDiagnostics,
@@ -592,16 +603,24 @@ export async function runAgent(
       return false;
     }
     const name = toolNameOf(item);
-    return typeof name === "string" &&
-      workflowBusinessToolPolicy.names?.includes(name) === true;
+    return typeof name === "string" && (
+      workflowBusinessToolPolicy.names?.includes(name) === true ||
+      (name === LOAD_SKILL_TOOL_NAME && skillCatalog.skills.length > 0)
+    );
   });
+  const withSkillTool = (names: readonly string[]): readonly string[] =>
+    skillCatalog.skills.length > 0
+      ? [...new Set([...names, LOAD_SKILL_TOOL_NAME])]
+      : names;
   const allowedBusinessToolNames = workflowBusinessToolPolicy
     ? workflowBusinessToolPolicy.mode === "allow_list"
-      ? workflowBusinessToolPolicy.names ?? []
+      ? withSkillTool(workflowBusinessToolPolicy.names ?? [])
       : workflowBusinessToolPolicy.mode === "deny_all"
         ? []
         : undefined
-    : options.allowedToolNames;
+    : options.allowedToolNames
+      ? withSkillTool(options.allowedToolNames)
+      : undefined;
   const tools = toolRegistry.orderTools(
     composeToolSet(
       registeredTools,
@@ -648,7 +667,11 @@ export async function runAgent(
         : workflowRuntime
           ? BASE_AGENT_PROMPT + availableToolsPrompt + WORKFLOW_EXECUTION_PROMPT
           : BASE_AGENT_PROMPT + availableToolsPrompt + GENERAL_WORKSPACE_PROMPT
-  ) + fallbackModePrompt;
+  ) + fallbackModePrompt + (
+    availableToolNames.has(LOAD_SKILL_TOOL_NAME)
+      ? renderSkillCatalogPrompt(skillCatalog)
+      : ""
+  );
   const dynamicExecutionInstructions = activePlan
     ? "\n\n计划如下：\n" + renderTaskPlan(activePlan)
     : options.teamTask

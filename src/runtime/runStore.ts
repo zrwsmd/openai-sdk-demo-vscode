@@ -66,6 +66,8 @@ export interface DurableRunConfig {
   promptCache?: PromptCacheSettings;
   /** Unified tool approval behavior persisted for resume/retry. */
   permissionMode?: import('./agentConfig').PermissionMode;
+  /** Whether project/user Agent Skills are available during this run. */
+  skillsEnabled?: boolean;
   /** Local MCP client settings persisted for resume/retry. Disabled by default. */
   mcp?: McpSettings;
   orchestration?: IndustrialAgentMode;
@@ -463,6 +465,7 @@ export class JsonRunStore implements RunStore {
       (run.config.runCommand !== undefined && !isRunCommandConfig(run.config.runCommand)) ||
       (run.config.modelContext !== undefined && !isModelContextProfile(run.config.modelContext)) ||
       (run.config.permissionMode !== undefined && !isPermissionMode(run.config.permissionMode)) ||
+      (run.config.skillsEnabled !== undefined && typeof run.config.skillsEnabled !== 'boolean') ||
       (run.config.mcp !== undefined && !isMcpSettings(run.config.mcp)) ||
       (run.config.orchestration !== undefined && !['auto', 'single', 'team'].includes(run.config.orchestration)) ||
       (run.config.extensions !== undefined && !isJsonObject(run.config.extensions)) ||

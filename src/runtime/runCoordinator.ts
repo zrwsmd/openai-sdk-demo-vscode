@@ -34,6 +34,7 @@ import { AgentDecisionService } from './decision/agentDecision';
 import type { TaskMcpServerChoice } from './decision/agentDecision';
 import type { AuditEventType, AuditSink } from '../observability/audit';
 import type { RuntimeServiceContainer } from './services';
+import { LOAD_SKILL_TOOL_NAME } from './skills/skillCatalog';
 import { AgentEventFactory, type AgentProtocolEvent } from '../protocol/events';
 import { createAgentResult } from '../protocol/results';
 import {
@@ -550,6 +551,7 @@ export class RunCoordinator {
         ...this.toolRegistry.getToolCatalog().list().map((capability) => capability.name),
         'deliver_artifact',
         'report_plan_progress',
+        LOAD_SKILL_TOOL_NAME,
       ],
       policy: cfg.policy,
       policyContext: {

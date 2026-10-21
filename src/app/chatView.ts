@@ -662,6 +662,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       })),
       orchestration: cfg.get<'auto' | 'single' | 'team'>('orchestration') ?? 'auto',
       permissionMode,
+      skillsEnabled: cfg.get<boolean>('skills.enabled') ?? true,
       policyContext: {
         allowedCommands,
         allowedDevices,
@@ -1099,6 +1100,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       promptCache: live.promptCache,
       orchestration: live.orchestration,
       permissionMode: live.permissionMode,
+      skillsEnabled: live.skillsEnabled,
       extensions: createStAnalyzerConfigExtension(this.context),
       jev: {
         enabled: live.jev.enabled,

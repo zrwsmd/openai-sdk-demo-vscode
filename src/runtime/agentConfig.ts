@@ -67,6 +67,8 @@ export interface AgentConfig {
   promptCache?: PromptCacheSettings;
   /** Unified tool approval behavior. Defaults to asking for effectful tools. */
   permissionMode?: PermissionMode;
+  /** Load project .agents/skills and user ~/.agents/skills instructions. */
+  skillsEnabled?: boolean;
   /** Host-selected command execution backend. Defaults to LocalCommandRunner. */
   commandRunner?: CommandRunner;
   /** Host UI channel for asking the user to clarify an ambiguous request. */

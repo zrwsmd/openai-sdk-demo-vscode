@@ -35,6 +35,32 @@ npm install
 
 兜底优先级:插件内设置 > VSCode 设置(`plcAgent.*`)> 环境变量(`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `AGENT_MODEL`)> 官方 API + gpt-4o-mini。
 
+## Agent Skills
+
+支持项目级和用户级 Agent Skills。每个技能是一个目录，目录中包含 `SKILL.md`，文件需以 YAML frontmatter 声明匹配的目录名和用途：
+
+```text
+.agents/skills/
+└── st-review/
+    ├── SKILL.md
+    └── references/
+        └── checklist.md
+```
+
+项目技能目录为 `<workspace>/.agents/skills/<name>/SKILL.md`；用户技能目录为 `~/.agents/skills/<name>/SKILL.md`。同名时项目技能优先。每轮只把技能名称和描述加入提示词，模型认为当前任务匹配时才调用 `load_skill` 读取正文，也可以用 `file` 参数读取技能目录内的参考文本。资源路径限制在技能目录内；技能内容不会覆盖用户本轮要求、工作流和工具安全规则。通过 VS Code 设置 `plcAgent.skills.enabled` 可以关闭技能。
+
+`SKILL.md` 开头的元数据格式：
+
+```markdown
+---
+name: st-review
+description: Review IEC 61131-3 ST programs for project conventions.
+---
+
+# ST Review
+检查项目已有代码风格，再提出修改建议。
+```
+
 ## 架构(为长成成熟 agent 而设计)
 
 ```

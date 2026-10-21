@@ -6,6 +6,7 @@ createAppWorkflowRegistry();
 createAppToolRegistry();
 
 export * from '../src/runtime/agent';
+export * from '../src/runtime/skills/skillCatalog';
 export {
   buildHistoricalExplanationContext,
   projectHistoryForClassifier,

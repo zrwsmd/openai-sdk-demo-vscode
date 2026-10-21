@@ -7,6 +7,8 @@ import { createWriteFileTool } from "./writeFileTool";
 import { createEditFileTool } from "./editFileTool";
 import { createClarificationTool } from "./clarificationTool";
 import { CLARIFICATION_TOOL_NAME } from "../clarification";
+import { createLoadSkillTool } from "../skills/skillTool";
+import { LOAD_SKILL_TOOL_NAME } from "../skills/skillCatalog";
 
 const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
   {
@@ -107,6 +109,7 @@ export function createCoreToolProvider(): ToolProvider {
   return {
     id: "core",
     capabilities: CORE_TOOL_CAPABILITIES,
+    riskByTool: { [LOAD_SKILL_TOOL_NAME]: "read" },
     createTools(context): readonly Tool[] {
       const {
         getIoTable,
@@ -115,7 +118,9 @@ export function createCoreToolProvider(): ToolProvider {
         readFileTool,
         searchFilesTool,
       } = createWorkspaceReadTools(context);
+      const loadSkillTool = createLoadSkillTool(context);
       return [
+        ...(loadSkillTool ? [loadSkillTool] : []),
         getIoTable,
         readPlcVariables,
         listFilesTool,

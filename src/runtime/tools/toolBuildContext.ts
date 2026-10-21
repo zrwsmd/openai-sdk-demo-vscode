@@ -29,6 +29,7 @@ import {
   EMPTY_RUNTIME_SERVICES,
   type RuntimeServiceContainer,
 } from "../services";
+import type { SkillCatalog } from "../skills/skillCatalog";
 
 export type ToolEffect = "none" | "filesystem" | "process" | "device";
 export type BeforeEffectResourceKind =
@@ -136,6 +137,7 @@ export type ToolGuardrails = ReturnType<typeof buildToolGuardrails>;
 
 export interface ToolBuildContext {
   cfg: AgentConfig;
+  skillCatalog?: SkillCatalog;
   /** 当前轮用户原始需求，供领域工具生成上下文相关建议；不作为工具参数暴露给模型。 */
   userText?: string;
   services: RuntimeServiceContainer;
@@ -482,6 +484,7 @@ export function createToolBuildContext(
   cfg: AgentConfig,
   options: {
     userText?: string;
+    skillCatalog?: SkillCatalog;
     workflowContract?: WorkflowContract;
     workflow?: WorkflowRuntime;
     diagnosticReporter?: DiagnosticSideReporter;
@@ -599,6 +602,7 @@ export function createToolBuildContext(
 
   return {
     cfg,
+    skillCatalog: options.skillCatalog,
     userText: options.userText,
     services: cfg.services ?? EMPTY_RUNTIME_SERVICES,
     policy,

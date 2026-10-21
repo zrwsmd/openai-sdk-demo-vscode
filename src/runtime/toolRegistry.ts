@@ -24,6 +24,7 @@ import {
   type ToolBuildContext,
 } from "./tools/toolBuildContext";
 import { createCoreToolProvider } from "./tools/coreToolProvider";
+import type { SkillCatalog } from "./skills/skillCatalog";
 import type { WorkflowContract, WorkflowRuntime } from "./workflow/types";
 
 export { commandToolResult };
@@ -199,6 +200,7 @@ export class ToolRegistry {
   createTools(options: {
     cfg: AgentConfig;
     userText?: string;
+    skillCatalog?: SkillCatalog;
     workflowContract?: WorkflowContract;
     workflow?: WorkflowRuntime;
     diagnosticReporter?: DiagnosticSideReporter;
@@ -220,6 +222,7 @@ export class ToolRegistry {
     };
     const context = createToolBuildContext(options.cfg, {
       userText: options.userText,
+      skillCatalog: options.skillCatalog,
       workflowContract: options.workflowContract,
       workflow: options.workflow,
       diagnosticReporter: options.diagnosticReporter,
