@@ -8,6 +8,7 @@ import { WorkspaceScope } from '../workspace/workspaceScope';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
+  type PlcIecSourceConfig,
   type PlcPouConfig,
   type PlcRuntimeConfig,
   type PlcTaskConfig,
@@ -17,6 +18,7 @@ import {
   type PlcRuntimeConfigState,
 } from './plcRuntimeConfigRepository';
 import {
+  classifyPlcIecSource,
   extractPlcPouDeclarations,
   extractPlcProgramDeclarations,
   inspectPlcProgramBindings,
@@ -58,6 +60,7 @@ export interface PlcRuntimeConfigSyncPlan {
   filePath: string;
   action: 'create_config' | 'create_task' | 'bind_program' | 'sync_pous';
   pous: readonly PlcPouConfig[];
+  iecSources: readonly PlcIecSourceConfig[];
   programName?: string;
   source: string;
   taskName?: string;
@@ -484,14 +487,18 @@ function normalizeTaskSuggestions(
 }
 
 function createTaskInstance(
-  task: PlcTaskConfig | undefined,
+  existingNames: Iterable<string>,
   programName: string,
 ): PlcTaskConfig['instances'][number] {
   const name = uniqueName(
     `instance_${programName}`,
-    task?.instances.map((item) => item.name) ?? [],
+    existingNames,
   );
   return { name, pou: programName };
+}
+
+function allInstanceNames(config: PlcRuntimeConfig): string[] {
+  return config.tasks.flatMap((task) => task.instances.map((instance) => instance.name));
 }
 
 function cloneConfig(config: PlcRuntimeConfig): PlcRuntimeConfig {
@@ -515,11 +522,16 @@ function pousForSource(content: string, source: string): PlcPouConfig[] {
   });
 }
 
-async function collectWorkspacePous(
+interface WorkspacePlcIndex {
+  pous: PlcPouConfig[];
+  iecSources: PlcIecSourceConfig[];
+}
+
+async function collectWorkspacePlcIndex(
   workspaceRoot: string,
   pendingSource: string,
   pendingContent: string,
-): Promise<PlcPouConfig[]> {
+): Promise<WorkspacePlcIndex> {
   const pendingKey = normalizeSource(pendingSource).toLocaleLowerCase();
   const collected = await collectWorkspaceStContext(
     new WorkspaceScope([workspaceRoot]),
@@ -549,6 +561,19 @@ async function collectWorkspacePous(
     .sort((left, right) => left.source.localeCompare(right.source));
 
   const byName = new Map<string, PlcPouConfig>();
+  const bySource = new Map<string, PlcIecSourceConfig>();
+  const addSource = (content: string, source: string): void => {
+    const kind = classifyPlcIecSource(content);
+    if (!kind) return;
+    const key = normalizeSource(source).toLocaleLowerCase();
+    const existing = bySource.get(key);
+    if (existing && existing.kind !== kind) {
+      throw new PlcRuntimeConfigError(
+        `IEC 源文件 ${source} 同时被识别为 ${existing.kind} 和 ${kind}`,
+      );
+    }
+    bySource.set(key, { source: normalizeSource(source), kind });
+  };
   const addPous = (pous: readonly PlcPouConfig[]): void => {
     for (const pou of pous) {
       const key = pou.name.toLocaleUpperCase();
@@ -563,17 +588,24 @@ async function collectWorkspacePous(
   };
 
   for (const file of files) {
+    addSource(file.content, file.source);
     addPous(pousForSource(file.content, file.source));
   }
+  addSource(pendingContent, pendingSource);
   addPous(pousForSource(pendingContent, pendingSource));
-  return [...byName.values()].sort((left, right) =>
-    left.source.localeCompare(right.source) || left.name.localeCompare(right.name),
-  );
+  return {
+    pous: [...byName.values()].sort((left, right) =>
+      left.source.localeCompare(right.source) || left.name.localeCompare(right.name),
+    ),
+    iecSources: [...bySource.values()].sort((left, right) =>
+      left.source.localeCompare(right.source),
+    ),
+  };
 }
 
-function configWithWorkspacePous(
+function configWithWorkspaceIndex(
   state: PlcRuntimeConfigState,
-  pous: readonly PlcPouConfig[],
+  index: WorkspacePlcIndex,
 ): { config: PlcRuntimeConfig; changed: boolean } {
   const config: PlcRuntimeConfig = state.status === 'ready'
     ? cloneConfig(state.config)
@@ -581,11 +613,13 @@ function configWithWorkspacePous(
         schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
         tasks: [],
         pous: [],
+        iecSources: [],
+        libraries: [],
         devices: [],
         networks: [],
         ioMappings: [],
       };
-  const declaredNames = new Set(pous.map((pou) => pou.name.toLocaleUpperCase()));
+  const declaredNames = new Set(index.pous.map((pou) => pou.name.toLocaleUpperCase()));
   const removed = config.pous.filter(
     (existing) => !declaredNames.has(existing.name.toLocaleUpperCase()),
   );
@@ -601,9 +635,13 @@ function configWithWorkspacePous(
       );
     }
   }
-  const before = JSON.stringify(config.pous);
-  config.pous = [...pous];
-  return { config, changed: JSON.stringify(config.pous) !== before };
+  const before = JSON.stringify({ pous: config.pous, iecSources: config.iecSources });
+  config.pous = [...index.pous];
+  config.iecSources = [...index.iecSources];
+  return {
+    config,
+    changed: JSON.stringify({ pous: config.pous, iecSources: config.iecSources }) !== before,
+  };
 }
 
 function applySelection(
@@ -625,7 +663,7 @@ function applySelection(
       periodMs: selection.periodMs,
       priority: selection.priority,
       cpuCore: selection.cpuCore,
-      instances: [createTaskInstance(undefined, programName)],
+      instances: [createTaskInstance([], programName)],
     };
     return {
       action: 'create_config',
@@ -651,7 +689,7 @@ function applySelection(
   if (selection.action === 'bind_program') {
     const task = config.tasks.find((item) => item.name === selection.taskName);
     if (!task) throw new PlcRuntimeConfigError(`未找到任务: ${selection.taskName}`);
-    task.instances.push(createTaskInstance(task, programName));
+    task.instances.push(createTaskInstance(allInstanceNames(config), programName));
     return {
       config,
       action: 'bind_program',
@@ -668,7 +706,7 @@ function applySelection(
     periodMs: selection.periodMs,
     priority: selection.priority,
     cpuCore: selection.cpuCore,
-    instances: [createTaskInstance(undefined, programName)],
+    instances: [createTaskInstance(allInstanceNames(config), programName)],
   };
   if (!config.devices.some((device) => device.id === selection.deviceId)) {
     config.devices.push({
@@ -805,17 +843,18 @@ export async function preparePlcRuntimeConfigSync(
   if (state.status === 'invalid') {
     throw new PlcRuntimeConfigError(`plc-runtime.json 无法解析，先修复后再生成任务组态: ${state.error.message}`);
   }
-  const workspacePous = await collectWorkspacePous(
+  const workspaceIndex = await collectWorkspacePlcIndex(
     options.workspaceRoot,
     source,
     options.content,
   );
-  if (workspacePous.length === 0 && state.status !== 'ready') return undefined;
-  const synchronized = configWithWorkspacePous(state, workspacePous);
+  if (workspaceIndex.iecSources.length === 0 && state.status !== 'ready') return undefined;
+  const synchronized = configWithWorkspaceIndex(state, workspaceIndex);
   const indexOnlyPlan = (): PlcRuntimeConfigSyncPlan => ({
     filePath: repository.filePath,
     action: 'sync_pous',
-    pous: workspacePous,
+    pous: workspaceIndex.pous,
+    iecSources: workspaceIndex.iecSources,
     source,
     commit: async () => (await repository.save(synchronized.config)).config,
   });
@@ -874,7 +913,8 @@ export async function preparePlcRuntimeConfigSync(
   return {
     filePath: repository.filePath,
     action: applied.action,
-    pous: workspacePous,
+    pous: workspaceIndex.pous,
+    iecSources: workspaceIndex.iecSources,
     programName,
     source,
     taskName: applied.taskName,

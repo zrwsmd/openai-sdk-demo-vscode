@@ -178,6 +178,16 @@ export function extractPlcProgramDeclarations(text: string): PlcProgramDeclarati
   );
 }
 
+export function classifyPlcIecSource(
+  text: string,
+): 'pou' | 'dataType' | 'globalVariables' | undefined {
+  if (extractPlcPouDeclarations(text).length > 0) return 'pou';
+  const masked = maskNonCode(text);
+  if (/\bVAR_GLOBAL\b/iu.test(masked)) return 'globalVariables';
+  if (/\bTYPE\s+[A-Za-z_][A-Za-z0-9_]*/iu.test(masked)) return 'dataType';
+  return undefined;
+}
+
 function allProgramBindings(config: PlcRuntimeConfig): PlcProgramBindingMatch[] {
   const matches: PlcProgramBindingMatch[] = [];
   const pous = new Map(config.pous.map((pou) => [nameKey(pou.name), pou]));

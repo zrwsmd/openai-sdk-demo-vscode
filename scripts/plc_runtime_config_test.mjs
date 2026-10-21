@@ -24,7 +24,13 @@ const valid = {
 };
 
 const normalized = validatePlcRuntimeConfig(valid);
-if (normalized.schemaVersion !== 2 || normalized.pous[0].source !== 'src/PLC_PRG.st') {
+if (
+  normalized.schemaVersion !== 2 ||
+  normalized.pous[0].source !== 'src/PLC_PRG.st' ||
+  normalized.iecSources[0]?.source !== 'src/PLC_PRG.st' ||
+  normalized.iecSources[0]?.kind !== 'pou' ||
+  normalized.libraries.length !== 0
+) {
   throw new Error('v2 配置标准化失败');
 }
 
@@ -49,6 +55,12 @@ if (
 }
 
 const complete = structuredClone(valid);
+complete.iecSources = [
+  { source: 'src/PLC_PRG.st', kind: 'pou' },
+  { source: 'src/types.st', kind: 'dataType' },
+  { source: 'src/global_var.global.st', kind: 'globalVariables' },
+];
+complete.libraries = ['SMC_Basic'];
 complete.devices[0].points.push({
   id: 'start',
   address: { kind: 'direct', address: '%IX0.0' },
@@ -63,6 +75,8 @@ complete.networks.push({
 });
 complete.devices.push({
   id: 'rio_1', role: 'remote', model: 'RIO',
+  profileId: 'modbus:RIO', taskName: 'MainTask', globalVariable: 'RemoteIo',
+  configRef: 'devices/rio_1.json',
   points: [{
     id: 'do0',
     address: { kind: 'protocol', networkId: 'mb_tcp_1', area: 'coil', offset: 0, wireType: 'BOOL' },
@@ -79,6 +93,9 @@ const normalizedComplete = validatePlcRuntimeConfig(complete);
 if (
   normalizedComplete.devices[1].connections?.[0].endpoint?.port !== 502 ||
   normalizedComplete.devices[1].points[0].address.kind !== 'protocol' ||
+  normalizedComplete.devices[1].taskName !== 'MainTask' ||
+  normalizedComplete.iecSources[2].kind !== 'globalVariables' ||
+  normalizedComplete.libraries[0] !== 'SMC_Basic' ||
   normalizedComplete.runtimeOverrides?.dataArea?.memory !== 16384
 ) {
   throw new Error('完整 v2 设备、网络或运行时覆盖字段解析失败');
@@ -94,7 +111,13 @@ const legacy = {
   }] },
 };
 const migrated = validatePlcRuntimeConfig(legacy);
-if (migrated.schemaVersion !== 2 || migrated.tasks[0].deviceId !== 'PLC' || migrated.pous[0].name !== 'PLC_PRG') {
+if (
+  migrated.schemaVersion !== 2 ||
+  migrated.tasks[0].deviceId !== 'PLC' ||
+  migrated.pous[0].name !== 'PLC_PRG' ||
+  migrated.iecSources[0]?.kind !== 'pou' ||
+  migrated.libraries.length !== 0
+) {
   throw new Error('v1 配置没有迁移到 v2');
 }
 
@@ -102,7 +125,12 @@ const store = new PlcRuntimeConfigStore(filePath);
 if (await store.read() !== undefined) throw new Error('不存在的配置不应被伪造为默认配置');
 await store.write(legacy);
 const rawWritten = JSON.parse(await fs.readFile(filePath, 'utf8'));
-if (rawWritten.schemaVersion !== 2 || rawWritten.configuration !== undefined) {
+if (
+  rawWritten.schemaVersion !== 2 ||
+  rawWritten.configuration !== undefined ||
+  !Array.isArray(rawWritten.iecSources) ||
+  !Array.isArray(rawWritten.libraries)
+) {
   throw new Error('保存旧配置时没有落盘为 v2');
 }
 const loaded = await store.read();
@@ -114,6 +142,14 @@ const invalidCases = [
   ['任务名称重复', (value) => { value.tasks.push(structuredClone(value.tasks[0])); }, '名称重复'],
   ['未知字段', (value) => { value.tasks[0].unexpected = true; }, '不支持的字段'],
   ['POU 引用不存在', (value) => { value.tasks[0].instances[0].pou = 'Missing'; }, '引用的 POU 不存在'],
+  ['POU 编译源遗漏', (value) => { value.iecSources = []; }, '没有对应的 iecSources'],
+  ['未知运行库', (value) => { value.libraries = ['Unknown']; }, '不支持的运行库'],
+  ['设备配置越界', (value) => { value.devices[0].configRef = 'C:/device.json'; }, '相对路径'],
+  ['实例名跨任务重复', (value) => {
+    const duplicate = structuredClone(value.tasks[0]);
+    duplicate.name = 'OtherTask';
+    value.tasks.push(duplicate);
+  }, '名称重复'],
 ];
 for (const [name, mutate, expected] of invalidCases) {
   const value = structuredClone(valid);

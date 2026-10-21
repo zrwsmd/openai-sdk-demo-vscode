@@ -1,6 +1,8 @@
 import {
+  PLC_RUNTIME_LIBRARY_NAMES,
   PlcRuntimeConfigError,
   validatePlcRuntimeConfig,
+  type PlcLibraryName,
   type PlcRuntimeConfig,
   type PlcTaskConfig,
 } from './plcRuntimeConfig';
@@ -43,6 +45,11 @@ export interface PlcRuntimeResourceDeployment {
 export interface PlcRuntimeDeployment {
   configurationName: string;
   resources: PlcRuntimeResourceDeployment[];
+}
+
+export interface AccuPlcLibraryConfigEntry {
+  name: PlcLibraryName;
+  enable: boolean;
 }
 
 function fail(pathName: string, message: string): never {
@@ -100,30 +107,51 @@ export function renderMatiecConfiguration(value: unknown): string {
     assertIecIdentifier(resourceName, `tasks[${taskIndex}].name`);
     lines.push(`  RESOURCE ${resourceName} ON plc`);
     lines.push(renderTask(task, `tasks[${taskIndex}]`));
-    for (const instance of task.instances) {
-      if (instance.name !== `instance_${instance.pou}`) {
-        fail(`tasks[${taskIndex}].instances`, `devUni 目标要求实例名为 instance_${instance.pou}`);
-      }
-      lines.push(renderProgram(task, instance));
-    }
+    for (const instance of task.instances) lines.push(renderProgram(task, instance));
     lines.push('  END_RESOURCE');
   });
   lines.push('END_CONFIGURATION');
   return `${lines.join('\n')}\n`;
 }
 
+export function createAccuPlcLibraryConfig(value: unknown): AccuPlcLibraryConfigEntry[] {
+  const config = validatePlcRuntimeConfig(value);
+  const enabled = new Set<PlcLibraryName>(config.libraries);
+  if (enabled.has('Motion') || enabled.has('Etherlab')) enabled.add('Python');
+  return PLC_RUNTIME_LIBRARY_NAMES.map((name) => ({ name, enable: enabled.has(name) }));
+}
+
 export function createMatiecCompileInputs(
-  config: unknown,
+  value: unknown,
   sourceFiles: readonly PlcMatiecSourceInput[],
 ): PlcMatiecCompileInput[] {
-  const configurationContent = renderMatiecConfiguration(config);
-  return [
-    ...sourceFiles.map((file, index) => ({
-      path: normalizeInputPath(file.path, `sourceFiles[${index}].path`),
-      content: file.content,
+  const config = validatePlcRuntimeConfig(value);
+  const sourceByPath = new Map<string, PlcMatiecSourceInput>();
+  sourceFiles.forEach((file, index) => {
+    const normalizedPath = normalizeInputPath(file.path, `sourceFiles[${index}].path`);
+    const key = normalizedPath.toLocaleLowerCase();
+    if (sourceByPath.has(key)) fail(`sourceFiles[${index}].path`, `源码路径重复: ${normalizedPath}`);
+    sourceByPath.set(key, { path: normalizedPath, content: file.content });
+  });
+  const configuredPaths = new Set(config.iecSources.map((source) => source.source.toLocaleLowerCase()));
+  for (const source of sourceByPath.values()) {
+    if (!configuredPaths.has(source.path.toLocaleLowerCase())) {
+      fail('sourceFiles', `源码没有登记到 iecSources: ${source.path}`);
+    }
+  }
+  const compileSources = config.iecSources.map((source, index) => {
+    const input = sourceByPath.get(source.source.toLocaleLowerCase());
+    if (!input) fail(`iecSources[${index}].source`, `缺少编译源码: ${source.source}`);
+    return {
+      path: input.path,
+      content: input.content,
       role: 'source' as const,
       generated: false,
-    })),
+    };
+  });
+  const configurationContent = renderMatiecConfiguration(config);
+  return [
+    ...compileSources,
     {
       path: GENERATED_MATIEC_CONFIGURATION_PATH,
       content: configurationContent,

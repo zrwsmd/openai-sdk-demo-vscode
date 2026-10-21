@@ -52,6 +52,8 @@ function clarification(select) {
     rawConfig.runtimeOverrides !== undefined ||
     !Array.isArray(rawConfig.tasks) ||
     !Array.isArray(rawConfig.pous) ||
+    !Array.isArray(rawConfig.iecSources) ||
+    !Array.isArray(rawConfig.libraries) ||
     !Array.isArray(rawConfig.devices) ||
     !Array.isArray(rawConfig.networks) ||
     !Array.isArray(rawConfig.ioMappings)
@@ -66,6 +68,8 @@ function clarification(select) {
     task.periodMs !== 100 ||
     task.instances[0].pou !== 'Pump' ||
     config.pous[0].source !== 'src/Pump.st' ||
+    config.iecSources[0]?.source !== 'src/Pump.st' ||
+    config.iecSources[0]?.kind !== 'pou' ||
     config.networks.length !== 0 ||
     config.ioMappings.length !== 0 ||
     'runtimeOverrides' in config
@@ -222,10 +226,54 @@ function clarification(select) {
     pous.get('MotorControl')?.pouType !== 'functionBlock' ||
     pous.get('MotorControl')?.source !== 'pous/MotorControl.st' ||
     pous.get('ScaleValue')?.pouType !== 'function' ||
+    config?.iecSources.length !== 3 ||
+    !config.iecSources.some((item) => item.source === 'pous/MotorControl.st' && item.kind === 'pou') ||
     config?.tasks[0].instances.length !== 1 ||
     config.tasks[0].instances[0].pou !== 'Main'
   ) {
     throw new Error(`separate POU files were not fully indexed: ${JSON.stringify(config)}`);
+  }
+}
+
+{
+  const dataTypeWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-datatype-test-'),
+  );
+  let clarificationCalled = false;
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: dataTypeWorkspace,
+    source: 'types.st',
+    content: [
+      'TYPE PumpState :',
+      '(',
+      '  Idle,',
+      '  Running',
+      ');',
+      'END_TYPE',
+      '',
+    ].join('\n'),
+    clarification: {
+      request: async () => {
+        clarificationCalled = true;
+        return { requestId: 'unexpected', cancelled: true };
+      },
+    },
+  });
+  if (!plan || plan.action !== 'sync_pous' || clarificationCalled) {
+    throw new Error('datatype-only source should update IEC source index without task dialog');
+  }
+  await plan.commit();
+  const config = await readPlcRuntimeConfig(
+    path.join(dataTypeWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME),
+  );
+  if (
+    config?.pous.length !== 0 ||
+    config?.iecSources.length !== 1 ||
+    config.iecSources[0].source !== 'types.st' ||
+    config.iecSources[0].kind !== 'dataType' ||
+    config.libraries.length !== 0
+  ) {
+    throw new Error(`datatype source was not indexed correctly: ${JSON.stringify(config)}`);
   }
 }
 

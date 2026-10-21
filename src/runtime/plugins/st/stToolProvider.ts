@@ -342,6 +342,8 @@ function fileBeforeEffect(
             file: syncPlan.filePath,
             source: syncPlan.source,
             pouCount: syncPlan.pous.length,
+            iecSourceCount: syncPlan.iecSources.length,
+            iecSources: syncPlan.iecSources,
             pous: syncPlan.pous.map((pou) => ({
               name: pou.name,
               pouType: pou.pouType,
@@ -367,6 +369,8 @@ function fileBeforeEffect(
                   file: syncPlan.filePath,
                   source: syncPlan.source,
                   pouCount: syncPlan.pous.length,
+                  iecSourceCount: syncPlan.iecSources.length,
+                  iecSources: syncPlan.iecSources,
                   pous: syncPlan.pous.map((pou) => ({
                     name: pou.name,
                     pouType: pou.pouType,

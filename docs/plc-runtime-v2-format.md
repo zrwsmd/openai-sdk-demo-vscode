@@ -1,10 +1,10 @@
 # plc-runtime.json v2 格式
 
-状态：已实现。运行时校验、任务组态写入、POU 绑定审计和 matiec 临时配置均使用本格式；旧版 v1 可读取并在下次保存时迁移为 v2。
+状态：核心结构、IEC 源索引、库清单和任务组态同步已实现。设备部署元数据已经进入 v2 校验模型，完整的设备树、协议配置和 `var_mapped` 生成仍由目标适配器继续接入；旧版 v1 和早期 v2 文件会兼容读取并在下次保存时补齐。
 
 ## 1. 定位和边界
 
-`plc-runtime.json` 是 PLC 工程的源配置。它描述任务调度、POU 索引、设备、网络和 IO 映射，不保存 ST 正文，也不是 `plc_config.json` 或部署包。
+`plc-runtime.json` 是 PLC 工程的源配置。它描述任务调度、POU 索引、完整 IEC 编译源清单、运行库、设备、网络和 IO 映射，不保存 ST 正文，也不是 `plc_config.json` 或部署包。
 
 顶层结构固定为：
 
@@ -13,6 +13,8 @@
   "schemaVersion": 2,
   "tasks": [],
   "pous": [],
+  "iecSources": [],
+  "libraries": [],
   "devices": [],
   "networks": [],
   "ioMappings": []
@@ -25,16 +27,19 @@
 | --- | --- |
 | `tasks` | Task 调度参数、目标设备和 PROGRAM 实例 |
 | `pous` | POU 名称、类型和对应的 ST 源文件索引 |
+| `iecSources` | 参与编译的全部 IEC 源文件，包括 POU、数据类型和全局变量 |
+| `libraries` | 工程显式启用的 IEC/Runtime 库，用于生成 `iec-lib.json` |
 | `devices` | 本地 PLC、扩展模块、远程设备和设备点位 |
 | `networks` | Modbus、EtherCAT 等通信链路参数 |
 | `ioMappings` | ST 变量与本地或远程点位之间的映射 |
 | `runtimeOverrides` | 可选的高级运行时覆盖；普通工程不生成 |
 
-POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VAR`、`VAR RETAIN` 或实现代码。
+POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VAR`、`VAR RETAIN` 或实现代码。`pous` 是语义索引，`iecSources` 是编译输入清单；两者用途不同，不能用 `pous` 代替完整源码收集。
 
 编译时由目标适配器读取 v2，并分别生成：
 
 - IEC 任务和实例配置；
+- `iec-lib.json` 和完整 IEC 源文件集合；
 - 本地点位的 `VAR_CONFIG`；
 - 远程点位的设备变量映射；
 - devUni 的 `plc_config.json` 和编译工作目录；
@@ -89,12 +94,23 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
     { "name": "MotorControl", "pouType": "functionBlock", "source": "MotorControl.st" },
     { "name": "ScaleValue", "pouType": "function", "source": "ScaleValue.st" }
   ],
+  "iecSources": [
+    { "source": "FastLoop.st", "kind": "pou" },
+    { "source": "Main.st", "kind": "pou" },
+    { "source": "AlarmHandler.st", "kind": "pou" },
+    { "source": "MotorControl.st", "kind": "pou" },
+    { "source": "ScaleValue.st", "kind": "pou" },
+    { "source": "types.st", "kind": "dataType" },
+    { "source": "global_var.global.st", "kind": "globalVariables" }
+  ],
+  "libraries": ["SMC_Basic"],
   "devices": [
     {
       "id": "cpu_main",
       "name": "主控制器",
       "role": "local",
       "model": "SC5100",
+      "profileId": "devuni:SC5100",
       "vendor": "SC",
       "firmware": "1.0.21",
       "runtime": { "coreCount": 2, "memoryMb": 512 },
@@ -150,6 +166,8 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "name": "1 号变频器",
       "role": "remote",
       "model": "GD350",
+      "profileId": "modbus:INVT-GD350",
+      "taskName": "MainTask",
       "vendor": "INVT",
       "points": [
         {
@@ -175,6 +193,8 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "name": "远程 IO 站",
       "role": "remote",
       "model": "SC-RIO8",
+      "profileId": "modbus:SC-RIO8",
+      "taskName": "MainTask",
       "points": [
         {
           "id": "do0",
@@ -203,6 +223,8 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
       "name": "1 号伺服",
       "role": "remote",
       "model": "SV660",
+      "profileId": "ethercat:SV660-CiA402",
+      "taskName": "FastTask",
       "points": [
         {
           "id": "control_word",
@@ -311,7 +333,7 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
 | --- | --- | --- |
 | `name` | 是 | Task 名，IEC 标识符 |
 | `deviceId` | 是 | Task 运行的本地控制器，引用 `devices[].id` |
-| `type` | 是 | `cyclic` 或 `event` |
+| `type` | 是 | 通用 v2 支持 `cyclic` 或 `event`；当前 AccuPLC profile 只接受 `cyclic` |
 | `periodMs` | 是 | 周期/间隔，毫秒，必须大于 0 |
 | `priority` | 是 | 优先级，0 到 31 |
 | `cpuCore` | 是 | CPU 核编号，非负整数 |
@@ -319,33 +341,27 @@ POU 的变量声明和程序正文只存在于 `.st` 文件。JSON 不复制 `VA
 
 Task 直接放在顶层，因为当前 devUni 1.0.21 会把每个 Task 自动展开成一个 Resource。v2 不保存没有独立编辑意义的 Resource 外壳。
 
-v2 不提供 `trigger`。当前 devUni 运行时的 event 任务只接收任务类型和正数 interval，没有可执行的触发器描述。不能把一个不会执行的 `trigger` 字段留在源配置中制造假能力。
+v2 不提供 `trigger`。通用模型保留 `event` 作为其他目标的任务类型，但当前 AccuPLC 文档明确只支持周期任务，适配该目标时必须在编译前拒绝 `event`。不能把一个当前目标不会执行的 `trigger` 字段留在源配置中制造假能力。
 
-v2 使用 `cyclic` 表达周期任务。devUni 构建接口的中间输入使用 `cycle`，原始 `plc_config.json` 又使用 `cyclic`，这两次转换由适配器完成：
+v2 使用 `cyclic` 表达周期任务。devUni IDE 构建接口的中间输入使用 `cycle`，原始 `plc_config.json` 使用 `cyclic`，转换由适配器完成：
 
 ```text
 v2 cyclic -> devUni build input cycle -> plc_config.task_type cyclic
-v2 event  -> devUni build input event -> plc_config.task_type event
+v2 event  -> 当前 AccuPLC profile 拒绝
 ```
 
 ### 3.1 Instance
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `name` | 是 | PROGRAM 实例名，在所属 Task 内唯一 |
+| `name` | 是 | PROGRAM 实例名，在整个工程内唯一 |
 | `pou` | 是 | 被实例化的 PROGRAM POU 名，引用 `pous[].name` |
 
-实例不再保存 `source`。源码位置只由 `pous[].source` 管理。
+实例不再保存 `source`。POU 到源码的定位由 `pous[].source` 管理，完整编译输入由 `iecSources[]` 管理。
 
 实例不再保存 `retain`。保持属性必须写在 ST 的 `VAR RETAIN` 中。
 
-通用 v2 允许一个 PROGRAM 有多个不同实例。devUni 1.0.21 的构建接口会按 `instance_<POU名>` 生成实例名，因此使用该目标时适配器必须校验：
-
-```text
-instance.name == "instance_" + instance.pou
-```
-
-如果同一个 POU 在多个 Task 中需要多个实例，而目标运行时不支持自定义实例名，适配器必须明确报错，不能静默合并。
+通用 v2 允许一个 PROGRAM 有多个不同实例，实例名只需在工程内唯一。devUni IDE 1.0.21 默认按 `instance_<POU名>` 生成名称，但 AccuPLC Runtime 的实际发行工程使用过 `instance_1`、`instance_2` 等名称，`plc_config.json` 只要求实例名唯一。因此 `instance_<POU名>` 是生成默认值，不是 v2 或运行时硬约束。
 
 ## 4. runtimeOverrides
 
@@ -390,7 +406,7 @@ instance.name == "instance_" + instance.pou
 | `pouType` | 是 | `program`、`functionBlock` 或 `function` |
 | `source` | 是 | 工作区相对的 `.st` 源文件路径 |
 
-`source` 只保存在 `pous` 中，不在 `instances` 重复保存。保留它是为了让审计器、编辑器和不同目标适配器能可靠定位源码；多个 POU 可以声明在同一个 `.st` 文件中，因此多个条目允许使用同一个 `source`。
+`source` 不在 `instances` 重复保存。`pous[].source` 负责把 POU 声明定位到文件，`iecSources[]` 负责登记该文件参与编译；多个 POU 可以声明在同一个 `.st` 文件中，因此多个 POU 条目允许使用同一个 `source`，但对应的 `iecSources` 条目只有一个。
 
 通用规则：
 
@@ -410,6 +426,39 @@ src/library/Math.st  -> <compileDir>/Math.st
 
 工作区源码可以放在子目录；“编译目录根层平铺”是 devUni 目标适配器的输出限制，不是 v2 源配置的目录限制。
 
+### 5.1 iecSources
+
+`iecSources` 是完整编译输入清单，解决 `pous[]` 无法表达独立数据类型和全局变量文件的问题。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `source` | 是 | 工作区相对的 `.st` 源文件路径 |
+| `kind` | 是 | `pou`、`dataType` 或 `globalVariables` |
+
+规则：
+
+- 每个 `pous[].source` 必须引用一个 `kind: "pou"` 的 `iecSources` 条目；
+- `iecSources[].source` 必须唯一，不能用不同 `kind` 重复登记同一文件；
+- `dataType` 用于独立 `TYPE ... END_TYPE` 文件；
+- `globalVariables` 用于 `VAR_GLOBAL` 文件，AccuPLC 新格式的标准文件名是 `global_var.global.st`；
+- 历史工程中的 `gloval_var.global.st` 只在导入兼容层识别，新工程不得继续生成错误拼写；
+- 编译适配器复制 `iecSources` 中的全部文件，不能只复制被 Task 实例直接引用的 PROGRAM；
+- 新生成的 AccuPLC 工程遵循“一份独立 PROGRAM、FUNCTION_BLOCK、FUNCTION 或 datatype 对应一个文件”的工程约定；通用 v2 仍允许导入一个源文件声明多个 POU，目标适配器应按目标能力校验。
+
+工作区可使用 `src/control/Main.st` 等子目录路径。AccuPLC 编译目录目前只扫描根层 `.st`，适配器负责平铺，并在平铺后文件名冲突时终止编译。
+
+### 5.2 libraries
+
+`libraries` 是工程显式启用的库名数组，适配器用它生成必需的 `iec-lib.json`。空数组表示工程没有显式启用外部库，但适配器仍须生成合法的 `iec-lib.json`。生成时以目标 profile 的完整库清单为基准：数组中出现的库写 `enable: true`，其余受支持库写 `enable: false`。
+
+当前 AccuPLC profile 识别以下大小写敏感的名称：
+
+```text
+Native, Python, Etherlab, Motion, SMC_Basic
+```
+
+其中 `Python`、`Etherlab` 和 `Motion` 已在当前运行时文档中标记为弃用；`SMC_Basic` 是当前运动控制库。适配器必须按目标 profile 校验可用性。`Motion` 和 `Etherlab` 对 `Python` 的依赖由适配器解析并写入最终 `iec-lib.json`，不能要求模型重复推导依赖。
+
 ## 6. devices
 
 ### 6.1 Device
@@ -420,12 +469,21 @@ src/library/Math.st  -> <compileDir>/Math.st
 | `name` | 否 | 展示名，可以使用中文 |
 | `role` | 是 | `local` 或 `remote` |
 | `model` | 是 | 设备型号 |
+| `profileId` | 否 | 设备目录/驱动 profile 标识，用于生成 `device_type`、参数和协议配置 |
+| `taskName` | 设备树节点需要 | 设备 IO 读写所属 Task，引用 `tasks[].name` |
+| `parentDeviceId` | 有父设备时 | 父设备的 `devices[].id`，用于生成设备树父子关系 |
+| `globalVariable` | 设备需要 IEC 全局变量时 | 映射到运行时 `device_global_name` |
+| `configRef` | 目标专用配置需要 | 工作区相对的协议配置文件或配置模板引用 |
 | `vendor` | 否 | 厂商 |
 | `firmware` | 否 | 固件版本 |
 | `runtime` | 否 | 本地控制器能力 |
 | `modules` | 否 | 扩展模块数组 |
 | `points` | 是 | 设备点位数组，可以为空 |
 | `connections` | 否 | 设备使用的网络连接 |
+
+`device_index` 和 `parent_index` 是目标 `device_tree` 的运行时数字索引，不写入 v2。适配器按稳定顺序为设备分配 `device_index`，再由 `parentDeviceId` 计算 `parent_index`。没有父设备时生成 `-1`。
+
+`profileId` 用于从设备目录取得驱动类型、参数 schema 和协议生成器；`configRef` 是完整通用建模尚未覆盖某种协议时的受控出口。两者都不得直接保存本机绝对路径。需要生成到 `device_tree` 的协议设备、虚轴和轴池必须提供 `taskName`；本地控制器仅作为 Task 目标且不生成设备树节点时可以省略。
 
 `runtime` 字段：
 
@@ -548,6 +606,8 @@ END_VAR
 
 远程点的地址是协议对象。适配器不能把 Modbus 寄存器或 EtherCAT 对象硬塞进 `VAR_CONFIG`，而应生成目标运行时的设备变量映射、驱动通道或 `var_mapped`。
 
+AccuPLC 的 `resources[].var_mapped` 是设备内存映射全集，不只是用户已经绑定的变量。适配器必须从设备 profile 展开所有可映射点位：存在 `ioMappings` 的点写入规范化后的 `<TASK>.<INSTANCE>.<VARIABLE>`，未映射点仍保留 `data_area_address` 并把 `iec_var` 写为空字符串。这样设备配置和 IO 内存布局不会因为暂时没有变量绑定而丢失。
+
 ## 9. 校验规则
 
 ### 9.1 命名和源码
@@ -556,12 +616,17 @@ END_VAR
 - `pous[].name` 不得包含点号；
 - POU 名必须与 ST 内声明名大小写完全一致；
 - POU 名必须全局唯一；同一 `pous[].source` 可以承载多个 POU 声明；
+- 每个 POU 源文件必须出现在 `iecSources`，独立 datatype 和全局变量文件也必须单独登记；
+- `iecSources[].source` 必须存在、唯一且位于授权工程根目录内；
+- `libraries` 不能重复，库名必须受目标 profile 支持；
 - devUni 目标适配器必须把不同源文件平铺到临时编译目录根层，并拒绝文件名冲突；
 - `instances[].source`、`instances[].retain` 和 `tasks[].trigger` 都是不支持的字段。
 
 ### 9.2 引用完整性
 
 - `tasks[].deviceId` 必须引用 `role: "local"` 的设备；
+- `devices[].taskName` 必须引用存在的 Task，且该 Task 的 `deviceId` 必须指向承载该设备的本地控制器；
+- `devices[].parentDeviceId` 必须引用存在的设备，且设备父子关系不得成环；
 - `instances[].pou` 必须引用 `pouType: "program"` 的 POU；
 - `connections[].networkId` 和协议地址的 `networkId` 必须引用存在的网络；
 - 协议地址的 `networkId` 必须在该 Point 所属设备的 connections 中恰好匹配一项；
@@ -575,7 +640,7 @@ END_VAR
 
 ### 9.3 唯一性和冲突
 
-- 设备 id、网络 id、POU 名和 Task 名必须全局唯一，实例名按 Task 唯一；
+- 设备 id、网络 id、POU 名、Task 名和实例名必须全局唯一；
 - 同一设备内模块 id、槽位号和点位 id 唯一；
 - 同一设备内每个 `networkId` 最多对应一条 connection；
 - 同一个输出点不能映射给多个变量；
@@ -592,7 +657,7 @@ END_VAR
 - `runtimeOverrides.dataArea` 出现时，三个值必须为非负整数并符合设备型号限制；
 - `runtimeOverrides.retainPolicy` 出现时，`intervalMs` 必须大于 0；
 - 数据区必须能容纳全部本地 IEC 地址；
-- devUni 目标下实例名必须为 `instance_<POU名>`；
+- PROGRAM 实例名必须在整个工程内唯一；`instance_<POU名>` 只是默认生成规则；
 - 目标运行时不能执行的任务类型、协议或命名方式必须报错，不能只记录后继续编译。
 
 ## 10. TypeScript 类型
@@ -600,6 +665,8 @@ END_VAR
 ```ts
 export type PlcTaskType = 'cyclic' | 'event';
 export type PlcPouType = 'program' | 'functionBlock' | 'function';
+export type PlcIecSourceKind = 'pou' | 'dataType' | 'globalVariables';
+export type PlcLibraryName = 'Native' | 'Python' | 'Etherlab' | 'Motion' | 'SMC_Basic';
 export type PlcDeviceRole = 'local' | 'remote';
 export type PlcPointDirection = 'input' | 'output';
 
@@ -608,6 +675,8 @@ export interface PlcRuntimeConfigV2 {
   runtimeOverrides?: PlcRuntimeOverrides;
   tasks: PlcTask[];
   pous: PlcPou[];
+  iecSources: PlcIecSource[];
+  libraries: PlcLibraryName[];
   devices: PlcDevice[];
   networks: PlcNetwork[];
   ioMappings: PlcIoMapping[];
@@ -630,6 +699,7 @@ export interface PlcTask {
 
 export interface PlcInstance { name: string; pou: string }
 export interface PlcPou { name: string; pouType: PlcPouType; source: string }
+export interface PlcIecSource { source: string; kind: PlcIecSourceKind }
 
 export type PlcModuleKind =
   | 'digitalInput' | 'digitalOutput'
@@ -683,6 +753,11 @@ export interface PlcDevice {
   name?: string;
   role: PlcDeviceRole;
   model: string;
+  profileId?: string;
+  taskName?: string;
+  parentDeviceId?: string;
+  globalVariable?: string;
+  configRef?: string;
   vendor?: string;
   firmware?: string;
   runtime?: { coreCount?: number; memoryMb?: number };
@@ -741,15 +816,20 @@ v2 不是 devUni 的 `plc_config.json`。适配器按下表转换：
 | `task.deviceId` | 选择本地控制器、设备型号配置和运行时默认值，不写入 `resource_on` |
 | `task.name` | `task_name` |
 | `task.type: cyclic` | 构建输入 `cycle`，原始输出 `task_type: cyclic` |
-| `task.type: event` | 构建输入和原始输出均为 `event` |
+| `task.type: event` | 当前 AccuPLC profile 在调用 `start.exe` 前拒绝 |
 | `task.periodMs` | 构建输入为 `periodMs * 1000` 微秒，原始 `plc_config.interval` 为 `periodMs * 1000000` 纳秒 |
 | `task.cpuCore` | `cpu_core` |
 | `task.priority` | `priority` |
 | `instance.pou` | `instances[].type` |
-| `instance_<pou>` | `instances[].name` |
+| `instance.name` | `instances[].name`；未指定时 IDE 可默认生成 `instance_<pou>` |
+| `iecSources` | 将全部源文件复制并平铺到编译目录根层 |
+| `libraries` | 展开目标库清单和依赖，生成 `iec-lib.json` |
 | 本地 `ioMappings` | 生成 IEC `VAR_CONFIG` |
-| 远程 `ioMappings` | 生成设备变量映射或 `var_mapped` |
-| `devices`、`networks` | 生成 `device_tree` 和协议运行时配置 |
+| 远程 `ioMappings` + 设备 profile 点位 | 生成完整 `var_mapped`；未绑定点的 `iec_var` 为空 |
+| `devices[].taskName` | `device_tree[].task` |
+| `devices[].parentDeviceId` | 通过适配器分配的索引生成 `parent_index` |
+| `devices[].globalVariable` | `device_global_name` |
+| `devices[].profileId/configRef`、`networks` | 生成 `device_tree`、`device_info` 和协议运行时配置 |
 | `connections[].endpoint` | 写入 `device_tree[].config_file` 指向的独立 TCP 协议配置文件 |
 | `connections[].unitId/slaveIndex` | 写入对应设备的 Modbus 或 EtherCAT 配置 |
 
@@ -761,7 +841,7 @@ resource_name = resource_<Task名>
 resource_on   = plc
 ```
 
-适配器还负责把工作区根目录的 POU 源文件复制到 `.depworkspace`，再调用：
+适配器还负责把 `iecSources` 中的全部源文件复制到 `.depworkspace`，生成 `iec-lib.json` 和协议配置，再调用：
 
 ```text
 start.exe -i <compileDir>
@@ -771,11 +851,12 @@ start.exe -i <compileDir>
 
 ## 12. 版本和兼容策略
 
-- v2 文件必须包含 `tasks`、`pous`、`devices`、`networks`、`ioMappings`；Task 引用的本地设备必须存在，没有网络或映射时写空数组；
+- 新写入的 v2 文件必须包含 `tasks`、`pous`、`iecSources`、`libraries`、`devices`、`networks`、`ioMappings`；Task 引用的本地设备必须存在，没有库、网络或映射时写空数组；
+- 过渡期读取缺少 `iecSources` 或 `libraries` 的早期 v2 文件时，仓库层从 `pous[].source` 派生 POU 源清单并使用空库列表；下次保存必须写出新字段。无法自动发现的 datatype 和全局变量文件必须通过工作区扫描补齐，不能静默遗漏；
 - `runtimeOverrides` 可选，迁移和普通 Agent 生成流程不得为了凑字段而添加；
 - v1 读取后可迁移为 v2：将所有 Resource 下的 Task 展平到顶层，并把原 Resource 的目标设备迁移为 `task.deviceId`；
-- v1 迁移必须显式补齐 `pous`、`devices`、`networks` 和 `ioMappings`；
-- v1 的每个 `programs[].source` 迁移到对应 POU 条目的 `pous[].source`；
+- v1 迁移必须显式补齐 `pous`、`iecSources`、`libraries`、`devices`、`networks` 和 `ioMappings`；
+- v1 的每个 `programs[].source` 迁移到对应 POU 条目的 `pous[].source`，并登记为 `kind: "pou"` 的 IEC 源；
 - v1 的 `programs[].retain` 不迁移为实例字段，应检查 ST 源码中是否存在对应的 `VAR RETAIN`；
 - 大于 2 的版本必须明确报“配置版本过新”，不能按 v2 猜测解析；
 - 解析器应拒绝未知字段，避免拼写错误被静默忽略；
@@ -784,9 +865,20 @@ start.exe -i <compileDir>
 ## 13. 建议落地顺序
 
 1. 实现顶层 Task 结构、可选运行时覆盖、严格校验器和 v1 到 v2 的显式迁移。
-2. 实现 POU 源码扫描与名称、文件名、声明名一致性检查。
+2. 实现全部 IEC 源码扫描、POU 索引和库配置同步。
 3. 实现 Task、实例、POU 引用和调度参数检查。
 4. 实现本地 IO 地址冲突、类型、方向和数据区范围检查。
 5. 实现设备、网络、协议地址和远程 IO 映射检查。
 6. 实现 devUni 适配器，生成 `plc_config.json`、`VAR_CONFIG` 和设备变量映射。
 7. 把审计、源码复制、配置生成和编译作为一个工程级事务执行。
+
+## 14. 运行时事实依据
+
+本格式与 AccuPLC 目标有关的规则来自同事提供的运行时资料和发行示例：
+
+- 《IEC项目结构》：编译目录必须包含全部 `.st`、`iec-lib.json`、`plc_config.json` 和协议配置；
+- 《plc_config文件格式》：Task 到 Resource、实例、`var_mapped`、`device_tree`、retain 和 data area 的真实字段；
+- 《iec-lib文件详解》：库名、启用格式和依赖关系；
+- 发行示例：验证任意唯一实例名、完整 ST 文件集合、设备任务绑定和实际输出结构。
+
+devUni IDE 1.0.21 的 `resource_<Task>`、`instance_<POU>` 和顶层文件扫描是 IDE 适配器当前行为。文档中已把这些约定与 AccuPLC Runtime 的硬性输入要求分开，后续实现不得把 IDE 默认命名重新收紧成通用 v2 校验规则。

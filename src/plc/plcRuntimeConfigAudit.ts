@@ -13,6 +13,7 @@ import {
   type PlcRuntimeConfigState,
 } from './plcRuntimeConfigRepository';
 import {
+  classifyPlcIecSource,
   extractPlcProgramDeclarations,
   inspectPlcProgramBindings,
   type PlcProgramBindingResolution,
@@ -35,6 +36,9 @@ export type PlcRuntimeAuditIssueCode =
   | 'binding_source_missing'
   | 'binding_source_no_program'
   | 'binding_type_missing'
+  | 'iec_source_missing'
+  | 'iec_source_kind_mismatch'
+  | 'iec_source_unindexed'
   | 'event_task_runtime_only';
 
 export interface PlcRuntimeAuditIssue {
@@ -290,6 +294,47 @@ function bindingIssues(
   return issues;
 }
 
+function iecSourceIssues(
+  config: PlcRuntimeConfig,
+  files: readonly PlcRuntimeAuditSourceFile[],
+): PlcRuntimeAuditIssue[] {
+  const filesBySource = new Map(files.map((file) => [sourceKey(file.source), file]));
+  const configured = new Set(config.iecSources.map((item) => sourceKey(item.source)));
+  const issues: PlcRuntimeAuditIssue[] = [];
+  for (const source of config.iecSources) {
+    const file = filesBySource.get(sourceKey(source.source));
+    if (!file) {
+      issues.push({
+        code: 'iec_source_missing',
+        severity: 'error',
+        source: source.source,
+        message: `IEC 编译源不存在或未被扫描: ${source.source}。`,
+      });
+      continue;
+    }
+    const actualKind = classifyPlcIecSource(file.content);
+    if (actualKind !== source.kind) {
+      issues.push({
+        code: 'iec_source_kind_mismatch',
+        severity: 'error',
+        source: source.source,
+        message: `IEC 编译源 ${source.source} 声明为 ${source.kind}，实际识别为 ${actualKind ?? 'unknown'}。`,
+      });
+    }
+  }
+  for (const file of files) {
+    const kind = classifyPlcIecSource(file.content);
+    if (!kind || configured.has(sourceKey(file.source))) continue;
+    issues.push({
+      code: 'iec_source_unindexed',
+      severity: 'error',
+      source: file.source,
+      message: `IEC 源文件 ${file.source} (${kind}) 尚未登记到 iecSources。`,
+    });
+  }
+  return issues;
+}
+
 function eventTaskIssues(config: PlcRuntimeConfig): PlcRuntimeAuditIssue[] {
   const issues: PlcRuntimeAuditIssue[] = [];
   for (const task of config.tasks) {
@@ -379,6 +424,7 @@ export async function auditPlcRuntimeConfigWorkspace(
               .filter((issue): issue is PlcRuntimeAuditIssue => issue !== undefined),
           ),
           ...bindingIssues(config, stFiles),
+          ...iecSourceIssues(config, files),
           ...eventTaskIssues(config),
         ]
       : []),
@@ -440,6 +486,11 @@ export function createInitialPlcRuntimeConfigDraft(
           })),
     }],
     pous,
+    iecSources: [...new Map(pous.map((pou) => [
+      sourceKey(pou.source),
+      { source: pou.source, kind: 'pou' as const },
+    ])).values()],
+    libraries: [],
     devices: [{
       id: options.deviceId ?? 'plc',
       role: 'local',

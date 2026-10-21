@@ -7,6 +7,15 @@ export const PLC_RUNTIME_CONFIG_SCHEMA_VERSION = 2 as const;
 
 export type PlcTaskType = 'cyclic' | 'event';
 export type PlcPouType = 'program' | 'functionBlock' | 'function';
+export type PlcIecSourceKind = 'pou' | 'dataType' | 'globalVariables';
+export const PLC_RUNTIME_LIBRARY_NAMES = [
+  'Native',
+  'Python',
+  'Etherlab',
+  'Motion',
+  'SMC_Basic',
+] as const;
+export type PlcLibraryName = typeof PLC_RUNTIME_LIBRARY_NAMES[number];
 
 export interface PlcTaskInstance { name: string; pou: string }
 export interface PlcTaskConfig {
@@ -19,6 +28,7 @@ export interface PlcTaskConfig {
   instances: PlcTaskInstance[];
 }
 export interface PlcPouConfig { name: string; pouType: PlcPouType; source: string }
+export interface PlcIecSourceConfig { source: string; kind: PlcIecSourceKind }
 export interface PlcDirectAddress { kind: 'direct'; address: string }
 export interface PlcProtocolAddress {
   kind: 'protocol';
@@ -60,6 +70,11 @@ export interface PlcDeviceConfig {
   name?: string;
   role: 'local' | 'remote';
   model: string;
+  profileId?: string;
+  taskName?: string;
+  parentDeviceId?: string;
+  globalVariable?: string;
+  configRef?: string;
   vendor?: string;
   firmware?: string;
   runtime?: { coreCount?: number; memoryMb?: number };
@@ -98,6 +113,8 @@ export interface PlcRuntimeConfig {
   schemaVersion: typeof PLC_RUNTIME_CONFIG_SCHEMA_VERSION;
   tasks: PlcTaskConfig[];
   pous: PlcPouConfig[];
+  iecSources: PlcIecSourceConfig[];
+  libraries: PlcLibraryName[];
   devices: PlcDeviceConfig[];
   networks: PlcNetworkConfig[];
   ioMappings: PlcIoMapping[];
@@ -169,11 +186,15 @@ function booleanValue(value: unknown, pathName: string): boolean {
   if (typeof value !== 'boolean') fail(pathName, '必须是布尔值');
   return value;
 }
-function relativeSource(value: unknown, pathName: string): string {
+function relativeWorkspacePath(value: unknown, pathName: string): string {
   const normalized = requiredString(value, pathName).replaceAll('\\', '/');
   if (normalized.startsWith('/') || /^[A-Za-z]:\//u.test(normalized) || normalized.split('/').some((part) => part === '..' || part === '.')) {
     fail(pathName, '必须是工作区内的相对路径，不能包含绝对路径、. 或 ..');
   }
+  return normalized;
+}
+function relativeSource(value: unknown, pathName: string): string {
+  const normalized = relativeWorkspacePath(value, pathName);
   if (!normalized.toLocaleLowerCase().endsWith('.st')) fail(pathName, '必须以 .st 结尾');
   return normalized;
 }
@@ -221,6 +242,25 @@ function parsePou(value: unknown, pathName: string): PlcPouConfig {
   const name = identifier(raw.name, `${pathName}.name`);
   const source = relativeSource(raw.source, `${pathName}.source`);
   return { name, pouType: raw.pouType, source };
+}
+function parseIecSource(value: unknown, pathName: string): PlcIecSourceConfig {
+  const raw = record(value, pathName);
+  allowedKeys(raw, ['source', 'kind'], pathName);
+  const kinds = ['pou', 'dataType', 'globalVariables'] as const;
+  if (!kinds.includes(raw.kind as PlcIecSourceKind)) {
+    fail(`${pathName}.kind`, '必须是 pou、dataType 或 globalVariables');
+  }
+  return {
+    source: relativeSource(raw.source, `${pathName}.source`),
+    kind: raw.kind as PlcIecSourceKind,
+  };
+}
+function parseLibrary(value: unknown, pathName: string): PlcLibraryName {
+  const name = requiredString(value, pathName);
+  if (!PLC_RUNTIME_LIBRARY_NAMES.includes(name as PlcLibraryName)) {
+    fail(pathName, `不支持的运行库: ${name}`);
+  }
+  return name as PlcLibraryName;
 }
 function parseAddress(value: unknown, pathName: string): PlcPointAddress {
   const raw = record(value, pathName);
@@ -298,7 +338,11 @@ function parseModule(value: unknown, pathName: string): PlcDeviceModule {
 }
 function parseDevice(value: unknown, pathName: string): PlcDeviceConfig {
   const raw = record(value, pathName);
-  allowedKeys(raw, ['id', 'name', 'role', 'model', 'vendor', 'firmware', 'runtime', 'modules', 'points', 'connections'], pathName);
+  allowedKeys(raw, [
+    'id', 'name', 'role', 'model', 'profileId', 'taskName', 'parentDeviceId',
+    'globalVariable', 'configRef', 'vendor', 'firmware', 'runtime', 'modules',
+    'points', 'connections',
+  ], pathName);
   if (raw.role !== 'local' && raw.role !== 'remote') fail(`${pathName}.role`, '必须是 local 或 remote');
   const points = array(raw.points, `${pathName}.points`).map((item, index) => parsePoint(item, `${pathName}.points[${index}]`));
   uniqueNames(points.map((item) => item.id), `${pathName}.points`);
@@ -309,6 +353,22 @@ function parseDevice(value: unknown, pathName: string): PlcDeviceConfig {
     const item = optionalString(raw[key], `${pathName}.${key}`);
     if (item !== undefined) result[key] = item;
   }
+  const profileId = optionalString(raw.profileId, `${pathName}.profileId`);
+  const taskName = raw.taskName === undefined ? undefined : identifier(raw.taskName, `${pathName}.taskName`);
+  const parentDeviceId = raw.parentDeviceId === undefined
+    ? undefined
+    : identifier(raw.parentDeviceId, `${pathName}.parentDeviceId`);
+  const globalVariable = raw.globalVariable === undefined
+    ? undefined
+    : identifier(raw.globalVariable, `${pathName}.globalVariable`);
+  const configRef = raw.configRef === undefined
+    ? undefined
+    : relativeWorkspacePath(raw.configRef, `${pathName}.configRef`);
+  if (profileId !== undefined) result.profileId = profileId;
+  if (taskName !== undefined) result.taskName = taskName;
+  if (parentDeviceId !== undefined) result.parentDeviceId = parentDeviceId;
+  if (globalVariable !== undefined) result.globalVariable = globalVariable;
+  if (configRef !== undefined) result.configRef = configRef;
   if (raw.runtime !== undefined) {
     const runtime = record(raw.runtime, `${pathName}.runtime`);
     allowedKeys(runtime, ['coreCount', 'memoryMb'], `${pathName}.runtime`);
@@ -391,8 +451,14 @@ function parseRuntimeOverrides(value: unknown, pathName: string): PlcRuntimeOver
 function validateReferences(config: PlcRuntimeConfig): void {
   const devices = new Map(config.devices.map((item) => [item.id.toLocaleUpperCase(), item]));
   const pous = new Map(config.pous.map((item) => [item.name.toLocaleUpperCase(), item]));
+  const iecSources = new Map(config.iecSources.map((item) => [item.source.toLocaleLowerCase(), item]));
   const networks = new Set(config.networks.map((item) => item.id.toLocaleUpperCase()));
   const tasks = new Map(config.tasks.map((item) => [item.name.toLocaleUpperCase(), item]));
+  config.pous.forEach((pou, pouIndex) => {
+    const source = iecSources.get(pou.source.toLocaleLowerCase());
+    if (!source) fail(`pous[${pouIndex}].source`, `没有对应的 iecSources 条目: ${pou.source}`);
+    if (source.kind !== 'pou') fail(`pous[${pouIndex}].source`, `对应的 iecSources.kind 必须是 pou: ${pou.source}`);
+  });
   config.tasks.forEach((task, taskIndex) => {
     const device = devices.get(task.deviceId.toLocaleUpperCase());
     if (!device) fail(`tasks[${taskIndex}].deviceId`, `引用的设备不存在: ${task.deviceId}`);
@@ -405,6 +471,17 @@ function validateReferences(config: PlcRuntimeConfig): void {
     });
   });
   config.devices.forEach((device, deviceIndex) => {
+    if (device.taskName) {
+      const task = tasks.get(device.taskName.toLocaleUpperCase());
+      if (!task) fail(`devices[${deviceIndex}].taskName`, `引用的 Task 不存在: ${device.taskName}`);
+      const taskDevice = devices.get(task.deviceId.toLocaleUpperCase());
+      if (!taskDevice || taskDevice.role !== 'local') {
+        fail(`devices[${deviceIndex}].taskName`, `Task ${device.taskName} 必须运行在 local 设备上`);
+      }
+    }
+    if (device.parentDeviceId && !devices.has(device.parentDeviceId.toLocaleUpperCase())) {
+      fail(`devices[${deviceIndex}].parentDeviceId`, `引用的父设备不存在: ${device.parentDeviceId}`);
+    }
     const connections = new Set((device.connections ?? []).map((item) => item.networkId.toLocaleUpperCase()));
     (device.connections ?? []).forEach((connection, connectionIndex) => {
       if (!networks.has(connection.networkId.toLocaleUpperCase())) fail(`devices[${deviceIndex}].connections[${connectionIndex}].networkId`, `引用的网络不存在: ${connection.networkId}`);
@@ -415,6 +492,16 @@ function validateReferences(config: PlcRuntimeConfig): void {
       if (!networks.has(key)) fail(`devices[${deviceIndex}].points[${pointIndex}].address.networkId`, `引用的网络不存在: ${point.address.networkId}`);
       if (!connections.has(key)) fail(`devices[${deviceIndex}].points[${pointIndex}].address.networkId`, '设备 connections 中缺少对应网络');
     });
+  });
+  config.devices.forEach((device, deviceIndex) => {
+    const seen = new Set<string>([device.id.toLocaleUpperCase()]);
+    let parentId = device.parentDeviceId;
+    while (parentId) {
+      const key = parentId.toLocaleUpperCase();
+      if (seen.has(key)) fail(`devices[${deviceIndex}].parentDeviceId`, '设备父子关系不能形成环');
+      seen.add(key);
+      parentId = devices.get(key)?.parentDeviceId;
+    }
   });
   config.ioMappings.forEach((mapping, mappingIndex) => {
     const task = tasks.get(mapping.task.toLocaleUpperCase());
@@ -430,18 +517,46 @@ function validateReferences(config: PlcRuntimeConfig): void {
 
 function validateV2(value: unknown): PlcRuntimeConfig {
   const raw = record(value, 'root');
-  allowedKeys(raw, ['schemaVersion', 'tasks', 'pous', 'devices', 'networks', 'ioMappings', 'runtimeOverrides'], 'root');
+  allowedKeys(raw, [
+    'schemaVersion', 'tasks', 'pous', 'iecSources', 'libraries', 'devices',
+    'networks', 'ioMappings', 'runtimeOverrides',
+  ], 'root');
   if (raw.schemaVersion !== PLC_RUNTIME_CONFIG_SCHEMA_VERSION) fail('schemaVersion', `只支持版本 ${PLC_RUNTIME_CONFIG_SCHEMA_VERSION}`);
   const tasks = array(raw.tasks, 'tasks').map((item, index) => parseTask(item, `tasks[${index}]`));
   const pous = array(raw.pous, 'pous').map((item, index) => parsePou(item, `pous[${index}]`));
+  const iecSources = raw.iecSources === undefined
+    ? [...new Map(pous.map((pou) => [pou.source.toLocaleLowerCase(), {
+        source: pou.source,
+        kind: 'pou' as const,
+      }])).values()]
+    : array(raw.iecSources, 'iecSources').map((item, index) => parseIecSource(item, `iecSources[${index}]`));
+  const libraries = raw.libraries === undefined
+    ? []
+    : array(raw.libraries, 'libraries').map((item, index) => parseLibrary(item, `libraries[${index}]`));
   const devices = array(raw.devices, 'devices').map((item, index) => parseDevice(item, `devices[${index}]`));
   const networks = array(raw.networks, 'networks').map((item, index) => parseNetwork(item, `networks[${index}]`));
   const ioMappings = array(raw.ioMappings, 'ioMappings').map((item, index) => parseIoMapping(item, `ioMappings[${index}]`));
   uniqueNames(tasks.map((item) => item.name), 'tasks');
+  uniqueNames(tasks.flatMap((task) => task.instances.map((instance) => instance.name)), 'tasks instances');
   uniqueNames(pous.map((item) => item.name), 'pous');
+  uniqueNames(iecSources.map((item) => item.source), 'iecSources');
+  uniqueNames(libraries, 'libraries');
   uniqueNames(devices.map((item) => item.id), 'devices');
+  uniqueNames(
+    devices.flatMap((item) => item.globalVariable ? [item.globalVariable] : []),
+    'devices globalVariable',
+  );
   uniqueNames(networks.map((item) => item.id), 'networks');
-  const result: PlcRuntimeConfig = { schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION, tasks, pous, devices, networks, ioMappings };
+  const result: PlcRuntimeConfig = {
+    schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
+    tasks,
+    pous,
+    iecSources,
+    libraries,
+    devices,
+    networks,
+    ioMappings,
+  };
   if (raw.runtimeOverrides !== undefined) result.runtimeOverrides = parseRuntimeOverrides(raw.runtimeOverrides, 'runtimeOverrides');
   validateReferences(result);
   return result;
@@ -482,7 +597,20 @@ function migrateV1(value: Record<string, unknown>): PlcRuntimeConfig {
       tasks.push({ name: identifier(rawTask.name, `${taskPath}.name`), deviceId, type, periodMs: positiveNumber(rawTask.periodMs, `${taskPath}.periodMs`), priority: integer(rawTask.priority, `${taskPath}.priority`, 0, 31), cpuCore: integer(rawTask.cpuCore, `${taskPath}.cpuCore`, 0), instances });
     });
   });
-  return validateV2({ schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION, tasks, pous: [...pousByName.values()], devices: [...devicesById.values()], networks: [], ioMappings: [] });
+  const pous = [...pousByName.values()];
+  return validateV2({
+    schemaVersion: PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
+    tasks,
+    pous,
+    iecSources: [...new Map(pous.map((pou) => [
+      pou.source.toLocaleLowerCase(),
+      { source: pou.source, kind: 'pou' as const },
+    ])).values()],
+    libraries: [],
+    devices: [...devicesById.values()],
+    networks: [],
+    ioMappings: [],
+  });
 }
 
 export function validatePlcRuntimeConfig(value: unknown): PlcRuntimeConfig {

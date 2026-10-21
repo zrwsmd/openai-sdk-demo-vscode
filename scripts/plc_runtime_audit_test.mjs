@@ -144,7 +144,9 @@ function issueCodes(report) {
     draft.tasks[0].periodMs !== 50 ||
     instances[0].name !== 'instance_Pump' ||
     instances[1].name !== 'instance_Pump2' ||
-    draft.pous[1].source !== 'src/Pump2.st'
+    draft.pous[1].source !== 'src/Pump2.st' ||
+    draft.iecSources.length !== 2 ||
+    draft.libraries.length !== 0
   ) {
     throw new Error('initial draft did not create stable task bindings');
   }
