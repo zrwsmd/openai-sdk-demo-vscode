@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 2,
+  "tasks": [
+    {
+      "name": "FastTask",
+      "deviceId": "cpu_main",
+      "type": "cyclic",
+      "periodMs": 5,
+      "priority": 0,
+      "cpuCore": 0,
+      "instances": [{ "name": "instance_FastLoop", "pou": "FastLoop" }]
+    },
+    {
+      "name": "MainTask",
+      "deviceId": "cpu_main",
+      "type": "cyclic",
+      "periodMs": 20,
+      "priority": 1,
+      "cpuCore": 1,
+      "instances": [{ "name": "instance_Main", "pou": "Main" }]
+    }
+  ],
+  "pous": [
+    { "name": "Main", "pouType": "program", "source": "src/Main.st" },
+    { "name": "FastLoop", "pouType": "program", "source": "src/FastLoop.st" },
+    {
+      "name": "MotorControl",
+      "pouType": "functionBlock",
+      "source": "src/MotorControl.st"
+    },
+    {
+      "name": "ScaleValue",
+      "pouType": "function",
+      "source": "src/ScaleValue.st"
+    }
+  ],
+  "iecSources": [
+    { "source": "src/Main.st", "kind": "pou" },
+    { "source": "src/FastLoop.st", "kind": "pou" },
+    { "source": "src/MotorControl.st", "kind": "pou" },
+    { "source": "src/ScaleValue.st", "kind": "pou" },
+    { "source": "src/PumpTypes.st", "kind": "dataType" },
+    { "source": "global_var.global.st", "kind": "globalVariables" }
+  ],
+  "libraries": ["SMC_Basic"],
+  "devices": [
+    {
+      "id": "cpu_main",
+      "name": "主控制器",
+      "role": "local",
+      "model": "SC5100",
+      "vendor": "SC",
+      "firmware": "1.0.21",
+      "runtime": { "coreCount": 2, "memoryMb": 512 },
+      "modules": [
+        {
+          "id": "di_16",
+          "slot": 1,
+          "model": "SC-DI16",
+          "kind": "digitalInput",
+          "channels": 16
+        },
+        {
+          "id": "ai_8",
+          "slot": 2,
+          "model": "SC-AI8",
+          "kind": "analogInput",
+          "channels": 8,
+          "range": "0..10V",
+          "resolutionBits": 12
+        }
+      ],
+      "points": [
+        {
+          "id": "di_16.ch0",
+          "address": { "kind": "direct", "address": "%IX0.0" },
+          "direction": "input",
+          "dataType": "BOOL",
+          "module": "di_16",
+          "channel": 0,
+          "description": "启动按钮"
+        },
+        {
+          "id": "ai_8.ch0",
+          "address": { "kind": "direct", "address": "%IW64" },
+          "direction": "input",
+          "dataType": "INT",
+          "module": "ai_8",
+          "channel": 0,
+          "range": "0..10V",
+          "description": "出口压力变送器"
+        }
+      ],
+      "connections": []
+    },
+    {
+      "id": "ecat_master",
+      "name": "EtherCAT 主站",
+      "role": "remote",
+      "model": "EtherCAT Master",
+      "profileId": "ethercat:master",
+      "taskName": "FastTask",
+      "globalVariable": "EcatMaster1",
+      "points": [],
+      "connections": [{ "networkId": "ecat_1" }]
+    },
+    {
+      "id": "sv660_1",
+      "name": "1号伺服",
+      "role": "remote",
+      "model": "SV660N",
+      "vendor": "Inovance",
+      "profileId": "ethercat:SV660-CiA402",
+      "parentDeviceId": "ecat_master",
+      "taskName": "FastTask",
+      "globalVariable": "AxisSlave1",
+      "configRef": "config/axis_sv660_1.json",
+      "points": [
+        {
+          "id": "control_word",
+          "address": {
+            "kind": "protocol",
+            "networkId": "ecat_1",
+            "index": "0x6040",
+            "subIndex": 0,
+            "wireType": "UINT"
+          },
+          "direction": "output",
+          "dataType": "WORD",
+          "description": "控制字"
+        },
+        {
+          "id": "status_word",
+          "address": {
+            "kind": "protocol",
+            "networkId": "ecat_1",
+            "index": "0x6041",
+            "subIndex": 0,
+            "wireType": "UINT"
+          },
+          "direction": "input",
+          "dataType": "WORD",
+          "description": "状态字"
+        }
+      ],
+      "connections": [{ "networkId": "ecat_1", "slaveIndex": 0 }]
+    },
+    {
+      "id": "rio_1",
+      "name": "远程 IO",
+      "role": "remote",
+      "model": "SC-RIO8",
+      "vendor": "SC",
+      "profileId": "modbus:SC-RIO8",
+      "taskName": "MainTask",
+      "points": [
+        {
+          "id": "do0",
+          "address": {
+            "kind": "protocol",
+            "networkId": "mb_tcp_1",
+            "area": "coil",
+            "offset": 0,
+            "wireType": "BOOL"
+          },
+          "direction": "output",
+          "dataType": "BOOL",
+          "description": "运行指示灯"
+        },
+        {
+          "id": "di0",
+          "address": {
+            "kind": "protocol",
+            "networkId": "mb_tcp_1",
+            "area": "discreteInput",
+            "offset": 0,
+            "wireType": "BOOL"
+          },
+          "direction": "input",
+          "dataType": "BOOL",
+          "description": "就地急停"
+        }
+      ],
+      "connections": [
+        {
+          "networkId": "mb_tcp_1",
+          "endpoint": { "host": "192.168.1.10", "port": 502 },
+          "unitId": 1
+        }
+      ]
+    }
+  ],
+  "networks": [
+    {
+      "id": "ecat_1",
+      "name": "伺服总线",
+      "protocol": "ethercat",
+      "mode": "master",
+      "interface": { "name": "eth0" },
+      "cycleMs": 2,
+      "distributedClock": true
+    },
+    {
+      "id": "mb_tcp_1",
+      "name": "远程 IO 网段",
+      "protocol": "modbusTcp",
+      "mode": "master",
+      "interface": {
+        "name": "eth1",
+        "ip": "192.168.1.5",
+        "netmask": "255.255.255.0"
+      },
+      "timeoutMs": 500,
+      "retries": 3,
+      "pollIntervalMs": 50
+    }
+  ],
+  "ioMappings": [
+    {
+      "variable": "StartButton",
+      "task": "MainTask",
+      "instance": "instance_Main",
+      "point": "cpu_main/di_16.ch0"
+    },
+    {
+      "variable": "OutletPressure",
+      "task": "MainTask",
+      "instance": "instance_Main",
+      "point": "cpu_main/ai_8.ch0",
+      "scale": 0.01,
+      "unit": "MPa"
+    },
+    {
+      "variable": "RunLamp",
+      "task": "MainTask",
+      "instance": "instance_Main",
+      "point": "rio_1/do0"
+    },
+    {
+      "variable": "ServoControlWord",
+      "task": "FastTask",
+      "instance": "instance_FastLoop",
+      "point": "sv660_1/control_word"
+    }
+  ],
+  "runtimeOverrides": {
+    "dataArea": { "input": 8192, "output": 8192, "memory": 16384 },
+    "retainPolicy": { "enabled": true, "intervalMs": 5000 }
+  }
+}
