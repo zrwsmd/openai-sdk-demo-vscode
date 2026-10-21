@@ -48,6 +48,7 @@ npm install
 ```
 
 项目技能目录为 `<workspace>/.agents/skills/<name>/SKILL.md`；用户技能目录为 `~/.agents/skills/<name>/SKILL.md`。同名时项目技能优先。每轮只把技能名称和描述加入提示词，模型认为当前任务匹配时才调用 `load_skill` 读取正文，也可以用 `file` 参数读取技能目录内的参考文本。资源路径限制在技能目录内；技能内容不会覆盖用户本轮要求、工作流和工具安全规则。通过 VS Code 设置 `plcAgent.skills.enabled` 可以关闭技能。
+技能目录不是工作区目录。`read_file`、`list_files`、`search_files` 遇到用户级或项目级技能路径时会提示改用 `load_skill`，不会弹出“加入本轮授权”。
 
 `SKILL.md` 开头的元数据格式：
 

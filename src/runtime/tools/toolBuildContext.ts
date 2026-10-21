@@ -30,6 +30,7 @@ import {
   type RuntimeServiceContainer,
 } from "../services";
 import type { SkillCatalog } from "../skills/skillCatalog";
+import { skillWorkspaceRedirectMessage } from "../skills/skillCatalog";
 
 export type ToolEffect = "none" | "filesystem" | "process" | "device";
 export type BeforeEffectResourceKind =
@@ -194,6 +195,7 @@ export interface WorkspacePathResolutionOptions {
   /** A write target must agree with an absolute directory explicitly named by the user. */
   enforceUserTarget?: boolean;
   signal?: AbortSignal;
+  skillCatalog?: SkillCatalog;
 }
 
 export const optionalIntParam = z.union([z.number(), z.string(), z.null()]).optional();
@@ -370,6 +372,14 @@ async function resolveWorkspacePathWithAuthorization(
   options: WorkspacePathResolutionOptions = {},
 ): Promise<ResolvedWorkspacePath> {
   const candidateAbsolutePath = workspace.candidateAbsolutePath(input);
+  const skill = candidateAbsolutePath
+    ? options.skillCatalog?.findByPath(candidateAbsolutePath)
+    : undefined;
+  if (skill && !workspace.isAuthorizedAbsolutePath(candidateAbsolutePath)) {
+    throw new WorkspaceScopeError(
+      skillWorkspaceRedirectMessage(skill, candidateAbsolutePath),
+    );
+  }
   if (options.enforceUserTarget) {
     const requestedRoot = userTargetMismatch(userText, candidateAbsolutePath);
     if (requestedRoot) {
@@ -515,7 +525,10 @@ export function createToolBuildContext(
       workspace,
       input,
       options.userText,
-      resolutionOptions,
+      {
+        ...resolutionOptions,
+        skillCatalog: options.skillCatalog,
+      },
     );
   const guardrails = buildToolGuardrails(
     cfg,

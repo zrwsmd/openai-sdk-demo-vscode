@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,16 +22,37 @@ export interface AgentSkill {
 export interface SkillCatalog {
   readonly skills: readonly AgentSkill[];
   get(name: string): AgentSkill | undefined;
+  findByPath(candidate: string): AgentSkill | undefined;
+  isSkillPath(candidate: string): boolean;
   load(name: string, relativeFile?: string): Promise<string>;
 }
 
 function isWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
+  const normalizedRoot = canonicalPath(root);
+  const normalizedCandidate = canonicalPath(candidate);
+  const relative = path.relative(normalizedRoot, normalizedCandidate);
   return relative === "" || (
     relative !== ".." &&
     !relative.startsWith(`..${path.sep}`) &&
     !path.isAbsolute(relative)
   );
+}
+
+function canonicalPath(candidate: string): string {
+  const resolved = path.resolve(candidate);
+  try {
+    return (realpathSync.native ?? realpathSync)(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+export function skillWorkspaceRedirectMessage(skill: AgentSkill, candidate: string): string {
+  const absolute = canonicalPath(candidate);
+  const relative = path.relative(skill.root, absolute).replaceAll("\\", "/");
+  const file = !relative || relative === "." || relative.startsWith("..") ? "SKILL.md" : relative;
+  return `路径 ${absolute} 属于 Agent Skill ${skill.name}（${skill.scope}），不是工作区文件，不需要加入本轮授权。` +
+    `请改用 load_skill，传入 name=${JSON.stringify(skill.name)} 和 file=${JSON.stringify(file)}。`;
 }
 
 function isValidSkillName(value: string): boolean {
@@ -146,6 +168,13 @@ export async function discoverSkillCatalog(options: {
   return {
     skills: frozenSkills,
     get: (name) => byName.get(name),
+    findByPath: (candidate) => {
+      if (!candidate.trim()) return undefined;
+      const absolute = canonicalPath(candidate);
+      return frozenSkills.find((skill) => isWithin(skill.root, absolute));
+    },
+    isSkillPath: (candidate) => Boolean(candidate.trim()) &&
+      frozenSkills.some((skill) => isWithin(skill.root, canonicalPath(candidate))),
     load: async (name, relativeFile = "SKILL.md") => {
       const skill = byName.get(name);
       if (!skill) throw new Error(`未找到技能 ${name}。`);
@@ -163,9 +192,15 @@ export async function discoverSkillCatalog(options: {
       }
       const content = await fs.readFile(realFile, "utf8");
       if (content.includes("\0")) throw new Error("技能资源不是可读取的文本文件。");
-      return relativeFile === "SKILL.md"
+      const instructions = relativeFile === "SKILL.md"
         ? content.replace(/^---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim()
         : content;
+      return relativeFile === "SKILL.md"
+        ? instructions +
+          "\n\n【技能资源读取规则】本技能的 references/、examples/ 等资源只能通过 load_skill 工具读取：" +
+          `传入 name=${JSON.stringify(name)} 和 file=<技能目录内相对路径>。` +
+          "不要对这些路径调用 read_file、list_files 或 search_files，也不要请求工作区授权。"
+        : instructions;
     },
   };
 }

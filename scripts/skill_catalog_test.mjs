@@ -64,6 +64,27 @@ try {
   if (!namesWithSkills.includes('load_skill') || namesWithoutSkills.includes('load_skill')) {
     throw new Error('load_skill should only be exposed when the run has discovered skills');
   }
+  const loaded = await catalog.load('json-review');
+  if (!loaded.includes('只能通过 load_skill 工具读取') || !loaded.includes('file=<技能目录内相对路径>')) {
+    throw new Error('SKILL.md load result should tell the model to keep using load_skill for skill resources');
+  }
+  if (!catalog.findByPath(reference) || !catalog.isSkillPath(reference)) {
+    throw new Error('skill catalog should recognize its own resource paths');
+  }
+  const created = registry.createTools({ cfg, skillCatalog: catalog });
+  const readFile = created.find((tool) => tool.name === 'read_file');
+  if (!readFile) throw new Error('read_file was not created');
+  let redirected = false;
+  const result = JSON.parse(await readFile.invoke({}, JSON.stringify({ path: reference })));
+  const text = JSON.stringify(result);
+  redirected = result.ok === false &&
+    /属于 Agent Skill json-review/.test(result.error ?? '') &&
+    /load_skill/.test(result.error ?? '') &&
+    /不需要加入本轮授权/.test(result.error ?? '') &&
+    /file="references\/schema.md"/.test(result.error ?? '');
+  if (!redirected) {
+    throw new Error(`workspace tools should redirect skill paths to load_skill, got ${text}`);
+  }
   console.log('[skills] discovery, precedence, lazy loading, resource boundary, prompt metadata and disable flag: passed');
 } finally {
   await fs.rm(root, { recursive: true, force: true });
