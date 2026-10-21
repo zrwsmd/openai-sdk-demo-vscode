@@ -843,6 +843,8 @@ resource_on   = plc
 
 适配器还负责把 `iecSources` 中的全部源文件复制到 `.depworkspace`，生成 `iec-lib.json` 和协议配置，再调用：
 
+生成的 matiec 配置文件也直接写入编译目录根层：`<compileDir>/plc_configuration.st`；不能放在 `__generated__/` 等子目录，否则同样会被只扫描根层的工具链漏掉。
+
 ```text
 start.exe -i <compileDir>
 ```

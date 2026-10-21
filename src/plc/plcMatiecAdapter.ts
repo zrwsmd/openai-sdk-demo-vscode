@@ -7,7 +7,7 @@ import {
   type PlcTaskConfig,
 } from './plcRuntimeConfig';
 
-export const GENERATED_MATIEC_CONFIGURATION_PATH = '__generated__/plc_configuration.st';
+export const GENERATED_MATIEC_CONFIGURATION_PATH = 'plc_configuration.st';
 
 const IEC_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
@@ -67,6 +67,15 @@ function normalizeInputPath(value: string, pathName: string): string {
     fail(pathName, '必须是非空路径');
   }
   return value.trim().replaceAll('\\', '/');
+}
+
+function flattenCompilePath(value: string): string {
+  const normalized = value.replaceAll('\\', '/');
+  const basename = normalized.slice(normalized.lastIndexOf('/') + 1);
+  if (!basename || basename === '.' || basename === '..') {
+    throw new PlcRuntimeConfigError(`无法把源码路径平铺到编译目录根层: ${value}`);
+  }
+  return basename;
 }
 
 function formatFiniteDecimal(value: number): string {
@@ -139,16 +148,33 @@ export function createMatiecCompileInputs(
       fail('sourceFiles', `源码没有登记到 iecSources: ${source.path}`);
     }
   }
+  const compileSourcesByOutput = new Map<string, { source: string }>();
   const compileSources = config.iecSources.map((source, index) => {
     const input = sourceByPath.get(source.source.toLocaleLowerCase());
     if (!input) fail(`iecSources[${index}].source`, `缺少编译源码: ${source.source}`);
+    const outputPath = flattenCompilePath(input.path);
+    const outputKey = outputPath.toLocaleLowerCase();
+    const previous = compileSourcesByOutput.get(outputKey);
+    if (previous) {
+      fail(
+        `iecSources[${index}].source`,
+        `源码平铺后文件名冲突: ${previous.source} 和 ${source.source} 都会写成 ${outputPath}`,
+      );
+    }
+    compileSourcesByOutput.set(outputKey, source);
     return {
-      path: input.path,
+      path: outputPath,
       content: input.content,
       role: 'source' as const,
       generated: false,
     };
   });
+  if (compileSourcesByOutput.has(GENERATED_MATIEC_CONFIGURATION_PATH.toLocaleLowerCase())) {
+    fail(
+      'iecSources',
+      `源码与生成的配置文件重名: ${GENERATED_MATIEC_CONFIGURATION_PATH}`,
+    );
+  }
   const configurationContent = renderMatiecConfiguration(config);
   return [
     ...compileSources,

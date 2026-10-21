@@ -86,14 +86,15 @@ const sourceFiles = [
 const compileInputs = createMatiecCompileInputs(config, sourceFiles);
 if (
   compileInputs.length !== 3 ||
-  compileInputs[0].path !== 'src/PumpControl.st' ||
+  compileInputs[0].path !== 'PumpControl.st' ||
   compileInputs[0].role !== 'source' ||
-  compileInputs[1].path !== 'src/DataLogger.st' ||
+  compileInputs[1].path !== 'DataLogger.st' ||
   compileInputs[2].path !== GENERATED_MATIEC_CONFIGURATION_PATH ||
+  GENERATED_MATIEC_CONFIGURATION_PATH.includes('/') ||
   compileInputs[2].role !== 'configuration' ||
   compileInputs[2].content !== expectedConfiguration
 ) {
-  throw new Error('compile inputs were not built as source files plus generated configuration');
+  throw new Error('compile inputs were not flattened into the compile directory root');
 }
 if (sourceFiles[0].path !== 'src\\PumpControl.st') {
   throw new Error('compile input builder mutated caller source files');
@@ -139,5 +140,19 @@ try {
   missingSourceRejected = error instanceof PlcRuntimeConfigError && /DataLogger/.test(error.message);
 }
 if (!missingSourceRejected) throw new Error('missing configured IEC source should be rejected');
+
+const collisionConfig = structuredClone(config);
+collisionConfig.pous[1].source = 'other/PumpControl.st';
+collisionConfig.iecSources[1].source = 'other/PumpControl.st';
+let collisionRejected = false;
+try {
+  createMatiecCompileInputs(collisionConfig, [
+    sourceFiles[0],
+    { path: 'other/PumpControl.st', content: 'PROGRAM DataLogger\nEND_PROGRAM\n' },
+  ]);
+} catch (error) {
+  collisionRejected = error instanceof PlcRuntimeConfigError && /平铺后文件名冲突/.test(error.message);
+}
+if (!collisionRejected) throw new Error('flattened source name collision should be rejected');
 
 console.log('plc matiec adapter tests passed');
