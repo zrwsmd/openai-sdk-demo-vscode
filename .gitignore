@@ -5,3 +5,4 @@ dist/
 scripts/agent.testbundle.mjs
 vendor/st-analyzer/
 .plc-agent/mcp.json
+.plc-agent/mcp-tools-cache.json
