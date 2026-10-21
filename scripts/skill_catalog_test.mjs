@@ -103,14 +103,49 @@ try {
   if (fatPrompt.length > 12000) {
     throw new Error(`catalog prompt exceeded its budget: ${fatPrompt.length}`);
   }
-  const droppedNames = many.filter((skill) => !fatPrompt.includes(skill.name));
+  // 必须解析 JSON 再比对:用 includes 判断名字会被子串骗到,skill-1 能命中 skill-10。
+  const catalogEntries = (fatPrompt.match(/\[\{"name":[\s\S]*?\}\]/g) ?? []).flatMap((block) => JSON.parse(block));
+  const renderedNames = new Set(catalogEntries.map((entry) => entry.name));
+  const droppedNames = many.filter((skill) => !renderedNames.has(skill.name));
   if (droppedNames.length) {
     throw new Error(`catalog prompt dropped ${droppedNames.length} skill names, e.g. ${droppedNames[0].name}`);
+  }
+  if (catalogEntries.length !== many.length) {
+    throw new Error(`catalog prompt listed ${catalogEntries.length} entries for ${many.length} skills`);
   }
   if (!fatPrompt.includes('其余技能只列名称')) {
     throw new Error('over-budget catalog should keep the remaining skills as name-only entries');
   }
   console.log('[skills] over-budget catalog keeps every skill name and stays within budget: passed');
+
+  // 一条超长描述不能把后面较短的描述一起挡掉(continue 而不是 break)。
+  const skewed = [
+    { name: 'oversized-one', description: 'y'.repeat(11900), scope: 'user' },
+    ...Array.from({ length: 5 }, (_, index) => ({
+      name: `small-${index}`,
+      description: 'short description',
+      scope: 'user',
+    })),
+  ];
+  const skewedPrompt = renderSkillCatalogPrompt({
+    skills: skewed,
+    get: () => undefined,
+    findByPath: () => undefined,
+    isSkillPath: () => false,
+    load: async () => '',
+  });
+  const skewedEntries = (skewedPrompt.match(/\[\{"name":[\s\S]*?\}\]/g) ?? []).flatMap((block) => JSON.parse(block));
+  const described = skewedEntries.filter((entry) => typeof entry.description === 'string');
+  if (!described.some((entry) => entry.name === 'small-0')) {
+    throw new Error('an oversized description should not block shorter descriptions that still fit');
+  }
+  if (described.some((entry) => entry.name === 'oversized-one')) {
+    throw new Error('the oversized description should fall back to a name-only entry');
+  }
+  if (!skewedEntries.some((entry) => entry.name === 'oversized-one')) {
+    throw new Error('the oversized skill must still be listed by name');
+  }
+  console.log('[skills] oversized description falls back alone without blocking later entries: passed');
   console.log('[skills] discovery, precedence, lazy loading, resource boundary, prompt metadata and disable flag: passed');
 } finally {
   await fs.rm(root, { recursive: true, force: true });

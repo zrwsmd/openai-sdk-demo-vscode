@@ -252,15 +252,19 @@ export function renderSkillCatalogPrompt(catalog: SkillCatalog): string {
   const detailBudget =
     MAX_CATALOG_PROMPT_CHARS - CATALOG_HEADER.length - CATALOG_TAIL.length - nameBlockLength;
   const withDetail: typeof detailed = [];
-  for (const entry of detailed) {
-    const candidate = [...withDetail, entry];
-    if (JSON.stringify(candidate).length > detailBudget) break;
-    withDetail.push(entry);
+  const detailedFlags = detailed.map(() => false);
+  // 这里用 continue 而不是 break:一条长描述装不下,不代表后面较短的也装不下,
+  // 直接停会把剩余额度白白浪费掉。
+  for (let index = 0; index < detailed.length; index += 1) {
+    const candidate = [...withDetail, detailed[index]];
+    if (JSON.stringify(candidate).length > detailBudget) continue;
+    withDetail.push(detailed[index]);
+    detailedFlags[index] = true;
   }
   if (!withDetail.length) {
     return CATALOG_HEADER + JSON.stringify(names) + CATALOG_TAIL;
   }
-  const rest = names.slice(withDetail.length);
+  const rest = names.filter((_, index) => !detailedFlags[index]);
   return CATALOG_HEADER +
     JSON.stringify(withDetail) +
     (rest.length ? CATALOG_NAME_ONLY_HEADER + JSON.stringify(rest) : "") +
