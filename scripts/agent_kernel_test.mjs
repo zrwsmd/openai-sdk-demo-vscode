@@ -1325,6 +1325,52 @@ async function runTestTurn(
     throw new Error('语气词“吧”被误判成自然追问');
   }
 
+  // 删除类承接：用户说“删掉吧”，指的就是上一轮刚产出的文件，可以有多个。
+  // 以前这里一律拦截，模型只能改成“扫目录里所有 .ps1 再删”这种不含文件名的
+  // 写法绕过去，比直接删更危险。
+  const twoFileHistory = [
+    { type: 'message', role: 'user', content: '把这两个临时脚本写出来' },
+    {
+      type: 'function_call',
+      name: 'write_file',
+      callId: 'w1',
+      arguments: JSON.stringify({ path: '_du_d.ps1', content: 'x' }),
+    },
+    {
+      type: 'function_call',
+      name: 'write_file',
+      callId: 'w2',
+      arguments: JSON.stringify({ path: '_du_d2.ps1', content: 'y' }),
+    },
+  ];
+  const deleteFollowUpGuard = createHistoricalToolArgumentGuard(twoFileHistory, '删掉吧');
+  if (deleteFollowUpGuard?.('delete_file', { path: '_du_d.ps1' }) !== undefined) {
+    throw new Error('“删掉吧”承接上一轮的文件时不应被拦');
+  }
+  if (deleteFollowUpGuard?.('delete_file', { path: '_du_d2.ps1' }) !== undefined) {
+    throw new Error('“删掉吧”应当同时放行上一轮产出的多个文件');
+  }
+  const nonDeleteGuard = createHistoricalToolArgumentGuard(twoFileHistory, '这两个脚本讲的是什么');
+  if (nonDeleteGuard?.('delete_file', { path: '_du_d.ps1' }) === undefined) {
+    throw new Error('非删除请求不应放行删除类工具复用旧路径');
+  }
+  const staleDeleteHistory = [
+    { type: 'message', role: 'user', content: '写 _old.ps1' },
+    {
+      type: 'function_call',
+      name: 'write_file',
+      callId: 'w0',
+      arguments: JSON.stringify({ path: '_old.ps1', content: 'x' }),
+    },
+    { type: 'message', role: 'user', content: '看看别的' },
+    { type: 'message', role: 'user', content: '再看看' },
+    { type: 'message', role: 'user', content: '还在吗' },
+  ];
+  const staleDeleteGuard = createHistoricalToolArgumentGuard(staleDeleteHistory, '删掉吧');
+  if (staleDeleteGuard?.('delete_file', { path: '_old.ps1' }) === undefined) {
+    throw new Error('超过最近两轮的旧目标不应被“删掉吧”放行');
+  }
+
   const noisyHistory = [
     ...history,
     {

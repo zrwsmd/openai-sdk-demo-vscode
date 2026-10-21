@@ -534,6 +534,7 @@ const STATIC_FALLBACK_BUSINESS_TOOLS = Object.freeze([
   "search_files",
   "write_file",
   "edit_file",
+  "delete_file",
   "request_clarification",
   "run_command",
 ] as const);

@@ -282,7 +282,7 @@ const HISTORICAL_REFERENCE_PATTERN =
 
 /**
  * 只读工具可以在“最近且唯一的目标”上承接自然语言追问；副作用工具仍
- * 需要当前请求明确表达继续处理历史目标。
+ * 需要当前请求明确表达继续处理历史目标 —— 唯一例外见下面的删除类承接。
  */
 const IMPLICIT_HISTORY_READ_TOOLS = new Set([
   "read_file",
@@ -305,6 +305,14 @@ const IGNORED_RESOURCE_ARGUMENT_FIELDS: Record<string, ReadonlySet<string>> = {
  */
 const IMPLICIT_FOLLOW_UP_PATTERN =
   /(?:[?？]|吗|呢|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|请(?:查看|读取|检查|分析|确认|看看)|帮我(?:查看|读取|检查|分析|确认|看看))/iu;
+/**
+ * “删掉吧”“清理掉”这种整句就是一个删除动作、没有带任何新资源名的说法，
+ * 本身就是对上一轮目标的承接。要求用户把文件名再念一遍没有意义 —— 实际
+ * 后果是模型被拦两次后，改成“扫目录里所有 .ps1 再删”这种不含文件名的写法
+ * 绕过去，比直接删更危险。所以只放行删除类动词，且目标必须全部落在最近两轮。
+ */
+const DESTRUCTIVE_FOLLOW_UP_PATTERN =
+  /(?:删掉|删除|删了|清理掉|清理|清掉|移除|去掉|干掉)/u;
 const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
 
 /**
@@ -582,7 +590,16 @@ export function createHistoricalToolArgumentGuard(
       hasUniqueRecentTarget &&
       staleReferences.length === 1 &&
       recentReferences.has(staleReferences[0]);
-    if (canContinueExplicitly || canContinueImplicitly) return undefined;
+    // 删除类承接不要求目标唯一：上一轮产出两个临时脚本、用户说“删掉吧”，
+    // 指的就是这两个。但每一个旧目标都必须在最近两轮里出现过。
+    const canContinueDestructively =
+      DESTRUCTIVE_FOLLOW_UP_PATTERN.test(currentUserText) &&
+      currentUserReferences.size === 0 &&
+      staleReferences.length > 0 &&
+      staleReferences.every((reference) => recentReferences.has(reference));
+    if (canContinueExplicitly || canContinueImplicitly || canContinueDestructively) {
+      return undefined;
+    }
 
     const displayReferences = staleReferences
       .slice(0, 3)

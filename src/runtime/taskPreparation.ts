@@ -344,7 +344,7 @@ export async function classifyDeliveryContract(
       "required（必填，布尔值，表示是否必需）、" +
       "acceptableEvidence（必填，非空数组，元素只能是 final_artifact、successful_tool、successful_write、successful_export、delivery_commit）、" +
       "workspacePersistence（可选，required、not_required 或 optional）、" +
-      "workspaceFileExtension（可选，必须带前导点，例如 .st）、" +
+      "workspaceFileExtension（可选，必须带前导点，例如 .txt）、" +
       "requiredVerificationTools（可选，字符串数组，最多 8 项）、" +
       "runtimeEntry（可选，required、not_required 或 optional）。" +
       "不要把 kind 写成 type，不要把 acceptableEvidence 写成 evidence、verification 或 artifacts，也不要自行发明 name、file、path 这类字段名。" +
@@ -352,6 +352,10 @@ export async function classifyDeliveryContract(
       "当用户强调重点看代码、主要看生成代码或变量模拟即可时，通常只需要代码交付物，不要额外制造说明文档交付物。" +
       "直接在聊天中生成的内容也必须要求 final_artifact 作为证据；不要把普通 message 当成可验收证据。" +
       "写入/保存/导出类任务可接受 successful_write、successful_export 或 workflow 专用 delivery_commit；其他工具型交付可接受 successful_tool。" +
+      "删除、移除、清理、清空这类任务的交付结果是「目标已经不存在」，不能套用写入的形状：" +
+      "不要给它设置 workspacePersistence=required，也不要用 successful_write 或 delivery_commit 作为证据；" +
+      "这类交付物用 acceptableEvidence=[\"successful_tool\"]，workspacePersistence 设为 not_required。" +
+      "删除之后文件本来就不该留在工作区里，要求它持久化会让验收永远无法通过。" +
       "用户要求生成代码时，默认 workspacePersistence=required；只有用户明确要求只展示、不要保存或不要写文件时才设置 not_required。" +
       "对于需要保存并运行的 IEC 61131-3 ST 交付，默认 runtimeEntry=required，最终源码必须包含 PROGRAM 主入口；FUNCTION_BLOCK、FUNCTION、TYPE、STRUCT、别名等只能作为可复用声明，不能替代 PROGRAM。" +
       "如果用户明确只要求生成供其他程序复用的功能块、函数、类型或库，并明确不需要运行和任务绑定，才设置 runtimeEntry=not_required；其他情况不要省略该要求。" +
@@ -363,6 +367,9 @@ export async function classifyDeliveryContract(
           '完整示例：{"requiresDeliverable":true,"reason":"用户要求把给定文本写入 ssrt.txt",' +
           '"deliverables":[{"kind":"file","title":"ssrt.txt","description":"包含用户给定文本的 ssrt.txt 文件",' +
           '"required":true,"acceptableEvidence":["successful_write"],"workspacePersistence":"required"}]}。' +
+          '删除类示例：{"requiresDeliverable":true,"reason":"用户要求删除工作区里的两个临时脚本",' +
+          '"deliverables":[{"kind":"file","title":"删除临时脚本","description":"删除工作区根目录下的两个临时脚本",' +
+          '"required":true,"acceptableEvidence":["successful_tool"],"workspacePersistence":"not_required"}]}。' +
           '不需要交付物时必须返回 {"requiresDeliverable":false,"reason":"...","deliverables":[]}。'),
     ...(useNativeStructuredOutput
       ? { outputType: deliveryContractDecisionSchema }

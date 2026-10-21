@@ -5,6 +5,7 @@ import { createRunCommandTool } from "./runCommandTool";
 import { createWorkspaceReadTools } from "./workspaceReadTools";
 import { createWriteFileTool } from "./writeFileTool";
 import { createEditFileTool } from "./editFileTool";
+import { createDeleteFileTool } from "./deleteFileTool";
 import { createClarificationTool } from "./clarificationTool";
 import { CLARIFICATION_TOOL_NAME } from "../clarification";
 import { createLoadSkillTool } from "../skills/skillTool";
@@ -84,6 +85,17 @@ const CORE_TOOL_CAPABILITIES: readonly ToolCapability[] = [
     fallbackModes: ["file_edit"],
   },
   {
+    name: "delete_file",
+    description: "删除授权工作区内的单个文件。",
+    domain: "workspace",
+    intents: ["删除文件", "移除文件", "清理临时文件"],
+    tags: ["workspace", "write", "files", "delete"],
+    risk: "write",
+    effect: "filesystem",
+    evidence: ["successful_tool"],
+    fallbackModes: ["file_edit"],
+  },
+  {
     name: CLARIFICATION_TOOL_NAME,
     description: "向用户弹出澄清问题，支持候选选项和自定义答案。",
     domain: "agent",
@@ -129,6 +141,7 @@ export function createCoreToolProvider(): ToolProvider {
         createClarificationTool(context),
         createWriteFileTool(context),
         createEditFileTool(context),
+        createDeleteFileTool(context),
         createRunCommandTool(context),
       ];
     },

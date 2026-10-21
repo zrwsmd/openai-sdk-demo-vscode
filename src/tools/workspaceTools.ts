@@ -133,6 +133,29 @@ export async function writeFileText(root: string, rel: string, content: string):
   return { file: abs, bytes: Buffer.byteLength(content) };
 }
 
+/**
+ * 删除工作区里的一个文件。
+ *
+ * 以前删文件只能走 run_command,而 Remove-Item / del / rm 在命令风险分类里是
+ * blocked 级别,不管什么权限模式都直接拒绝。模型被逼着改用
+ * `node -e "...rmSync..."` 绕过命令拦截,既不可审计,也绕开了工作区边界检查。
+ * 这里给删除开一条受控通道:路径走和其他文件工具同一套授权解析,写操作照常
+ * 需要审批,effect 记进账本。
+ */
+export async function deleteFileText(
+  root: string,
+  rel: string,
+): Promise<{ file: string; existed: boolean; bytes: number }> {
+  const abs = resolveInWorkspace(root, rel);
+  const stat = await fs.stat(abs).catch(() => undefined);
+  if (!stat) return { file: abs, existed: false, bytes: 0 };
+  if (stat.isDirectory()) {
+    throw new ToolError(`${rel} 是目录。delete_file 只删单个文件;要删目录请先清空里面的文件。`);
+  }
+  await fs.rm(abs, { force: true });
+  return { file: abs, existed: true, bytes: stat.size };
+}
+
 export interface FileEditOperation {
   oldText: string;
   newText: string;

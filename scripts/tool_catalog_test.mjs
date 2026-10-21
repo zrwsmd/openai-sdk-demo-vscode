@@ -37,12 +37,14 @@ assert.deepEqual(coreCatalog.riskMap(), {
   search_files: 'read',
   write_file: 'write',
   edit_file: 'write',
+  delete_file: 'write',
   request_clarification: 'plan',
   run_command: 'execute',
 });
 assert.deepEqual(coreCatalog.evidenceMap(), {
   write_file: ['successful_write'],
   edit_file: ['successful_write'],
+  delete_file: ['successful_tool'],
 });
 assert.deepEqual(coreCatalog.toolsForFallback('read_only'), [
   'get_io_table',
@@ -58,6 +60,7 @@ assert.deepEqual(coreCatalog.toolsForFallback('file_edit'), [
   'search_files',
   'write_file',
   'edit_file',
+  'delete_file',
   'request_clarification',
 ]);
 assert.deepEqual(coreCatalog.toolsForFallback('command_query'), ['run_command']);
@@ -85,7 +88,7 @@ assert.equal(
 );
 assert.deepEqual(
   coreCatalog.findByTag('workspace').map((item) => item.name),
-  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'run_command'],
+  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'delete_file', 'run_command'],
 );
 assert.deepEqual(
   coreCatalog.findByIntent('读取文件').map((item) => item.name),
@@ -100,7 +103,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   coreCatalog.toolsForFallback('file_edit', '这是一个完全没有匹配意图的请求'),
-  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'request_clarification'],
+  ['list_files', 'read_file', 'search_files', 'write_file', 'edit_file', 'delete_file', 'request_clarification'],
 );
 assert.deepEqual(
   splitToolCapabilityIntentText('读取文件并搜索文本'),
@@ -225,6 +228,7 @@ assert.deepEqual(
     'search_files',
     'write_file',
     'edit_file',
+    'delete_file',
     'request_clarification',
     'run_command',
     'validate_st_code',
@@ -280,6 +284,7 @@ const appFileEditTools = [
   'search_files',
   'write_file',
   'edit_file',
+  'delete_file',
   'request_clarification',
   'export_st_program',
 ];

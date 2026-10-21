@@ -3,7 +3,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
+import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileText, deleteFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-ws-test-'));
 await fs.writeFile(path.join(ws, 'main.st'), 'PROGRAM Demo\n  x := 1;\nEND_PROGRAM\n');
@@ -212,6 +212,32 @@ if (process.platform === 'win32') {
   ) {
     throw new Error('PowerShell 命令未正确执行或 auto 未识别');
   }
+}
+
+// [10] delete_file:删掉存在文件、重复删不算失败、目录拒绝
+{
+  await fs.writeFile(path.join(ws, 'temp-a.ps1'), 'x');
+  const first = await deleteFileText(ws, 'temp-a.ps1');
+  const second = await deleteFileText(ws, 'temp-a.ps1');
+  console.log('[10] delete_file: 首次 =', first.existed, '| 重复 =', second.existed);
+  if (!first.existed || second.existed) throw new Error('delete_file 存在性判断错误');
+  if (await fs.stat(path.join(ws, 'temp-a.ps1')).then(() => true, () => false)) {
+    throw new Error('delete_file 没有真的删掉文件');
+  }
+  let dirRejected = false;
+  try {
+    await deleteFileText(ws, 'sub');
+  } catch {
+    dirRejected = true;
+  }
+  if (!dirRejected) throw new Error('delete_file 不应删除目录');
+  let escapeRejected = false;
+  try {
+    await deleteFileText(ws, '../outside.txt');
+  } catch {
+    escapeRejected = true;
+  }
+  if (!escapeRejected) throw new Error('delete_file 不应允许越界路径');
 }
 
 console.log(`\n工作区工具层 全部通过 ✔ (工作区 ${ws})`);

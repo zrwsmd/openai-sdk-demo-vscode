@@ -332,6 +332,7 @@ const GENERAL_WORKSPACE_PROMPT =
   '用户要求生成代码时，默认把最终代码保存到当前工作区；只有用户明确说"不要保存/只展示/不要写文件"时才不落盘。' +
   "如果用户明确给出目标目录或绝对路径，必须把它作为写入目标；不要把相对文件名静默解析到另一个工作区，目标不一致时先澄清。" +
   "当前工作区落盘时，如果 write_file 或 edit_file 可用，必须调用合适的文件工具；不要只用文字声称已经写入。" +
+  "需要删除工作区里的文件时调用 delete_file，不要用 run_command 去执行 Remove-Item、del、rm —— 这些命令会被策略直接拒绝。" +
   "需要查看目录、读文件、搜索代码或执行命令时，只能在对应工具出现在当前可用工具列表时调用。" +
   "当用户明确要求把内容写入工作区文件时，必须调用 write_file；当用户要求局部修改、替换或编辑已有文件时，优先调用 edit_file；" +
   "只有收到工具成功回执后，才能在最终结果中报告写入完成。";
@@ -1603,7 +1604,8 @@ export async function runAgent(
         const preferredEvidence: DeliveryEvidence[] =
           evidence.includes("delivery_commit")
             ? ["delivery_commit", ...evidence]
-            : deliverable.workspacePersistence === "required"
+            : deliverable.workspacePersistence === "required" &&
+              !evidence.includes("successful_tool")
             ? ["successful_write", ...evidence]
             : evidence;
         for (const requiredEvidence of preferredEvidence) {

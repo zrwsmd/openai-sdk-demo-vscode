@@ -275,8 +275,14 @@ function hasDeliveryEvidence(
   records: (CompletionGateToolRecord & { order: number })[],
   input: CompletionGateInput,
 ): boolean {
+  // 要求工作区持久化的交付物，必须真的有一次写入，光有内联 artifact 不算。
+  // 但契约自己写了 successful_tool 的除外 —— 那是在明确说“任何成功的工具回执
+  // 都算数”，删除类交付物就是这样：文件被删掉之后本来就不存在，不可能产生
+  // 写入，硬套写入要求会让它每轮都被打回，一直重试到把预算烧完。
+  const acceptsAnyTool = deliverable.acceptableEvidence.includes('successful_tool');
   if (
     deliverable.workspacePersistence === 'required' &&
+    !acceptsAnyTool &&
     !deliverable.acceptableEvidence.includes('delivery_commit') &&
     !hasToolEvidence('successful_write', records, deliverable, input)
   ) {
