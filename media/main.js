@@ -3016,11 +3016,13 @@ function showClarificationModal(runId, request) {
   cancel.textContent = '取消';
   const confirm = document.createElement('button');
   confirm.className = 'btn primary';
-  confirm.textContent = '提交';
   // 分页指示:参考样式是左右箭头夹着页码。当前是"一步一弹窗",答过的步骤翻不回去,
   // 所以箭头只是装饰、不是按钮 —— 别改成可点的,那会让人以为能翻页。
   const stepIndex = Number.isInteger(request.stepIndex) ? request.stepIndex : 0;
   const stepCount = Number.isInteger(request.stepCount) ? request.stepCount : 1;
+  // 多步骤时按钮是"下一步"(点了只是交这一步,后面还有),最后一步才叫"提交"。
+  // 只有一步的情况 stepCount=1,落到"提交"。
+  confirm.textContent = stepIndex + 1 >= stepCount ? '提交' : '下一步';
   const pager = document.createElement('span');
   pager.className = 'clarification-pager';
   pager.textContent = `‹ ${stepIndex + 1}/${stepCount} ›`;
