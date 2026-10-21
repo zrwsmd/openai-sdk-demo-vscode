@@ -85,6 +85,32 @@ try {
   if (!redirected) {
     throw new Error(`workspace tools should redirect skill paths to load_skill, got ${text}`);
   }
+
+  // 描述总量超过目录提示词上限时,只能砍描述,不能砍技能:名字是 load_skill 唯一的入口。
+  const many = Array.from({ length: 60 }, (_, index) => ({
+    name: `skill-${index}`,
+    description: 'x'.repeat(400),
+    scope: 'user',
+  }));
+  const fatCatalog = {
+    skills: many,
+    get: () => undefined,
+    findByPath: () => undefined,
+    isSkillPath: () => false,
+    load: async () => '',
+  };
+  const fatPrompt = renderSkillCatalogPrompt(fatCatalog);
+  if (fatPrompt.length > 12000) {
+    throw new Error(`catalog prompt exceeded its budget: ${fatPrompt.length}`);
+  }
+  const droppedNames = many.filter((skill) => !fatPrompt.includes(skill.name));
+  if (droppedNames.length) {
+    throw new Error(`catalog prompt dropped ${droppedNames.length} skill names, e.g. ${droppedNames[0].name}`);
+  }
+  if (!fatPrompt.includes('其余技能只列名称')) {
+    throw new Error('over-budget catalog should keep the remaining skills as name-only entries');
+  }
+  console.log('[skills] over-budget catalog keeps every skill name and stays within budget: passed');
   console.log('[skills] discovery, precedence, lazy loading, resource boundary, prompt metadata and disable flag: passed');
 } finally {
   await fs.rm(root, { recursive: true, force: true });
