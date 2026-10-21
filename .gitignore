@@ -4,3 +4,4 @@ dist/
 .env
 scripts/agent.testbundle.mjs
 vendor/st-analyzer/
+.plc-agent/mcp.json
