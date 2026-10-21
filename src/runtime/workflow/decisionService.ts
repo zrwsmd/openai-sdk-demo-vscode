@@ -213,7 +213,9 @@ export class WorkflowDecisionService {
     const reason =
       mode === "general_chat"
         ? "Jev 高置信度判断为普通问答，工具需求均明确为 no"
-        : "Jev 高置信度判断为文件只读查询，未检测到写入或命令执行需求";
+        : mode === "file_edit"
+          ? "Jev 高置信度判断为工作区文件修改，风险未达高或极高"
+          : "Jev 高置信度判断为文件只读查询，未检测到写入或命令执行需求";
     this.log(
       `[workflow] Jev safe fallback ${mode}(${confidence.toFixed(2)}): ${reason}` +
         ` | risk=${risk} approval=${approval}` +
@@ -438,6 +440,19 @@ function hasConfidentToolNeed(
 function safeFallbackModeFromJevHint(
   hint: TaskDecisionHint,
 ): WorkflowFallbackMode | undefined {
+  // 创建、导出、删除这类动作，Jev 对 write_file 只给 uncertain（删除本来就不算写文件），
+  // 用 delivery=not_required + run_command=no 的严格门槛会把它们全挡掉，
+  // 于是落到模型分类器手里，被当成高风险拦成只读档。file_edit 只需要确认确实要动工作区文件。
+  if (
+    hint.workflow === "file_edit" &&
+    hint.workflowConfidence >= MIN_SAFE_JEV_WORKFLOW_CONFIDENCE &&
+    hint.orchestration !== "team" &&
+    hint.riskLevel !== "high" &&
+    hint.riskLevel !== "critical" &&
+    !hasConfidentToolNeed(hint.toolNeeds.writeFile, "no")
+  ) {
+    return "file_edit";
+  }
   if (
     hint.workflowConfidence < MIN_SAFE_JEV_WORKFLOW_CONFIDENCE ||
     hint.delivery !== "not_required" ||

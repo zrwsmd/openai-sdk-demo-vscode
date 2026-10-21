@@ -465,6 +465,80 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+// 删除类请求的实测形状：Jev 判 file_edit(0.94)，但 write_file 只给 uncertain(0.68)、
+// run_command 给 yes、delivery 给 required。旧的安全兜底要求 delivery=not_required +
+// writeFile=no + runCommand=no，三条全不满足 → 结论被丢弃 → 模型分类器判成
+// blocked_high_risk → 只发只读工具 → delete_file 根本不在名单里。
+globalThis.fetch = async () => response({
+  model: 'jev-test',
+  answers: {
+    delivery: { type: 'noul', noul: 0.84 },
+    orchestration: {
+      type: 'choice',
+      choice: 'single',
+      probabilities: { single: 0.98, team: 0.02 },
+      confidence: 0.98,
+    },
+    workflow: {
+      type: 'choice',
+      choice: 'file_edit',
+      probabilities: { file_edit: 0.94, file_read: 0.04, command_query: 0.02 },
+      confidence: 0.94,
+    },
+    needs_read_file: { type: 'noul', noul: 0.10 },
+    needs_write_file: { type: 'noul', noul: 0.68 },
+    needs_run_command: { type: 'noul', noul: 0.88 },
+    needs_approval: { type: 'noul', noul: 0.81 },
+    risk_level: {
+      type: 'choice',
+      choice: 'medium',
+      probabilities: { low: 0.2, medium: 0.57, high: 0.23, critical: 0 },
+      confidence: 0.57,
+    },
+  },
+  usage: { input_tokens: 17, output_tokens: 8 },
+});
+try {
+  const deleteLogs = [];
+  const deleteDecision = await new WorkflowDecisionService(
+    (line) => deleteLogs.push(line),
+    undefined,
+    undefined,
+    getDefaultToolRegistry().getToolCatalog(),
+  ).decide(
+    {
+      apiKey: 'unused',
+      baseUrl: '',
+      model: 'unused',
+      exportDir: '',
+      workspaceRoot: '',
+      jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
+    },
+    '删除ssrt.txt',
+  );
+  if (
+    deleteDecision.kind !== 'fallback' ||
+    deleteDecision.source !== 'jev' ||
+    deleteDecision.mode !== 'file_edit'
+  ) {
+    throw new Error(
+      `删除请求没有走 Jev 的 file_edit 兜底，实际 ${deleteDecision.kind}/${deleteDecision.source}/${deleteDecision.mode}`,
+    );
+  }
+  if (!deleteDecision.allowedTools?.includes('delete_file')) {
+    throw new Error('file_edit 兜底没有把 delete_file 发出来');
+  }
+  if (
+    !deleteLogs.some((line) =>
+      line.includes('[workflow] Jev safe fallback file_edit'),
+    )
+  ) {
+    throw new Error('删除请求没有记录 Jev safe fallback file_edit 日志');
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 {
   const workflowDecision = await new WorkflowDecisionService().decide(
     {
