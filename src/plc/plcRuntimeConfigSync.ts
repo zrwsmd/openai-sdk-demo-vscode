@@ -1248,7 +1248,9 @@ export async function preparePlcRuntimeConfigSync(
   function selectionFromFields(
     fields: Readonly<Record<string, string | number>> | undefined,
   ): Selection | undefined {
-    if (!fields) return undefined;
+    // 空对象等于没填：用户选了推荐卡片时弹窗不会再发字段值，
+    // 这里要是把 {} 当成"填过了"，卡片的选择就被空值盖掉了。
+    if (!fields || Object.keys(fields).length === 0) return undefined;
     const rawName = typeof fields.taskName === 'string' ? fields.taskName.trim() : '';
     const taskName = rawName || requested.taskName || createFallback.taskName;
     const nameProblem = checkIecIdentifier(taskName);

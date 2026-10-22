@@ -313,6 +313,43 @@ function clarificationWithFields(select) {
   }
 }
 
+// 空 fields 不能把卡片选择盖掉：前端选了推荐卡就不再发字段值，
+// 后端要是把 {} 当成"用户填过了"，卡片就会被默认值替换。
+{
+  const emptyWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-empty-fields-test-'),
+  );
+  let pickedTask;
+  const fake = {
+    service: {
+      request: async (request) => {
+        const option = request.options[0];
+        pickedTask = option?.fields?.taskName;
+        return {
+          requestId: 'test',
+          cancelled: false,
+          selectedOptionId: option?.id,
+          value: option?.value,
+          fields: {},
+        };
+      },
+    },
+  };
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: emptyWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序',
+    taskSuggestionProvider: async () => [
+      { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+    ],
+    clarification: fake.service,
+  });
+  if (!plan || plan.taskName !== pickedTask) {
+    throw new Error('empty fields object overrode the selected option');
+  }
+}
+
 // 表单值里的周期非法时后端要拒绝，不能只靠前端拦。
 {
   const invalidWorkspace = await fs.mkdtemp(

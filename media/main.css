@@ -1288,6 +1288,8 @@ body.settings-open { overflow: hidden; }
 }
 /* 只剩一个字段时别让它拉满整行，看着空。 */
 .clarification-fields.single .clarification-field { flex: 0 1 240px; }
+/* 选了推荐方案时把自定义整块压暗：两边只能生效一个，视觉上也要看得出来。 */
+.clarification-fields.muted { opacity: 0.45; }
 .clarification-field-narrow { flex: 0 0 190px; }
 .clarification-field-label {
   color: var(--muted);

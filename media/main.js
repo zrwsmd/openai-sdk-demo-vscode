@@ -3113,9 +3113,13 @@ function showClarificationModal(runId, request) {
       input.name = `clarification-${requestId}`;
       input.value = option.id;
       input.dataset.value = option.value ?? '';
-      // 点卡片不是"选中一个选项"，而是把它的值填进下面的输入框。
-      // 提交时永远读输入框，两条路径不会互相覆盖。
-      input.addEventListener('change', () => fillFieldsFromOption(option));
+      // 推荐方案和自定义二选一：选了卡片就把自定义框清空，不再两边同时亮着。
+      // 用户点回输入框会自动取消卡片选中。
+      input.addEventListener('change', () => {
+        if (!input.checked) return;
+        for (const control of fieldControls) control.input.value = '';
+        syncClarificationState();
+      });
       optionInputs.push(input);
       // 序号方块代替原来的圆圈,选中时整行和方块一起高亮。
       const ordinal = document.createElement('span');
@@ -3174,10 +3178,12 @@ function showClarificationModal(runId, request) {
 
   // 只渲染用户还缺的字段。已确认的那些在标题栏，不占输入框。
   const fieldControls = [];
+  let fieldsWrap = null;
   if (formMode) {
     const wrap = document.createElement('div');
     wrap.className = 'clarification-fields';
     if (editableFields.length === 1) wrap.classList.add('single');
+    fieldsWrap = wrap;
     for (const field of editableFields) {
       const box = document.createElement('div');
       box.className = 'clarification-field';
@@ -3207,13 +3213,15 @@ function showClarificationModal(runId, request) {
       box.append(label, row, hint);
       wrap.appendChild(box);
       fieldControls.push({ field, input, box, hint });
+      // 不拦截输入：填了字母就当场标红说明原因，而不是把字符悄悄吃掉、
+      // 让用户以为输入框坏了。校验交给 syncClarificationState 统一做。
       input.addEventListener('input', () => {
-        // 周期框只留数字：字母和符号根本打不进去，w4ms 这种输入没有机会出现。
-        if (field.type === 'positiveInteger') {
-          const digits = input.value.replace(/\D+/g, '');
-          if (digits !== input.value) input.value = digits;
-        }
-        // 手动改过之后就不算"选中了某张推荐卡"，否则高亮会和框里的值对不上。
+        // 动了自定义框就不算"选中了某张推荐卡"，两边不能同时生效。
+        for (const radio of optionInputs) radio.checked = false;
+        syncClarificationState();
+      });
+      input.addEventListener('focus', () => {
+        if (!optionInputs.some((radio) => radio.checked)) return;
         for (const radio of optionInputs) radio.checked = false;
         syncClarificationState();
       });
@@ -3290,25 +3298,14 @@ function showClarificationModal(runId, request) {
     return values;
   };
 
-  // 点推荐卡片 = 把它的值填进下面的输入框，不改"提交读哪里"这件事。
-  const fillFieldsFromOption = (option) => {
-    const values = option?.fields || {};
-    let changed = false;
-    for (const control of fieldControls) {
-      const value = values[control.field.key];
-      if (value === undefined) continue;
-      control.input.value = String(value);
-      changed = true;
-    }
-    if (changed) syncClarificationState();
-  };
-
   const sendResponse = (cancelled) => {
     const selected = optionInputs.find((input) => input.checked);
     const customText = customInput?.value?.trim() || '';
     const selectedOptionId = selected?.value || undefined;
     const selectedValue = selected?.dataset.value || undefined;
-    const fieldValues = formMode && !cancelled ? collectFieldValues() : undefined;
+    // 选了推荐卡就不再发字段值：发一个空对象会让后端把卡片选择盖掉。
+    const collected = formMode && !cancelled ? collectFieldValues() : undefined;
+    const fieldValues = collected && Object.keys(collected).length ? collected : undefined;
     markClarificationCard(requestId, {
       cancelled,
       selectedOptionId,
@@ -3379,8 +3376,9 @@ function showClarificationModal(runId, request) {
       return;
     }
     if (formMode) {
-      // 选了推荐卡就等于填过值；只有"没选卡又没填完"才拦住。
+      // 推荐卡和自定义二选一：选了卡就把下面整块压暗，提示现在用的是推荐方案。
       const pickedCard = optionInputs.some((input) => input.checked);
+      fieldsWrap?.classList.toggle('muted', pickedCard);
       confirm.disabled = !!formProblem || (!formFilled && !pickedCard);
       return;
     }
@@ -3395,7 +3393,10 @@ function showClarificationModal(runId, request) {
   syncClarificationState();
   requestAnimationFrame(() => {
     const first = fieldControls[0]?.input || optionInputs[0] || customInput || confirm;
-    first?.focus();
+    // 聚焦第一个字段会把可滚动面板带到中间/底部，用户一睁眼看到的就是表单下半截。
+    // 阻止聚焦滚动，再把面板拉回顶部。
+    first?.focus({ preventScroll: true });
+    panel.scrollTop = 0;
   });
 }
 
