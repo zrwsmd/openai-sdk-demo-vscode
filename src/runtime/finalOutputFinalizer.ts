@@ -133,7 +133,10 @@ export async function runFinalOutputFinalizer(
     const runner = new Runner({ tracingDisabled: input.tracingDisabled });
     const result = await runner.run(finalizer, finalizerPrompt(input), {
       stream: false,
-      maxTurns: 1,
+      // 这里给 1 轮是不够的：结构化输出第一次不合 schema 时 SDK 会回一句让模型
+      // 按 schema 重写，那一次也算一轮，于是 1 轮直接抛 MaxTurnsExceededError，
+      // 收尾器等于只有"一次就对"才成功，平时全靠账本合成兜底。
+      maxTurns: 3,
       signal: input.signal,
     });
     const parsed = industrialAgentOutputSchema.safeParse(result.finalOutput);
