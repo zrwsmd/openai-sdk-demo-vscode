@@ -290,13 +290,13 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
         data: raw,
       };
     }
-    const workspaceFile = typeof raw.wsUri === "string" ? raw.wsUri : undefined;
     return {
       ok: true,
-      data: { workspaceFile, opened: false },
-      summary: workspaceFile
-        ? `工程已创建:${workspaceFile}`
-        : "工程已创建。",
+      // wsUri is an internal handoff detail. The host keeps it for opening the
+      // new window, but exposing it here makes the model treat the workspace
+      // descriptor as the project directory and cross the authorization boundary.
+      data: { projectCreated: true, opened: false },
+      summary: "工程已创建，宿主将在本轮结束后自动在新窗口打开。",
     };
   },
 });

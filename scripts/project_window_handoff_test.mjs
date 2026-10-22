@@ -74,6 +74,8 @@ assert(messages[0].text.includes('工程名称：Mixer'), 'summary is missing th
 assert(messages[0].text.includes('设备型号：SC5100'), 'summary is missing the device model');
 assert(messages[0].text.includes('工程类型：standard'), 'summary is missing the project type');
 assert(messages[0].text.includes('工程语言：st'), 'summary is missing the language');
+assert(messages[0].text.includes(`工程目录：${path.resolve(projectRoot)}`), 'summary is missing the project root');
+assert(!messages[0].text.includes('Mixer.code-workspace'), 'workspace descriptor must stay out of the model-visible summary');
 assert(!messages[0].text.includes('旧会话内容'), 'old conversation leaked into the project session');
 const handoffGuard = createHistoricalToolArgumentGuard(
   items,

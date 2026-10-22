@@ -89,27 +89,13 @@ export const DEVUNI_PROJECT_PIPELINE_PLAN: PipelineStagePlan = {
   ],
 };
 
-function createdWorkspaceFile(record: WorkflowToolRecord): string | undefined {
+function createdProjectArtifact(record: WorkflowToolRecord): Artifact | undefined {
   if (record.name !== DEVUNI_CREATE_PROJECT_TOOL_NAME || !record.result.ok) {
     return undefined;
   }
-  const data = record.result.data;
-  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-  const workspaceFile = (data as Record<string, unknown>).workspaceFile;
-  return typeof workspaceFile === "string" && workspaceFile.trim()
-    ? workspaceFile.trim()
-    : undefined;
-}
-
-function createdProjectArtifact(record: WorkflowToolRecord): Artifact | undefined {
-  const workspaceFile = createdWorkspaceFile(record);
-  return workspaceFile
-    ? {
-        kind: "file",
-        name: "devUni 工程工作区",
-        uri: workspaceFile,
-      }
-    : undefined;
+  // The workspace descriptor is retained by the host handoff, not exposed as
+  // an artifact. It is a sibling of the actual project root in devUni projects.
+  return { kind: "file", name: "devUni 工程" };
 }
 
 function localMatch(context: WorkflowDecisionContext): WorkflowLocalMatch {
@@ -153,9 +139,11 @@ export class DevuniProjectWorkflow implements WorkflowRuntime {
         .filter((artifact): artifact is Artifact => artifact !== undefined),
       collectActionArtifact: createdProjectArtifact,
       finalMessage: (records) => {
-        const workspaceFile = records.map(createdWorkspaceFile).filter(Boolean).at(-1);
-        return workspaceFile
-          ? `工程已成功创建：${workspaceFile}\n\n本轮结束后将自动在新窗口打开。`
+        return records.some(
+          (record) =>
+            record.name === DEVUNI_CREATE_PROJECT_TOOL_NAME && record.result.ok,
+        )
+          ? "工程已成功创建。\n\n本轮结束后将自动在新窗口打开。"
           : undefined;
       },
     };
@@ -179,7 +167,8 @@ export class DevuniProjectWorkflow implements WorkflowRuntime {
       "工程类型和工程语言允许用户不选(不选时运行时会取候选列表的第一个),这两步请把 required 显式设为 false。" +
       "语言、工程类型或设备型号不确定时,先用 devuni_project_options 查询候选项。" +
       "devuni_create_project 是写操作,必须等用户在界面批准后才会真正执行;" +
-      "完成后如实报告磁盘上生成的工程文件路径。宿主会在本轮结束后自动打开新窗口," +
+      "完成后说明工程已创建即可;不要把 .code-workspace 工作区文件当作工程根目录,也不要主动读取它。" +
+      "宿主会在本轮结束后自动打开新窗口," +
       "不要判断窗口此刻是否已经打开,也不要让用户手动打开或询问是否需要打开。"
     );
   }

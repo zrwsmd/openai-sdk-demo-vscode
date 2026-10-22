@@ -203,6 +203,10 @@ async function buildTool(port) {
   );
   const result = JSON.parse(raw);
   assert(result.ok === true, `创建工程应成功: ${raw}`);
+  assert(
+    !('workspaceFile' in (result.data ?? {})),
+    `工具结果不能暴露 .code-workspace 路径: ${raw}`,
+  );
   assert(calls.length === 1, `参数齐全时只应调用一次,实际 ${calls.length} 次`);
   assert(
     calls[0].args.openAfterCreate === false,
@@ -249,7 +253,12 @@ async function buildTool(port) {
     }),
     {},
   );
-  assert(JSON.parse(createRaw).ok === true, `创建工程应成功: ${createRaw}`);
+  const createResult = JSON.parse(createRaw);
+  assert(createResult.ok === true, `创建工程应成功: ${createRaw}`);
+  assert(
+    !('workspaceFile' in (createResult.data ?? {})),
+    `工具结果不能暴露 .code-workspace 路径: ${createRaw}`,
+  );
   const writeRaw = await writeTool.invoke(
     {},
     JSON.stringify({ path: 'same-run.txt', content: 'original workspace' }),

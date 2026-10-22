@@ -156,7 +156,6 @@ export function renderProjectWindowSummary(handoff: ProjectWindowHandoff): strin
     '',
     `工程名称：${handoff.projectName}`,
     `工程目录：${handoff.projectRoots[0]}`,
-    `工作区文件：${handoff.workspaceFile}`,
     ...(handoff.deviceModel ? [`设备型号：${handoff.deviceModel}`] : []),
     ...(handoff.projectType ? [`工程类型：${handoff.projectType}`] : []),
     ...(handoff.language ? [`工程语言：${handoff.language}`] : []),

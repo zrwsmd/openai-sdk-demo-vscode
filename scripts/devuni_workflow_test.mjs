@@ -307,20 +307,26 @@ const createdRecord = {
   result: {
     protocolVersion: 1,
     ok: true,
-    data: { workspaceFile: 'D:\\\\new1\\\\new1.code-workspace', opened: false },
+    data: { projectCreated: true, opened: false },
     diagnostics: [],
     effect: 'filesystem',
     risk: 'write',
   },
 };
 assert.equal(
-  runtime.completionAdapter.collectActionArtifact?.(createdRecord)?.uri,
-  'D:\\\\new1\\\\new1.code-workspace',
+  runtime.completionAdapter.collectActionArtifact?.(createdRecord)?.name,
+  'devUni 工程',
   '创建成功回执必须成为工作流完成证据',
+);
+assert.equal(
+  runtime.completionAdapter.collectActionArtifact?.(createdRecord)?.uri,
+  undefined,
+  '工作区文件路径不能作为模型可见的工程产物路径',
 );
 const createdMessage = runtime.completionAdapter.finalMessage?.([createdRecord]) ?? '';
 assert.match(createdMessage, /工程已成功创建/u);
 assert.match(createdMessage, /本轮结束后将自动在新窗口打开/u);
+assert.doesNotMatch(createdMessage, /\.code-workspace|workspaceFile/u);
 assert.doesNotMatch(createdMessage, /尚未|手动打开|是否需要打开/u);
 
 /* ------------------------------------------------------------------ */
