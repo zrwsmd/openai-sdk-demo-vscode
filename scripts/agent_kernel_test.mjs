@@ -30,7 +30,46 @@ import {
   composeToolSet,
   isRetryableAgentError,
   renderFallbackModeInstructions,
+  composeFinalMessage,
 } from './agent.testbundle.mjs';
+
+// 最终消息合成：泛化收尾不能遮住工具证据；失败模型文本不能和成功证据并列；
+// 同一文件的不同字节数/措辞不能重复展示。
+{
+  const fallback = composeFinalMessage(
+    '已完成运行时结构化收尾。',
+    undefined,
+    '已导出 C:\\tmp\\StarDelta.st。',
+  );
+  if (fallback !== '已导出 C:\\tmp\\StarDelta.st。') {
+    throw new Error(`泛化收尾没有让位给工具兜底: ${fallback}`);
+  }
+
+  const authoritative = composeFinalMessage(
+    '无法完成本轮交付。',
+    '已完成正式交付：C:\\tmp\\StarDelta.st；已确认内容通过 ST 校验并成功写入（commit=st-delivery-1）。',
+  );
+  if (
+    !authoritative?.includes('已完成正式交付') ||
+    authoritative.includes('无法完成')
+  ) {
+    throw new Error(`失败模型文本与成功证据发生冲突: ${authoritative}`);
+  }
+
+  const deduped = composeFinalMessage(
+    'StarDelta.st 已保存到工作区（128 字节）。',
+    '已完成正式交付：StarDelta.st；已确认内容通过 ST 校验并成功写入（commit=st-delivery-1）。',
+  );
+  if (
+    !deduped?.includes('StarDelta.st 已保存') ||
+    !deduped.includes('通过 ST 校验') ||
+    deduped.includes('成功写入') ||
+    (deduped.match(/StarDelta\.st/gi) ?? []).length !== 1
+  ) {
+    throw new Error(`同一交付证据没有去重: ${deduped}`);
+  }
+  console.log('[final-message] 泛化收尾、矛盾文本、重复证据:通过');
+}
 
 for (const [mode, label] of [
   ['general_chat', '普通问答'],

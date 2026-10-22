@@ -417,6 +417,156 @@ export const MAX_TURNS = 10;
 /** Workflow-specific policies may extend the initial segment up to their own hard limit. */
 const MAX_COMPLETION_GATE_RETRIES = 3;
 
+function cleanFinalMessage(value: string | undefined): string {
+  return value ? stripHistoricalContextMarker(value).trim() : "";
+}
+
+function isInternalToolArtifactComplaint(message: string): boolean {
+  const text = message.trim();
+  if (!text) return false;
+  return /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
+    /tool returned an empty dict or a non-dict value/is.test(text) ||
+    /unexpected response format.*tool implementation/is.test(text) ||
+    /文件被截断.*重新写入/u.test(text) ||
+    /请重新写入(?:完整)?代码/u.test(text);
+}
+
+function isGenericFinalizerMessage(message: string): boolean {
+  const text = message.replace(/[。.!！\s]+$/gu, "").trim();
+  return text.length <= 40 &&
+    /(?:已完成|完成了|完成)运行时(?:结构化)?收尾/u.test(text);
+}
+
+function messageClaimsFailure(message: string): boolean {
+  return /无法|不能|未能|未完成|没有完成|未写入|没有写入|未保存|没有保存|未导出|失败|阻塞|出错|未确认|failed|unable to|could not complete|not completed/iu.test(message);
+}
+
+function messageClaimsSuccess(message: string): boolean {
+  return !messageClaimsFailure(message) &&
+    /写入|保存|落盘|导出|生成|创建|交付|成功|通过|完成/u.test(message);
+}
+
+function canonicalFinalMessagePart(message: string): string {
+  return message
+    .replace(/\d+\s*字节/gu, "")
+    .replace(/commit\s*[:=：]\s*[\w-]+/giu, "commit")
+    .replace(/[\s\u3000，。；：、,.!?！？:;()（）[\]【】<>《》`]+/gu, "")
+    .toLocaleLowerCase();
+}
+
+function finalMessageEvidenceKeys(message: string): string[] {
+  const keys = new Set<string>();
+  for (const match of message.matchAll(/[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,10}/gu)) {
+    keys.add(`file:${match[0].toLocaleLowerCase()}`);
+  }
+  for (const match of message.matchAll(/(?:delivery)?commit\s*[:=：]?\s*([A-Za-z0-9][\w-]{5,})/giu)) {
+    keys.add(`commit:${match[1].toLocaleLowerCase()}`);
+  }
+  return [...keys];
+}
+
+function messagesShareArtifact(left: string, right: string): boolean {
+  const leftKeys = new Set(
+    finalMessageEvidenceKeys(left).filter((key) => key.startsWith("file:")),
+  );
+  return finalMessageEvidenceKeys(right)
+    .some((key) => key.startsWith("file:") && leftKeys.has(key));
+}
+
+function finalMessageParts(message: string): string[] {
+  return message
+    .split(/[\r\n。！？；;]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function finalMessagePartsOverlap(left: string, right: string): boolean {
+  const leftCanonical = canonicalFinalMessagePart(left);
+  const rightCanonical = canonicalFinalMessagePart(right);
+  if (!leftCanonical || !rightCanonical) return false;
+  if (leftCanonical.includes(rightCanonical) || rightCanonical.includes(leftCanonical)) {
+    return true;
+  }
+  const leftKeys = new Set(finalMessageEvidenceKeys(left));
+  return finalMessageEvidenceKeys(right).some((key) => leftKeys.has(key)) &&
+    messageClaimsSuccess(left) &&
+    messageClaimsSuccess(right);
+}
+
+function appendUniqueFinalMessage(
+  base: string,
+  addition: string,
+  context = base,
+): string {
+  if (!base) return addition;
+  if (!addition) return base;
+  const contextParts = finalMessageParts(context);
+  const contextSharesArtifact = messagesShareArtifact(context, addition);
+  const parts = finalMessageParts(addition).flatMap((part) => {
+    if (
+      contextParts.some((existing) => finalMessagePartsOverlap(existing, part))
+    ) {
+      return [];
+    }
+    if (
+      contextSharesArtifact &&
+      messageClaimsSuccess(context) &&
+      messageClaimsSuccess(part)
+    ) {
+      if (!/(?:校验|验证|commit\s*[:=：])/iu.test(part)) return [];
+      const proofOnly = part
+        .replace(/(?:并)?成功写入/gu, "")
+        .replace(/已写入/gu, "")
+        .replace(/\s{2,}/gu, " ")
+        .trim();
+      return proofOnly ? [proofOnly] : [];
+    }
+    return [part];
+  });
+  return parts.length ? `${base}\n\n${parts.join("；")}` : base;
+}
+
+/**
+ * Combines model prose with runtime evidence without allowing a generic
+ * finalizer response or a contradictory failure claim to hide verified facts.
+ */
+export function composeFinalMessage(
+  modelMessage: string | undefined,
+  authoritativeMessage?: string,
+  fallbackMessage?: string,
+): string | undefined {
+  const model = cleanFinalMessage(modelMessage);
+  const authoritative = cleanFinalMessage(authoritativeMessage);
+  const fallback = cleanFinalMessage(fallbackMessage);
+  const verified = [authoritative, fallback].filter((message, index, all) =>
+    message && all.indexOf(message) === index,
+  );
+  const verifiedMessage = verified.reduce(
+    (result, message) => appendUniqueFinalMessage(result, message, result),
+    "",
+  );
+  const successfulVerified = verified.filter((message) =>
+    messageClaimsSuccess(message) && !messageClaimsFailure(message),
+  );
+  const successfulVerifiedMessage = successfulVerified.reduce(
+    (result, message) => appendUniqueFinalMessage(result, message, result),
+    "",
+  );
+  if (
+    !model ||
+    isGenericFinalizerMessage(model) ||
+    isInternalToolArtifactComplaint(model)
+  ) {
+    return verifiedMessage || undefined;
+  }
+  if (successfulVerifiedMessage && messageClaimsFailure(model)) {
+    return successfulVerifiedMessage;
+  }
+  return successfulVerifiedMessage
+    ? appendUniqueFinalMessage(model, successfulVerifiedMessage, model)
+    : model;
+}
+
 export async function runAgent(
   cfg: AgentConfig,
   session: Session,
@@ -1270,16 +1420,6 @@ export async function runAgent(
       : `${requiredTool} 已执行成功。`;
   };
 
-  const isInternalToolArtifactComplaint = (message: string): boolean => {
-    const text = message.trim();
-    if (!text) return false;
-    return /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
-      /tool returned an empty dict or a non-dict value/is.test(text) ||
-      /unexpected response format.*tool implementation/is.test(text) ||
-      /文件被截断.*重新写入/u.test(text) ||
-      /请重新写入(?:完整)?代码/u.test(text);
-  };
-
   const hasAttemptedRequiredAction = (): boolean => {
     if (!requiredActionTool) return true;
     return [...historicalToolResults, ...toolResults.values()]
@@ -1472,28 +1612,6 @@ export async function runAgent(
     return /^\s*(?:```(?:json)?\s*)?\{[\s\S]*\}(?:\s*```)?\s*$/i.test(trimmed);
   };
 
-  /**
-   * Keep the model's usable explanation visible while appending the runtime's
-   * verified delivery evidence. The latter is authoritative for completion,
-   * but it should not replace a valid human-facing summary.
-   */
-  const composeFinalMessage = (
-    modelMessage: string | undefined,
-    authoritativeMessage: string | undefined,
-  ): string | undefined => {
-    const model = modelMessage
-      ? stripHistoricalContextMarker(modelMessage).trim()
-      : "";
-    const authoritative = authoritativeMessage
-      ? stripHistoricalContextMarker(authoritativeMessage).trim()
-      : "";
-    if (model && !isInternalToolArtifactComplaint(model)) {
-      if (!authoritative || model.includes(authoritative)) return model;
-      return `${model}\n\n${authoritative}`;
-    }
-    return authoritative || undefined;
-  };
-
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
     const rawOutput = output.trim();
     const usableModelMessage = rawOutput &&
@@ -1503,8 +1621,8 @@ export async function runAgent(
     const message = composeFinalMessage(
       usableModelMessage,
       authoritativeWorkflowMessage(),
+      fallbackRequiredToolMessage() || fallbackDeliveryMessage(),
     ) ||
-      fallbackRequiredToolMessage() ||
       fallbackDeliveryMessage();
     if (!message) return undefined;
     const gate = runCompletionGate(message);
@@ -2371,7 +2489,11 @@ export async function runAgent(
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
         assertPlanCompleted();
-        const message = composeFinalMessage(output, authoritativeWorkflowMessage()) ?? output;
+        const message = composeFinalMessage(
+          output,
+          authoritativeWorkflowMessage(),
+          fallbackRequiredToolMessage() || fallbackDeliveryMessage(),
+        ) ?? output;
         const gate = runCompletionGate(message);
         await reviewCompletionGateDecision(message, [], gate);
         if (!gate.passed) {
@@ -2446,7 +2568,11 @@ export async function runAgent(
       const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
         : "";
-      const message = composeFinalMessage(rawMessage, authoritativeMessage) ??
+      const message = composeFinalMessage(
+        rawMessage,
+        authoritativeMessage,
+        fallbackMessage || fallbackDeliveryMessage(),
+      ) ??
         stripHistoricalContextMarker(fallbackMessage ?? structuredOutput.message);
       const structuredProjection = projectAgentOutput(
         industrialAgentOutputDefinition,
