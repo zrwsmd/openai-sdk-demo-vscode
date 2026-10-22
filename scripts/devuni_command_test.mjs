@@ -7,6 +7,8 @@ import {
   WorkflowDecisionService,
   WorkflowRegistry,
   ToolRegistry,
+  checkDirectoryPath,
+  checkProjectName,
   createAppToolRegistry,
   createDevuniToolProvider,
 } from './agent.testbundle.mjs';
@@ -342,5 +344,67 @@ async function buildTool(port) {
 }
 
 await fs.rm(workspace, { recursive: true, force: true });
+
+/* ------------------------------------------------------------------ */
+/* [N] 工程名 / 父目录校验：弹窗和 buildArgs 共用同一套规则            */
+/* ------------------------------------------------------------------ */
+
+{
+  const acceptedNames = ['MyProject', '温控工程', 'proj_1', 'a b'];
+  for (const name of acceptedNames) {
+    assert(checkProjectName(name) === undefined, `工程名 ${name} 应通过校验`);
+  }
+  const rejectedNames = [
+    ['', '不能为空'],
+    ['   ', '不能为空'],
+    ['a/b', '不能包含'],
+    ['a:b', '不能包含'],
+    ['CON', '保留名'],
+    ['con.txt', '保留名'],
+    ['a.', '不能以点'],
+    ['a ', '首尾不能有空格'],
+    [' a', '首尾不能有空格'],
+    ['.hidden', '不能以点开头'],
+    ['..', '不能是 . 或 ..'],
+  ];
+  for (const [name, expected] of rejectedNames) {
+    const problem = checkProjectName(name);
+    assert(
+      typeof problem === 'string' && problem.includes(expected),
+      `工程名 ${JSON.stringify(name)} 应被拒绝（期望含「${expected}」），实际: ${problem}`,
+    );
+  }
+  assert(
+    typeof checkProjectName('a'.repeat(101)) === 'string',
+    '超长工程名应被拒绝',
+  );
+
+  for (const target of ['E:\\', 'C:/proj', 'D:\\plc\\works', '\\\\srv\\share']) {
+    assert(checkDirectoryPath(target) === undefined, `目录 ${target} 应通过校验`);
+  }
+  for (const target of ['', 'relative\\dir', 'E:\\a<b', 'E:\\proj ', '/unix/path']) {
+    assert(typeof checkDirectoryPath(target) === 'string', `目录 ${target} 应被拒绝`);
+  }
+
+  const createCommand = DEVUNI_COMMANDS.find(
+    (command) => command.toolName === 'devuni_create_project',
+  );
+  let rejected = false;
+  try {
+    await createCommand.buildArgs(
+      {
+        projectName: 'CON',
+        projectPath: 'E:\\',
+        deviceModel: 'X1',
+        language: 'st',
+        projectType: 'standard',
+      },
+      {},
+    );
+  } catch (error) {
+    rejected = String(error?.message ?? '').includes('工程名不合法');
+  }
+  assert(rejected, 'buildArgs 应拒绝非法工程名，而不是把它交给对方插件');
+}
 
 console.log('devuni command tests passed');

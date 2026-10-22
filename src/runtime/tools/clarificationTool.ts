@@ -15,10 +15,19 @@ const optionSchema = z.object({
 
 const validationSchema = z.object({
   type: z
-    .enum(['iecIdentifier', 'positiveInteger', 'plcTaskConfiguration'])
+    .enum([
+      'iecIdentifier',
+      'positiveInteger',
+      'projectName',
+      'directoryPath',
+      'plcTaskConfiguration',
+    ])
     .describe(
       '输入校验类型。iecIdentifier: 字母或下划线开头、只含字母数字下划线、不能是 IEC 关键字；' +
-        'positiveInteger: 正整数；plcTaskConfiguration: 任务组态那一行自由文本。',
+        'positiveInteger: 正整数；' +
+        'projectName: 工程名（当目录名用，禁 Windows 非法字符、设备保留名、结尾点空格）；' +
+        'directoryPath: 绝对目录路径；' +
+        'plcTaskConfiguration: 任务组态那一行自由文本。',
     ),
   label: z.string().optional().describe('字段名，用在错误提示里，例如“任务名”'),
   min: z.number().int().optional().describe('positiveInteger 的最小值'),
@@ -51,7 +60,9 @@ export function createClarificationTool(ctx: ToolBuildContext) {
       '如果只是能合理默认的普通细节，不要打断用户。' +
       '只有一个问题时使用 title/question/options；有多个彼此独立且都需要用户确认的问题时，' +
       '使用 steps 一次性提交步骤数组，运行时会逐步弹窗，每步只问一个问题，最终返回按 id 整理的 answers。' +
-      '使用 steps 时，候选 options 必须放在对应步骤内；顶层 options 只用于单步骤请求。',
+      '使用 steps 时，候选 options 必须放在对应步骤内；顶层 options 只用于单步骤请求。' +
+      '自定义输入有格式要求时（工程名、目录路径、标识符、数字），必须给该步骤带上 validation，' +
+      '不要用文字描述规则代替它——没有 validation 时弹窗不会校验，用户填什么都能提交。',
     parameters: z.object({
       kind: z.string().optional().describe('澄清类型，例如 general 或 plc_task_configuration'),
       title: z.string().optional().describe('单步骤弹窗标题；多步骤时可作为默认总标题'),

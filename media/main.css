@@ -1263,7 +1263,8 @@ body.settings-open { overflow: hidden; }
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--box));
 }
-/* 推荐区和自定义区之间的界，三种状态位置一致。 */
+/* 推荐区和自定义区之间的界，三种状态位置一致。两区互斥，
+   选中推荐方案后自定义区收起，这条界就是切回去的入口。 */
 .clarification-divider {
   display: flex;
   align-items: center;
@@ -1277,6 +1278,18 @@ body.settings-open { overflow: hidden; }
   height: 1px;
   background: color-mix(in srgb, var(--border) 80%, transparent);
 }
+.clarification-divider.clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.clarification-divider.clickable:hover span { color: var(--accent); }
+.clarification-divider.clickable:hover i {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.clarification-divider.clickable:focus-visible { outline: 1px solid var(--accent); }
+/* 收起时不占位置，分隔线留在原处当切换按钮。 */
+.clarification-fields.collapsed,
+.clarification-custom-row.collapsed { display: none; }
 .clarification-fields {
   display: flex;
   gap: 12px;
@@ -1288,8 +1301,6 @@ body.settings-open { overflow: hidden; }
 }
 /* 只剩一个字段时别让它拉满整行，看着空。 */
 .clarification-fields.single .clarification-field { flex: 0 1 240px; }
-/* 选了推荐方案时把自定义整块压暗：两边只能生效一个，视觉上也要看得出来。 */
-.clarification-fields.muted { opacity: 0.45; }
 .clarification-field-narrow { flex: 0 0 190px; }
 .clarification-field-label {
   color: var(--muted);

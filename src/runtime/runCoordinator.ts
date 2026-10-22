@@ -679,7 +679,9 @@ export class RunCoordinator {
           options: step.options,
           allowCustom: step.allowCustom,
           customPlaceholder: step.customPlaceholder,
-          // 字段清单是步骤级的：不覆盖的话每一步都会继承顶层的表单。
+          // 校验规则和字段清单都是步骤级的：不覆盖的话每一步都会继承顶层的那一份，
+          // 表现为"模型给了步骤级规则但弹窗不校验"。
+          inputValidation: step.inputValidation,
           inputFields: step.inputFields,
           required: step.required,
           steps: undefined,

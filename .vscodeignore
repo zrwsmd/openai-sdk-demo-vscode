@@ -7,6 +7,9 @@ tsconfig.json
 
 vendor/vscode-command-bridge/
 
+.plc-agent/mcp.json
+.plc-agent/mcp-tools-cache.json
+
 scripts/
 docs/
 .vscode/

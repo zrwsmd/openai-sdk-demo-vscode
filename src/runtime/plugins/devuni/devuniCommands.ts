@@ -12,6 +12,10 @@
  */
 import { z } from "zod";
 import type { ToolResultAction } from "../../../protocol/results";
+import {
+  checkDirectoryPath,
+  checkProjectName,
+} from "../../clarificationInputRules";
 import type { ToolCapability } from "../../toolCatalog";
 import type { DevuniCommandPort } from "./devuniCommandPort";
 
@@ -184,7 +188,10 @@ const createProjectParameters = z.object({
   projectName: z
     .string()
     .min(1)
-    .describe('工程名称。不能包含 ".";建议只用字母、数字和下划线。'),
+    .describe(
+      '工程名称，会直接当作目录名用。不能包含 < > : " / \\ | ? *，不能以点或空格结尾，' +
+        '不能用 CON/PRN/AUX/NUL/COM1-9/LPT1-9 这类系统保留名，最长 100 字符。',
+    ),
   projectPath: z
     .string()
     .min(1)
@@ -239,6 +246,16 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
   },
   parameters: createProjectParameters,
   buildArgs: async (input, port) => {
+    // 名字和目录在弹窗里已经校验过一次，这里是最终判定：
+    // 模型也可能绕过弹窗直接传参，非法名字建出来的目录很难收拾。
+    const nameProblem = checkProjectName(input.projectName);
+    if (nameProblem) {
+      throw new Error(`工程名不合法:${nameProblem}。请换一个名字后重试。`);
+    }
+    const pathProblem = checkDirectoryPath(input.projectPath);
+    if (pathProblem) {
+      throw new Error(`工程父目录不合法:${pathProblem}。`);
+    }
     // 语言/类型没给全时才去问对方要可选项;设备型号必须由模型先向用户确认。
     if (!input.deviceModel) {
       throw new Error(

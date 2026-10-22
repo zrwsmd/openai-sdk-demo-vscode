@@ -31,6 +31,7 @@ export * from '../src/runtime/mcp/mcpConnectionPool';
 export * from '../src/runtime/mcp/mcpToolCache';
 export * from '../src/runtime/runCoordinator';
 export * from '../src/runtime/clarification';
+export * from '../src/runtime/clarificationInputRules';
 export * from '../src/runtime/errors';
 export * from '../src/tools/toolContract';
 export * from '../src/plc/plcAdapter';

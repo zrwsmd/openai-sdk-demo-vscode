@@ -25,7 +25,11 @@ export interface ClarificationOption {
 export interface ClarificationInputField {
   key: string;
   label: string;
-  type: 'iecIdentifier' | 'positiveInteger';
+  type:
+    | 'iecIdentifier'
+    | 'positiveInteger'
+    | 'projectName'
+    | 'directoryPath';
   /** 已确认的字段：弹窗只在标题栏显示它，不给编辑。 */
   readonly?: boolean;
   /** readonly 为 true 时的已确认值。 */
@@ -57,6 +61,16 @@ export type ClarificationInputValidation =
       min?: number;
       max?: number;
       unit?: string;
+    }
+  | {
+      /** 工程名：会被当成目录名用，按 Windows 建目录的规则卡。 */
+      type: 'projectName';
+      label?: string;
+    }
+  | {
+      /** 工程父目录：只校验格式（绝对路径、非法字符），存在性由调用方判断。 */
+      type: 'directoryPath';
+      label?: string;
     }
   | {
       /** 任务组态那一行自由文本:里面可能同时有 task=xxx 和 20ms。 */

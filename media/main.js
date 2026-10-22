@@ -2959,6 +2959,47 @@ function checkIecIdentifierInput(value) {
   return '';
 }
 
+/*
+ * 工程名/目录路径的校验，规则和 src/runtime/clarificationInputRules.ts 一致。
+ * 前端这份只为"边打字边提示"，后端那份才是最终判定。
+ */
+const PROJECT_NAME_MAX_LENGTH = 100;
+const RESERVED_DEVICE_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+]);
+
+function checkProjectNameInput(value) {
+  const raw = String(value || '');
+  const name = raw.trim();
+  if (!name) return '不能为空';
+  if (name !== raw) return '首尾不能有空格';
+  if (name.length > PROJECT_NAME_MAX_LENGTH) {
+    return `不能超过 ${PROJECT_NAME_MAX_LENGTH} 个字符`;
+  }
+  if (/[\u0000-\u001f\u007f]/.test(name)) return '不能包含换行或控制字符';
+  if (/[<>:"/\\|?*]/.test(name)) return '不能包含 < > : " / \\ | ? * 这些字符';
+  if (name === '.' || name === '..') return '不能是 . 或 ..';
+  if (name.startsWith('.')) return '不能以点开头';
+  if (name.endsWith('.')) return '不能以点结尾';
+  const base = (name.split('.')[0] || name).toUpperCase();
+  if (RESERVED_DEVICE_NAMES.has(base)) return `不能使用系统保留名 ${base}`;
+  return '';
+}
+
+function checkDirectoryPathInput(value) {
+  const raw = String(value || '');
+  const target = raw.trim();
+  if (!target) return '不能为空';
+  if (target !== raw) return '首尾不能有空格';
+  if (/[\u0000-\u001f\u007f]/.test(target)) return '不能包含换行或控制字符';
+  if (/[<>"|?*]/.test(target)) return '不能包含 < > " | ? * 这些字符';
+  if (/^[A-Za-z]:([\\/]|$)/.test(target)) return '';
+  if (/^\\\\[^\\/]+[\\/][^\\/]+/.test(target)) return '';
+  return '必须是绝对路径，例如 E:\\projects';
+}
+
 /**
  * 任务组态那一行自由文本：可能只填周期（20ms），也可能连任务名一起填
  * （task=MainControlTask, 20ms）。只校验填了的部分，没填的交给后端用候选值。
@@ -2991,6 +3032,14 @@ function validateClarificationInput(rule, text) {
     const problem = checkIecIdentifierInput(raw);
     return problem ? `${rule.label || '名称'}${problem}` : '';
   }
+  if (rule.type === 'projectName') {
+    const problem = checkProjectNameInput(raw);
+    return problem ? `${rule.label || '工程名'}${problem}` : '';
+  }
+  if (rule.type === 'directoryPath') {
+    const problem = checkDirectoryPathInput(raw);
+    return problem ? `${rule.label || '目录'}${problem}` : '';
+  }
   if (rule.type === 'positiveInteger') {
     if (!/^\d+$/.test(raw)) return `${rule.label || '数值'}只能是正整数`;
     const value = Number(raw);
@@ -3019,6 +3068,14 @@ function validateClarificationField(field, value) {
   const label = field.label || '该字段';
   if (field.type === 'iecIdentifier') {
     const problem = checkIecIdentifierInput(raw);
+    return problem ? `${label}${problem}` : '';
+  }
+  if (field.type === 'projectName') {
+    const problem = checkProjectNameInput(raw);
+    return problem ? `${label}${problem}` : '';
+  }
+  if (field.type === 'directoryPath') {
+    const problem = checkDirectoryPathInput(raw);
     return problem ? `${label}${problem}` : '';
   }
   if (field.type === 'positiveInteger') {
@@ -3117,7 +3174,10 @@ function showClarificationModal(runId, request) {
       // 用户点回输入框会自动取消卡片选中。
       input.addEventListener('change', () => {
         if (!input.checked) return;
+        // 选卡片就等于放弃自定义：字段和自由文本都清空，提交时只带卡片的值。
         for (const control of fieldControls) control.input.value = '';
+        if (customInput) customInput.value = '';
+        setCustomCollapsed(true);
         syncClarificationState();
       });
       optionInputs.push(input);
@@ -3166,24 +3226,28 @@ function showClarificationModal(runId, request) {
     panel.appendChild(pills);
   }
 
-  // 推荐区和自定义区之间画一条界，三种状态位置一致，读起来像同一个组件。
-  if (formMode && (quickField || options.length)) {
-    const divider = document.createElement('div');
-    divider.className = 'clarification-divider';
+  // 推荐区和自定义区之间画一条界。两区互斥，所以这条界同时也是"切到自定义"的入口：
+  // 选中卡片后自定义区会收起，点这条界就把它放回来。
+  let dividerEl = null;
+  let customArea = null;
+  if ((formMode || request.allowCustom !== false) && (quickField || options.length)) {
+    dividerEl = document.createElement('div');
+    dividerEl.className = 'clarification-divider clickable';
+    dividerEl.setAttribute('role', 'button');
+    dividerEl.setAttribute('tabindex', '0');
+    dividerEl.title = '点击填写自定义内容';
     const dividerText = document.createElement('span');
     dividerText.textContent = '或自定义';
-    divider.append(document.createElement('i'), dividerText, document.createElement('i'));
-    panel.appendChild(divider);
+    dividerEl.append(document.createElement('i'), dividerText, document.createElement('i'));
+    panel.appendChild(dividerEl);
   }
 
   // 只渲染用户还缺的字段。已确认的那些在标题栏，不占输入框。
   const fieldControls = [];
-  let fieldsWrap = null;
   if (formMode) {
     const wrap = document.createElement('div');
     wrap.className = 'clarification-fields';
     if (editableFields.length === 1) wrap.classList.add('single');
-    fieldsWrap = wrap;
     for (const field of editableFields) {
       const box = document.createElement('div');
       box.className = 'clarification-field';
@@ -3218,15 +3282,18 @@ function showClarificationModal(runId, request) {
       input.addEventListener('input', () => {
         // 动了自定义框就不算"选中了某张推荐卡"，两边不能同时生效。
         for (const radio of optionInputs) radio.checked = false;
+        setCustomCollapsed(false);
         syncClarificationState();
       });
       input.addEventListener('focus', () => {
         if (!optionInputs.some((radio) => radio.checked)) return;
         for (const radio of optionInputs) radio.checked = false;
+        setCustomCollapsed(false);
         syncClarificationState();
       });
     }
     panel.appendChild(wrap);
+    customArea = wrap;
   }
 
   // 没有字段定义时退回原来那一行自由文本，老调用方不受影响。
@@ -3244,7 +3311,33 @@ function showClarificationModal(runId, request) {
     customInput.placeholder = request.customPlaceholder || '输入你的答案';
     customRow.append(customIcon, customInput);
     panel.appendChild(customRow);
+    customArea = customRow;
+    // 老式自由文本同样二选一：一开始打字就取消卡片选中。
+    customInput.addEventListener('input', () => {
+      for (const radio of optionInputs) radio.checked = false;
+      setCustomCollapsed(false);
+      syncClarificationState();
+    });
   }
+
+  // 推荐方案和自定义二选一：选卡片就收起自定义区，点分隔线或开始打字再展开。
+  const setCustomCollapsed = (collapsed) => {
+    if (!customArea) return;
+    customArea.classList.toggle('collapsed', collapsed);
+    dividerEl?.classList.toggle('collapsed', collapsed);
+  };
+  dividerEl?.addEventListener('click', () => {
+    for (const radio of optionInputs) radio.checked = false;
+    setCustomCollapsed(false);
+    syncClarificationState();
+    const target = fieldControls[0]?.input || customInput;
+    target?.focus({ preventScroll: true });
+  });
+  dividerEl?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    dividerEl.click();
+  });
 
   // 可跳过的步骤:把"不选会怎样"写出来,免得用户不知道跳过意味着什么。
   if (request.required === false) {
@@ -3376,9 +3469,8 @@ function showClarificationModal(runId, request) {
       return;
     }
     if (formMode) {
-      // 推荐卡和自定义二选一：选了卡就把下面整块压暗，提示现在用的是推荐方案。
+      // 推荐卡和自定义二选一：选了卡就把自定义区收起来（见 setCustomCollapsed）。
       const pickedCard = optionInputs.some((input) => input.checked);
-      fieldsWrap?.classList.toggle('muted', pickedCard);
       confirm.disabled = !!formProblem || (!formFilled && !pickedCard);
       return;
     }

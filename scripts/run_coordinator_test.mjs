@@ -2412,6 +2412,8 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
       kind: 'plc_task_configuration',
       title: '创建工程',
       question: '请选择工程类型。',
+      // 顶层的校验规则不能漏到每一步：每步要校验的东西不一样。
+      inputValidation: { type: 'iecIdentifier' },
       options: [
         { id: 'standard', label: '标准 PLC 工程' },
         { id: 'hmi', label: '人机界面工程' },
@@ -2427,8 +2429,16 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
         },
         { id: 'language', question: '请选择工程语言。' },
         { id: 'deviceModel', question: '请选择设备型号。' },
-        { id: 'projectPath', question: '工程创建在哪个父目录下？' },
-        { id: 'projectName', question: '工程名称是什么？' },
+        {
+          id: 'projectPath',
+          question: '工程创建在哪个父目录下？',
+          inputValidation: { type: 'directoryPath' },
+        },
+        {
+          id: 'projectName',
+          question: '工程名称是什么？',
+          inputValidation: { type: 'projectName' },
+        },
       ],
     });
     return {
@@ -2463,6 +2473,16 @@ function governedTeam(executionGraph, verifyTeamTask = async () => ({
     requests[4].payload.options.length !== 0
   ) {
     throw new Error('multi-step clarification leaked top-level options into later steps');
+  }
+  // 步骤级的校验规则要落到该步骤的请求上；顶层那份不能漏进来。
+  if (
+    requests[3].payload.inputValidation?.type !== 'directoryPath' ||
+    requests[4].payload.inputValidation?.type !== 'projectName'
+  ) {
+    throw new Error('step-level inputValidation was dropped before reaching the dialog');
+  }
+  if (requests[1].payload.inputValidation !== undefined) {
+    throw new Error('top-level inputValidation leaked into a step that did not define one');
   }
   await fs.rm(test.dir, { recursive: true, force: true });
 }
