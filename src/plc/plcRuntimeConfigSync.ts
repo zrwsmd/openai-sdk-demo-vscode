@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { agentLog, buildModelAdapter } from '../runtime/modelGateway';
 import type { AgentConfig } from '../runtime/agentConfig';
 import { collectWorkspaceStContext } from '../analysis/workspaceStContext';
-import type { ClarificationInputValidation } from '../runtime/clarification';
+import type {
+  ClarificationInputField,
+  ClarificationInputValidation,
+} from '../runtime/clarification';
 import { WorkspaceScope } from '../workspace/workspaceScope';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
@@ -31,6 +34,8 @@ export interface PlcClarificationOption {
   label: string;
   description?: string;
   value?: unknown;
+  /** 这个选项对应的字段值，弹窗点一下就把值填进输入框。 */
+  fields?: Record<string, string | number>;
 }
 
 export interface PlcClarificationResponse {
@@ -39,6 +44,8 @@ export interface PlcClarificationResponse {
   selectedOptionId?: string;
   customText?: string;
   value?: unknown;
+  /** 表单模式下用户填的值，key 是字段 key。 */
+  fields?: Record<string, string | number>;
 }
 
 export interface PlcClarificationService {
@@ -53,6 +60,8 @@ export interface PlcClarificationService {
       customPlaceholder?: string;
       /** 自定义输入的格式规则，由弹窗就地校验；省略时只做非空检查。 */
       inputValidation?: ClarificationInputValidation;
+      /** 结构化输入框：只渲染用户还缺的那几个字段。 */
+      inputFields?: readonly ClarificationInputField[];
       required?: boolean;
       metadata?: Record<string, unknown>;
     },
@@ -879,6 +888,8 @@ async function optionsForState(
 ): Promise<{
   options: PlcClarificationOption[];
   createFallback: Extract<Selection, { action: 'create_config' | 'create_task' }>;
+  /** 规范化后的建议，用来生成单字段模式下的快捷值。 */
+  suggestions: NormalizedPlcTaskSuggestion[];
 }> {
   const config = state.status === 'ready' ? state.config : undefined;
   const device = firstLocalDevice(config);
@@ -954,6 +965,12 @@ async function optionsForState(
           action: 'bind_program',
           taskName: task.name,
         }),
+        fields: {
+          taskName: task.name,
+          ...(task.type === 'cyclic' && task.periodMs !== undefined
+            ? { periodMs: task.periodMs }
+            : {}),
+        },
       });
     }
   }
@@ -975,9 +992,74 @@ async function optionsForState(
         taskName: suggestion.taskName,
         periodMs: suggestion.periodMs,
       }),
+      fields: {
+        taskName: suggestion.taskName,
+        periodMs: suggestion.periodMs,
+      },
     });
   }
-  return { options, createFallback };
+  return { options, createFallback, suggestions: effectiveSuggestions };
+}
+
+/** 弹窗里任务名输入框的字段定义。 */
+function taskNameField(): ClarificationInputField {
+  return {
+    key: 'taskName',
+    label: '任务名',
+    type: 'iecIdentifier',
+    placeholder: '例如 MainControlTask',
+    hint: '字母或下划线开头，最长 128',
+  };
+}
+
+/** 弹窗里周期输入框的字段定义。单位固定 ms，不给用户自己打单位。 */
+function periodField(): ClarificationInputField {
+  return {
+    key: 'periodMs',
+    label: '任务周期',
+    type: 'positiveInteger',
+    unit: 'ms',
+    min: TASK_PERIOD_MIN_MS,
+    max: TASK_PERIOD_MAX_MS,
+    placeholder: '例如 20',
+    hint: `正整数，${TASK_PERIOD_MIN_MS}~${TASK_PERIOD_MAX_MS}`,
+  };
+}
+
+/** 单字段模式下的周期快捷值：直接用模型给的建议周期，去重后保留顺序。 */
+function uniquePeriodChoices(
+  suggestions: readonly NormalizedPlcTaskSuggestion[],
+): number[] {
+  const seen = new Set<number>();
+  const result: number[] = [];
+  for (const suggestion of suggestions) {
+    if (!Number.isInteger(suggestion.periodMs) || seen.has(suggestion.periodMs)) continue;
+    seen.add(suggestion.periodMs);
+    result.push(suggestion.periodMs);
+    if (result.length >= 4) break;
+  }
+  return result;
+}
+
+/**
+ * 单字段模式下的任务名快捷值。已经存在的任务排在前面——用户很可能就是想绑到那个任务，
+ * 而推荐一个同名的新任务只会制造重复。一个已有任务都没有时才用建议里的角色名。
+ */
+function suggestedTaskNames(
+  config: PlcRuntimeConfig,
+  suggestions: readonly NormalizedPlcTaskSuggestion[],
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const push = (name: string): void => {
+    const key = name.toLocaleUpperCase();
+    if (!name.trim() || seen.has(key) || result.length >= 4) return;
+    seen.add(key);
+    result.push(name);
+  };
+  for (const task of config.tasks) push(task.name);
+  for (const suggestion of suggestions) push(suggestion.taskName);
+  return result;
 }
 
 export async function preparePlcRuntimeConfigSync(
@@ -1084,35 +1166,47 @@ export async function preparePlcRuntimeConfigSync(
   }
   if (!options.clarification) return indexOnlyPlan();
 
-  const { options: choices, createFallback } = await optionsForState(
-    state,
-    programName,
-    options,
-    requested,
-  );
+  const { options: choices, createFallback, suggestions: effectiveSuggestions } =
+    await optionsForState(
+      state,
+      programName,
+      options,
+      requested,
+    );
   const missingTask = requested.taskName === undefined;
   const missingPeriod = requested.periodMs === undefined;
-  const question = missingTask && !missingPeriod
-    ? `已确认任务周期为 ${requested.periodMs} ms，请选择要绑定的 PLC 任务。`
-    : !missingTask && missingPeriod
-      ? `已确认绑定任务为 ${requested.taskName}，请选择任务周期。`
-      : `PROGRAM ${programName} 还没有明确的 PLC 任务绑定。请选择任务周期或绑定已有任务。`;
-  const customPlaceholder = missingTask && !missingPeriod
-    ? '新建任务可填写: task=MainControlTask'
-    : !missingTask && missingPeriod
-      ? '请输入任务周期，例如 20ms'
-      : '新建任务可填写: task=MainControlTask, 20ms';
+  const bothMissing = missingTask && missingPeriod;
+
+  // 推荐区只放"还缺的那一项"。两样都缺才给整条方案卡；缺一项时卡片标题里会出现
+  // 用户已经说过的信息（"创建 MainTask · 20 ms" 里的 20 ms 是用户自己说的），
+  // 所以那种情况改成给该字段的快捷取值。
+  const inputFields: ClarificationInputField[] = bothMissing
+    ? [taskNameField(), periodField()]
+    : missingPeriod
+      ? [
+          { ...taskNameField(), readonly: true, value: requested.taskName! },
+          { ...periodField(), choices: uniquePeriodChoices(effectiveSuggestions) },
+        ]
+      : [
+          { ...periodField(), readonly: true, value: requested.periodMs! },
+          { ...taskNameField(), choices: suggestedTaskNames(synchronized.config, effectiveSuggestions) },
+        ];
+  const question = bothMissing
+    ? `PROGRAM ${programName} 还没有明确的 PLC 任务绑定。选一个方案，或者自己填任务名和周期。`
+    : missingPeriod
+      ? '请补充任务周期。'
+      : '请补充任务名。';
   const response = await options.clarification.request({
     kind: 'plc_task_configuration',
     title: '任务组态确认',
     question,
     details: `源文件: ${source}。这只会更新 plc-runtime.json，不会向 ST 文件追加 CONFIGURATION。`,
-    options: choices,
+    options: bothMissing ? choices : [],
     allowCustom: true,
-    customPlaceholder,
-    // 弹窗按这条规则就地校验:任务名走 IEC 标识符(含关键字黑名单),周期只能是正整数毫秒。
-    // 只靠后端解析的话,用户填错要提交完才看到一句"无法解析",还得重来一遍。
+    customPlaceholder: '任务名和周期填在下面的输入框里',
+    // 表单渲染不了的旧宿主会退回自由文本，这条规则兜住那条路。
     inputValidation: { type: 'plcTaskConfiguration' },
+    inputFields,
     required: true,
     metadata: {
       source,
@@ -1124,7 +1218,9 @@ export async function preparePlcRuntimeConfigSync(
   const selectedOption = choices.find((item) => item.id === response.selectedOptionId);
   const selectedValue = response.value ?? selectedOption?.value;
   const selectedSelection = parseSelectionValue(selectedValue);
-  let selection = selectedSelection;
+  // 表单值优先：弹窗点推荐卡片时也只是把值填进输入框，提交时读的永远是框里的值。
+  // 这样"选卡片"和"自己填"不再是两条互相覆盖的路径。
+  let selection = selectionFromFields(response.fields) ?? selectedSelection;
   if (response.customText?.trim()) {
     const customFallback = selectedSelection &&
       (selectedSelection.action === 'create_config' || selectedSelection.action === 'create_task')
@@ -1139,8 +1235,54 @@ export async function preparePlcRuntimeConfigSync(
     selection = parsed?.selection;
   }
   if (!selection) {
-    throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写类似 "20ms, priority=1, cpu=1" 的答案。');
+    throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写任务名和周期。');
   }
 
   return planForSelection(selection);
+
+  /**
+   * 把弹窗填的两个字段变成一次选择。
+   * 名字已经在 plc-runtime.json 里 → 绑定到那个任务；否则新建。
+   * 这样弹窗不用区分"绑定"和"创建"，用户也不需要理解这两者的差别。
+   */
+  function selectionFromFields(
+    fields: Readonly<Record<string, string | number>> | undefined,
+  ): Selection | undefined {
+    if (!fields) return undefined;
+    const rawName = typeof fields.taskName === 'string' ? fields.taskName.trim() : '';
+    const taskName = rawName || requested.taskName || createFallback.taskName;
+    const nameProblem = checkIecIdentifier(taskName);
+    if (nameProblem) {
+      throw new PlcRuntimeConfigError(`任务名不合法：${nameProblem}。`);
+    }
+    const rawPeriod = fields.periodMs === undefined || fields.periodMs === ''
+      ? requested.periodMs ?? createFallback.periodMs
+      : Number(fields.periodMs);
+    if (
+      !Number.isFinite(rawPeriod) ||
+      !Number.isInteger(rawPeriod) ||
+      rawPeriod < TASK_PERIOD_MIN_MS ||
+      rawPeriod > TASK_PERIOD_MAX_MS
+    ) {
+      throw new PlcRuntimeConfigError(
+        `任务周期必须在 ${TASK_PERIOD_MIN_MS}~${TASK_PERIOD_MAX_MS} ms 之间，` +
+          `收到 ${String(fields.periodMs)}。`,
+      );
+    }
+    const existing = synchronized.config.tasks.find((task) => sameTaskName(task.name, taskName));
+    if (existing) {
+      if (
+        existing.type === 'cyclic' &&
+        existing.periodMs !== undefined &&
+        existing.periodMs !== rawPeriod
+      ) {
+        throw new PlcRuntimeConfigError(
+          `任务 ${existing.name} 当前周期为 ${existing.periodMs} ms，` +
+            `与填写的 ${rawPeriod} ms 不一致，请先明确是否要修改已有任务周期。`,
+        );
+      }
+      return { action: 'bind_program', taskName: existing.name };
+    }
+    return { ...createFallback, taskName, periodMs: rawPeriod };
+  }
 }

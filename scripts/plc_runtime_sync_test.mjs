@@ -190,6 +190,21 @@ function clarificationWithCustomText(select, customText) {
   }
 }
 
+// 表单模式：只填还缺的字段，返回结构化值，不再解析一行自由文本。
+function clarificationWithFields(select) {
+  const requests = [];
+  return {
+    requests,
+    service: {
+      request: async (request) => {
+        requests.push(request);
+        const fields = select(request) ?? {};
+        return { requestId: 'test', cancelled: false, fields };
+      },
+    },
+  };
+}
+
 // Explicit cycle only: ask for the task, but keep the requested 5ms on every
 // new-task option instead of reintroducing model-suggested periods.
 {
@@ -197,12 +212,7 @@ function clarificationWithCustomText(select, customText) {
     path.join(os.tmpdir(), 'plc-runtime-sync-period-only-test-'),
   );
   let taskRequest;
-  const fake = clarification((request) => {
-    taskRequest = request;
-    const option = request.options.find((item) => item.id === 'create:MainControlTask:5ms');
-    if (!option) throw new Error('explicit 5ms request did not produce a 5ms MainControlTask option');
-    return option.id;
-  });
+  const fake = clarificationWithFields(() => ({ taskName: 'MainControlTask' }));
   const plan = await preparePlcRuntimeConfigSync({
     workspaceRoot: periodOnlyWorkspace,
     source: 'StartStop.st',
@@ -215,33 +225,32 @@ function clarificationWithCustomText(select, customText) {
     ],
     clarification: fake.service,
   });
-  if (!plan || plan.periodMs !== 5) {
-    throw new Error('explicit task period was not preserved in the selected plan');
+  taskRequest = fake.requests[0];
+  if (!plan || plan.periodMs !== 5 || plan.taskName !== 'MainControlTask') {
+    throw new Error('explicit task period was not preserved when only the task name was asked');
   }
+  const periodField = taskRequest?.inputFields?.find((field) => field.key === 'periodMs');
+  const nameField = taskRequest?.inputFields?.find((field) => field.key === 'taskName');
   if (
-    !taskRequest?.question.includes('5 ms') ||
-    taskRequest.question.includes('请选择任务周期或绑定已有任务') ||
-    taskRequest.options
-      .filter((item) => item.id.startsWith('create:'))
-      .some((item) => !item.label.endsWith('5 ms'))
+    !periodField?.readonly ||
+    periodField.value !== 5 ||
+    nameField?.readonly ||
+    !nameField?.choices?.includes('MainControlTask') ||
+    taskRequest.options.length !== 0 ||
+    taskRequest.question !== '请补充任务名。'
   ) {
-    throw new Error('period-only request did not ask only for the task with a fixed 5ms period');
+    throw new Error('period-only request did not render a single task-name field');
   }
 }
 
 // Explicit task only: ask for the period, while keeping the requested task
-// name on every new-task option.
+// name on the read-only confirmed tag.
 {
   const taskOnlyWorkspace = await fs.mkdtemp(
     path.join(os.tmpdir(), 'plc-runtime-sync-task-only-test-'),
   );
   let periodRequest;
-  const fake = clarification((request) => {
-    periodRequest = request;
-    const option = request.options.find((item) => item.id === 'create:MainControlTask:20ms');
-    if (!option) throw new Error('explicit task request did not produce a MainControlTask period option');
-    return option.id;
-  });
+  const fake = clarificationWithFields(() => ({ periodMs: 20 }));
   const plan = await preparePlcRuntimeConfigSync({
     workspaceRoot: taskOnlyWorkspace,
     source: 'StartStop.st',
@@ -253,19 +262,81 @@ function clarificationWithCustomText(select, customText) {
     ],
     clarification: fake.service,
   });
+  periodRequest = fake.requests[0];
   if (!plan || plan.taskName !== 'MainControlTask' || plan.periodMs !== 20) {
     throw new Error('explicit task name was not preserved while asking for its period');
   }
+  const nameField = periodRequest?.inputFields?.find((field) => field.key === 'taskName');
+  const periodField = periodRequest?.inputFields?.find((field) => field.key === 'periodMs');
   if (
-    !periodRequest?.question.includes('MainControlTask') ||
-    !periodRequest.question.includes('请选择任务周期') ||
-    periodRequest.options
-      .filter((item) => item.id.startsWith('create:'))
-      .some((item) => !item.label.startsWith('创建 MainControlTask'))
+    !nameField?.readonly ||
+    nameField.value !== 'MainControlTask' ||
+    periodField?.readonly ||
+    !periodField?.choices?.includes(20) ||
+    periodRequest.options.length !== 0 ||
+    periodRequest.question !== '请补充任务周期。'
   ) {
-    throw new Error('task-only request did not ask only for the requested task period');
+    throw new Error('task-only request did not render a single period field');
   }
 }
+
+// 两样都没说：上面仍然是整条方案卡，下面两个字段都要填。
+// 点卡片等于把值填进框里，所以提交时带的是 fields，不是 selectedOptionId。
+{
+  const bothWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-both-fields-test-'),
+  );
+  const fake = clarificationWithFields(() => ({
+    taskName: 'MainControlTask',
+    periodMs: 50,
+  }));
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: bothWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序',
+    taskSuggestionProvider: async () => [
+      { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+    ],
+    clarification: fake.service,
+  });
+  const request = fake.requests[0];
+  const editable = request?.inputFields?.filter((field) => !field.readonly) ?? [];
+  if (
+    !plan ||
+    plan.taskName !== 'MainControlTask' ||
+    plan.periodMs !== 50 ||
+    editable.length !== 2 ||
+    request.options.length === 0
+  ) {
+    throw new Error('two-field request did not keep the full-scheme cards plus two fields');
+  }
+}
+
+// 表单值里的周期非法时后端要拒绝，不能只靠前端拦。
+{
+  const invalidWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-invalid-field-test-'),
+  );
+  const fake = clarificationWithFields(() => ({ taskName: 'yy', periodMs: 0 }));
+  let failed = false;
+  try {
+    await preparePlcRuntimeConfigSync({
+      workspaceRoot: invalidWorkspace,
+      source: 'StartStop.st',
+      content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+      userRequest: '写一个启保停程序',
+      taskSuggestionProvider: async () => [
+        { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+      ],
+      clarification: fake.service,
+    });
+  } catch (error) {
+    failed = /任务周期必须在/.test(String(error?.message ?? error));
+  }
+  if (!failed) throw new Error('out-of-range period from the form was not rejected');
+}
+
 
 // Both values are explicit: create the task directly without invoking either
 // the suggestion model or the clarification UI.

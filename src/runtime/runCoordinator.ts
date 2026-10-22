@@ -628,12 +628,19 @@ export class RunCoordinator {
       ...(response.selectedOptionId ? { selectedOptionId: response.selectedOptionId } : {}),
       ...(typeof response.customText === 'string' ? { customText: response.customText } : {}),
       ...(response.value !== undefined ? { value: response.value } : {}),
+      ...(response.fields ? { fields: response.fields } : {}),
     };
     // 选择题打选项名,填空题打用户输入的原文。少了后半截,日志看起来像"用户没填"。
     const answer: string[] = [];
     if (resolved.selectedOptionId) answer.push(`option=${resolved.selectedOptionId}`);
     const typedText = resolved.customText?.trim();
     if (typedText) answer.push(`text=${typedText}`);
+    if (resolved.fields) {
+      const pairs = Object.entries(resolved.fields)
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(',');
+      if (pairs) answer.push(`fields=${pairs}`);
+    }
     this.writeLog(
       `[run:${runId}] 用户${resolved.cancelled ? '取消' : '回复'}澄清 ${requestId}` +
         (answer.length ? ` ${answer.join(' ')}` : ''),
@@ -672,6 +679,8 @@ export class RunCoordinator {
           options: step.options,
           allowCustom: step.allowCustom,
           customPlaceholder: step.customPlaceholder,
+          // 字段清单是步骤级的：不覆盖的话每一步都会继承顶层的表单。
+          inputFields: step.inputFields,
           required: step.required,
           steps: undefined,
         },
@@ -701,6 +710,7 @@ export class RunCoordinator {
           : {}),
         ...(response.customText ? { customText: response.customText } : {}),
         ...(response.value !== undefined ? { value: response.value } : {}),
+        ...(response.fields ? { fields: response.fields } : {}),
       };
     }
     return {
@@ -742,6 +752,7 @@ export class RunCoordinator {
       allowCustom: request.allowCustom !== false,
       ...(request.customPlaceholder ? { customPlaceholder: request.customPlaceholder } : {}),
       ...(request.inputValidation ? { inputValidation: request.inputValidation } : {}),
+      ...(request.inputFields?.length ? { inputFields: [...request.inputFields] } : {}),
       required: request.required !== false,
       ...(request.metadata ? { metadata: request.metadata } : {}),
       ...(sequence

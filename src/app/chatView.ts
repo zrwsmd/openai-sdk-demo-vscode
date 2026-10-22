@@ -1133,6 +1133,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     selectedOptionId?: string;
     customText?: string;
     value?: unknown;
+    fields?: Record<string, string | number>;
   }): Promise<void> {
     await this.ensureRuntime();
     await this.coordinator!.resolveClarification(
@@ -1143,6 +1144,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ...(typeof msg.selectedOptionId === 'string' ? { selectedOptionId: msg.selectedOptionId } : {}),
         ...(typeof msg.customText === 'string' ? { customText: msg.customText } : {}),
         ...(msg.value !== undefined ? { value: msg.value } : {}),
+        ...(msg.fields && typeof msg.fields === 'object' ? { fields: msg.fields } : {}),
       },
     );
     await this.sessionCatalog.touch(this.activeSessionId);

@@ -5,6 +5,7 @@
   --fg: var(--vscode-sideBar-foreground, #cccccc);
   --muted: var(--vscode-descriptionForeground, #9d9d9d);
   --accent: var(--vscode-focusBorder, #4f8cff);
+  --ok: var(--vscode-testing-iconPassed, #3fb950);
   --user-bubble: #2c3e5d;
   --agent-bubble: #262626;
 }
@@ -1184,6 +1185,150 @@ body.settings-open { overflow: hidden; }
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   font-size: 12px;
   line-height: 1.45;
+}
+/* 标题栏右侧的"已确认"标签：说明这个参数是用户在前面已经说清楚的，
+   只在这里复述一遍，不用再填。 */
+.clarification-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.clarification-header .clarification-modal-title { margin-bottom: 0; }
+.clarification-confirmed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.clarification-confirmed-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok);
+  font-size: 11px;
+  padding: 2px 7px;
+}
+.clarification-confirmed-badge svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.clarification-confirmed-value {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clarification-confirmed-value strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+/* 表单模式下问题只是说明文字，不该抢标题的视觉重量。 */
+.clarification-modal-question.compact {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+/* 单字段模式下的快捷取值，点一下填进下面的输入框。 */
+.clarification-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.clarification-pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--box) 82%, transparent);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.clarification-pill:hover { border-color: var(--accent); }
+.clarification-pill.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--box));
+}
+/* 推荐区和自定义区之间的界，三种状态位置一致。 */
+.clarification-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.clarification-divider i {
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+}
+.clarification-fields {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.clarification-field {
+  flex: 1;
+  min-width: 0;
+}
+/* 只剩一个字段时别让它拉满整行，看着空。 */
+.clarification-fields.single .clarification-field { flex: 0 1 240px; }
+.clarification-field-narrow { flex: 0 0 190px; }
+.clarification-field-label {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.clarification-field-input {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--box);
+  padding: 0 9px;
+}
+.clarification-field-input:focus-within { border-color: var(--accent); }
+.clarification-field-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  padding: 8px 0;
+}
+.clarification-field-input input:focus { outline: none; }
+.clarification-field-unit {
+  flex: none;
+  padding-left: 8px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+}
+.clarification-field-hint {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.clarification-field-hint.error { color: var(--vscode-errorForeground, #f66); }
+.clarification-field.invalid .clarification-field-input {
+  border-color: var(--vscode-errorForeground, #f66);
 }
 .clarification-option-list {
   display: grid;

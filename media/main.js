@@ -3004,12 +3004,51 @@ function validateClarificationInput(rule, text) {
   return '';
 }
 
+function normalizedClarificationFields(request) {
+  const fields = Array.isArray(request?.inputFields) ? request.inputFields : [];
+  return fields.filter((field) => field && typeof field.key === 'string' && field.key);
+}
+
+/**
+ * 单个字段的格式校验。空值不报错——用户还没开始填就标红只会吓人，
+ * "填没填"由提交按钮单独判断。
+ */
+function validateClarificationField(field, value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const label = field.label || '该字段';
+  if (field.type === 'iecIdentifier') {
+    const problem = checkIecIdentifierInput(raw);
+    return problem ? `${label}${problem}` : '';
+  }
+  if (field.type === 'positiveInteger') {
+    if (!/^\d+$/.test(raw)) return `${label}只能填正整数`;
+    const number = Number(raw);
+    const unit = field.unit || '';
+    const min = Number.isInteger(field.min) ? field.min : 1;
+    if (number < min) return `${label}不能小于 ${min}${unit}`;
+    if (Number.isInteger(field.max) && number > field.max) {
+      return `${label}不能大于 ${field.max}${unit}`;
+    }
+  }
+  return '';
+}
+
 function showClarificationModal(runId, request) {
   const requestId = request?.requestId;
   if (!requestId || document.querySelector(`.clarification-modal[data-clarification-id="${CSS.escape(requestId)}"]`)) {
     return;
   }
   const options = normalizedClarificationOptions(request);
+  const fields = normalizedClarificationFields(request);
+  const editableFields = fields.filter((field) => !field.readonly);
+  const confirmedFields = fields.filter((field) => field.readonly);
+  const formMode = editableFields.length > 0;
+  // 只剩一个字段要填时，推荐值做成一行按钮；两个字段都缺时上面仍然是整条方案卡。
+  const quickField = formMode && editableFields.length === 1 && editableFields[0].choices?.length
+    ? editableFields[0]
+    : null;
+
   const overlay = document.createElement('div');
   overlay.className = 'clarification-modal';
   overlay.dataset.clarificationId = requestId;
@@ -3019,13 +3058,38 @@ function showClarificationModal(runId, request) {
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-modal', 'true');
 
+  // 标题栏右侧放"已确认"标签：用户在前面已经说清楚的参数只在这里复述一遍，
+  // 不给编辑。光写"任务名 MainTask"看不出是待填还是已定，加个状态词才读得懂。
+  const header = document.createElement('div');
+  header.className = 'clarification-header';
   const title = document.createElement('div');
   title.className = 'clarification-modal-title';
   title.textContent = request.title || '需要补充信息';
-  panel.appendChild(title);
+  header.appendChild(title);
+  if (confirmedFields.length) {
+    const confirmed = document.createElement('div');
+    confirmed.className = 'clarification-confirmed';
+    for (const field of confirmedFields) {
+      const badge = document.createElement('span');
+      badge.className = 'clarification-confirmed-badge';
+      badge.innerHTML =
+        '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.6 5.3 L3.9 7.6 L8.4 2.6"/></svg>已确认';
+      const value = document.createElement('span');
+      value.className = 'clarification-confirmed-value';
+      value.textContent = `${field.label} `;
+      const strong = document.createElement('strong');
+      strong.textContent = `${field.value ?? ''}${field.unit || ''}`;
+      value.appendChild(strong);
+      confirmed.append(badge, value);
+    }
+    header.appendChild(confirmed);
+  }
+  panel.appendChild(header);
 
   const question = document.createElement('div');
-  question.className = 'clarification-modal-question';
+  question.className = formMode
+    ? 'clarification-modal-question compact'
+    : 'clarification-modal-question';
   question.textContent = request.question || '请补充必要信息。';
   panel.appendChild(question);
 
@@ -3038,7 +3102,7 @@ function showClarificationModal(runId, request) {
 
   const optionInputs = [];
   const optionLabels = [];
-  if (options.length) {
+  if (!quickField && options.length) {
     const group = document.createElement('div');
     group.className = 'clarification-option-list';
     options.forEach((option, index) => {
@@ -3049,6 +3113,9 @@ function showClarificationModal(runId, request) {
       input.name = `clarification-${requestId}`;
       input.value = option.id;
       input.dataset.value = option.value ?? '';
+      // 点卡片不是"选中一个选项"，而是把它的值填进下面的输入框。
+      // 提交时永远读输入框，两条路径不会互相覆盖。
+      input.addEventListener('change', () => fillFieldsFromOption(option));
       optionInputs.push(input);
       // 序号方块代替原来的圆圈,选中时整行和方块一起高亮。
       const ordinal = document.createElement('span');
@@ -3072,8 +3139,91 @@ function showClarificationModal(runId, request) {
     panel.appendChild(group);
   }
 
+  // 单字段模式：只剩一个值要选，用一行按钮就够，不用三张整条方案卡。
+  const pillButtons = [];
+  if (quickField) {
+    const pills = document.createElement('div');
+    pills.className = 'clarification-pills';
+    for (const choice of quickField.choices) {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'clarification-pill';
+      pill.textContent = `${choice}${quickField.unit || ''}`;
+      pill.addEventListener('click', () => {
+        const control = fieldControls.find((item) => item.field.key === quickField.key);
+        if (!control) return;
+        control.input.value = String(choice);
+        syncClarificationState();
+        control.input.focus();
+      });
+      pillButtons.push({ pill, choice });
+      pills.appendChild(pill);
+    }
+    panel.appendChild(pills);
+  }
+
+  // 推荐区和自定义区之间画一条界，三种状态位置一致，读起来像同一个组件。
+  if (formMode && (quickField || options.length)) {
+    const divider = document.createElement('div');
+    divider.className = 'clarification-divider';
+    const dividerText = document.createElement('span');
+    dividerText.textContent = '或自定义';
+    divider.append(document.createElement('i'), dividerText, document.createElement('i'));
+    panel.appendChild(divider);
+  }
+
+  // 只渲染用户还缺的字段。已确认的那些在标题栏，不占输入框。
+  const fieldControls = [];
+  if (formMode) {
+    const wrap = document.createElement('div');
+    wrap.className = 'clarification-fields';
+    if (editableFields.length === 1) wrap.classList.add('single');
+    for (const field of editableFields) {
+      const box = document.createElement('div');
+      box.className = 'clarification-field';
+      if (field.type === 'positiveInteger') box.classList.add('clarification-field-narrow');
+      const label = document.createElement('div');
+      label.className = 'clarification-field-label';
+      label.textContent = field.label;
+      const row = document.createElement('div');
+      row.className = 'clarification-field-input';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = field.type === 'positiveInteger' ? 'numeric' : 'text';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.placeholder = field.placeholder || '';
+      if (field.initialValue !== undefined) input.value = String(field.initialValue);
+      row.appendChild(input);
+      if (field.unit) {
+        const unit = document.createElement('span');
+        unit.className = 'clarification-field-unit';
+        unit.textContent = field.unit;
+        row.appendChild(unit);
+      }
+      const hint = document.createElement('div');
+      hint.className = 'clarification-field-hint';
+      hint.textContent = field.hint || '';
+      box.append(label, row, hint);
+      wrap.appendChild(box);
+      fieldControls.push({ field, input, box, hint });
+      input.addEventListener('input', () => {
+        // 周期框只留数字：字母和符号根本打不进去，w4ms 这种输入没有机会出现。
+        if (field.type === 'positiveInteger') {
+          const digits = input.value.replace(/\D+/g, '');
+          if (digits !== input.value) input.value = digits;
+        }
+        // 手动改过之后就不算"选中了某张推荐卡"，否则高亮会和框里的值对不上。
+        for (const radio of optionInputs) radio.checked = false;
+        syncClarificationState();
+      });
+    }
+    panel.appendChild(wrap);
+  }
+
+  // 没有字段定义时退回原来那一行自由文本，老调用方不受影响。
   let customInput = null;
-  if (request.allowCustom !== false) {
+  if (!formMode && request.allowCustom !== false) {
     const customRow = document.createElement('div');
     customRow.className = 'clarification-custom-row';
     const customIcon = document.createElement('span');
@@ -3127,15 +3277,43 @@ function showClarificationModal(runId, request) {
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
 
+  // 表单值单独收集：周期按数字发，任务名按字符串发，后端直接读，不再解析文本。
+  // 空字段直接不发——某个任务本来就不需要周期时（事件任务），发个 0 过去会被当成非法值。
+  const collectFieldValues = () => {
+    const values = {};
+    for (const control of fieldControls) {
+      const raw = control.input.value.trim();
+      if (!raw) continue;
+      values[control.field.key] =
+        control.field.type === 'positiveInteger' ? Number(raw) : raw;
+    }
+    return values;
+  };
+
+  // 点推荐卡片 = 把它的值填进下面的输入框，不改"提交读哪里"这件事。
+  const fillFieldsFromOption = (option) => {
+    const values = option?.fields || {};
+    let changed = false;
+    for (const control of fieldControls) {
+      const value = values[control.field.key];
+      if (value === undefined) continue;
+      control.input.value = String(value);
+      changed = true;
+    }
+    if (changed) syncClarificationState();
+  };
+
   const sendResponse = (cancelled) => {
     const selected = optionInputs.find((input) => input.checked);
     const customText = customInput?.value?.trim() || '';
     const selectedOptionId = selected?.value || undefined;
     const selectedValue = selected?.dataset.value || undefined;
+    const fieldValues = formMode && !cancelled ? collectFieldValues() : undefined;
     markClarificationCard(requestId, {
       cancelled,
       selectedOptionId,
       customText,
+      ...(fieldValues ? { fields: fieldValues } : {}),
     });
     closeClarificationModal(requestId);
     vscode.postMessage({
@@ -3146,6 +3324,7 @@ function showClarificationModal(runId, request) {
       ...(selectedOptionId ? { selectedOptionId } : {}),
       ...(customText ? { customText } : {}),
       ...(selectedValue ? { value: selectedValue } : {}),
+      ...(fieldValues ? { fields: fieldValues } : {}),
     });
     if (!cancelled) setRuntimeMode('running');
   };
@@ -3159,11 +3338,35 @@ function showClarificationModal(runId, request) {
   // 选中态高亮 + 必填的步骤没作答时"提交"不可点。
   // 后者不做的话,"必填"只是句提示:什么都不选照样能过,到了工具那边才报错,用户白跑一趟。
   const enforceAnswer =
-    request.required !== false && (options.length > 0 || request.allowCustom !== false);
+    request.required !== false &&
+    (options.length > 0 || formMode || request.allowCustom !== false);
   const syncClarificationState = () => {
     optionLabels.forEach((label, index) => {
       label.classList.toggle('selected', optionInputs[index].checked);
     });
+
+    // 每个字段各自校验、各自出提示。没填不报红——用户还没动手就标红只会吓人，
+    // "填没填"由提交按钮单独判。
+    let formProblem = '';
+    let formFilled = true;
+    for (const control of fieldControls) {
+      const raw = control.input.value.trim();
+      const problem = validateClarificationField(control.field, raw);
+      control.hint.textContent = problem || control.field.hint || '';
+      control.hint.classList.toggle('error', !!problem);
+      control.box.classList.toggle('invalid', !!problem);
+      if (!raw) formFilled = false;
+      if (!formProblem && problem) formProblem = problem;
+    }
+    // 快捷按钮跟着输入框走：值相等就点亮，用户改完数字也能同步回来。
+    if (quickField) {
+      const control = fieldControls.find((item) => item.field.key === quickField.key);
+      const current = control?.input.value.trim() ?? '';
+      for (const item of pillButtons) {
+        item.pill.classList.toggle('active', String(item.choice) === current);
+      }
+    }
+
     const problem = customInput
       ? validateClarificationInput(request.inputValidation, customInput.value)
       : '';
@@ -3173,6 +3376,12 @@ function showClarificationModal(runId, request) {
     customInput?.parentElement?.classList.toggle('invalid', !!problem);
     if (!enforceAnswer) {
       confirm.disabled = false;
+      return;
+    }
+    if (formMode) {
+      // 选了推荐卡就等于填过值；只有"没选卡又没填完"才拦住。
+      const pickedCard = optionInputs.some((input) => input.checked);
+      confirm.disabled = !!formProblem || (!formFilled && !pickedCard);
       return;
     }
     const picked = optionInputs.some((input) => input.checked);
@@ -3185,7 +3394,7 @@ function showClarificationModal(runId, request) {
   customInput?.addEventListener('input', syncClarificationState);
   syncClarificationState();
   requestAnimationFrame(() => {
-    const first = optionInputs[0] || customInput || confirm;
+    const first = fieldControls[0]?.input || optionInputs[0] || customInput || confirm;
     first?.focus();
   });
 }
@@ -3219,6 +3428,15 @@ function markClarificationCard(requestId, response = {}) {
   const parts = [];
   if (response.selectedOptionId) parts.push(`选项：${response.selectedOptionId}`);
   if (response.customText) parts.push(`补充：${response.customText}`);
+  if (response.fields) {
+    const labels = new Map(
+      (state?.request?.inputFields || []).map((field) => [field.key, field]),
+    );
+    for (const [key, value] of Object.entries(response.fields)) {
+      const field = labels.get(key);
+      parts.push(`${field?.label || key}：${value}${field?.unit || ''}`);
+    }
+  }
   summary.textContent = parts.length ? parts.join('；') : '已确认当前选项';
 }
 
