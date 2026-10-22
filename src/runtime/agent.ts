@@ -1275,7 +1275,9 @@ export async function runAgent(
     if (!text) return false;
     return /Tool call ["'][^"']+["'].*no available artifacts/is.test(text) ||
       /tool returned an empty dict or a non-dict value/is.test(text) ||
-      /unexpected response format.*tool implementation/is.test(text);
+      /unexpected response format.*tool implementation/is.test(text) ||
+      /文件被截断.*重新写入/u.test(text) ||
+      /请重新写入(?:完整)?代码/u.test(text);
   };
 
   const hasAttemptedRequiredAction = (): boolean => {
@@ -1470,14 +1472,38 @@ export async function runAgent(
     return /^\s*(?:```(?:json)?\s*)?\{[\s\S]*\}(?:\s*```)?\s*$/i.test(trimmed);
   };
 
+  /**
+   * Keep the model's usable explanation visible while appending the runtime's
+   * verified delivery evidence. The latter is authoritative for completion,
+   * but it should not replace a valid human-facing summary.
+   */
+  const composeFinalMessage = (
+    modelMessage: string | undefined,
+    authoritativeMessage: string | undefined,
+  ): string | undefined => {
+    const model = modelMessage
+      ? stripHistoricalContextMarker(modelMessage).trim()
+      : "";
+    const authoritative = authoritativeMessage
+      ? stripHistoricalContextMarker(authoritativeMessage).trim()
+      : "";
+    if (model && !isInternalToolArtifactComplaint(model)) {
+      if (!authoritative || model.includes(authoritative)) return model;
+      return `${model}\n\n${authoritative}`;
+    }
+    return authoritative || undefined;
+  };
+
   const synthesizeStructuredOutputFromEvidence = (): IndustrialAgentOutput | undefined => {
     const rawOutput = output.trim();
     const usableModelMessage = rawOutput &&
       !isInvalidStructuredOutputText(rawOutput)
       ? rawOutput
       : undefined;
-    const message = authoritativeWorkflowMessage() ||
-      usableModelMessage ||
+    const message = composeFinalMessage(
+      usableModelMessage,
+      authoritativeWorkflowMessage(),
+    ) ||
       fallbackRequiredToolMessage() ||
       fallbackDeliveryMessage();
     if (!message) return undefined;
@@ -2345,9 +2371,7 @@ export async function runAgent(
     if (outcome === "empty-bailed" || !state.getInterruptions().length) {
       if (!structuredMode) {
         assertPlanCompleted();
-        const message = stripHistoricalContextMarker(
-          authoritativeWorkflowMessage() ?? output,
-        );
+        const message = composeFinalMessage(output, authoritativeWorkflowMessage()) ?? output;
         const gate = runCompletionGate(message);
         await reviewCompletionGateDecision(message, [], gate);
         if (!gate.passed) {
@@ -2422,11 +2446,8 @@ export async function runAgent(
       const rawMessage = structuredOutput.message.trim()
         ? structuredOutput.message
         : "";
-      const message = stripHistoricalContextMarker(authoritativeMessage ?? (
-        rawMessage && !isInternalToolArtifactComplaint(rawMessage)
-          ? rawMessage
-          : fallbackMessage ?? structuredOutput.message
-      ));
+      const message = composeFinalMessage(rawMessage, authoritativeMessage) ??
+        stripHistoricalContextMarker(fallbackMessage ?? structuredOutput.message);
       const structuredProjection = projectAgentOutput(
         industrialAgentOutputDefinition,
         structuredOutput,

@@ -1073,7 +1073,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async send(text: string): Promise<void> {
     await this.ensureRuntime();
-    await this.coordinator!.initialize();
+    // ensureRuntime() initializes and replays the active session once. Replaying
+    // before every send would clear live output and restore raw session text over
+    // the completed result shown by the current run.
     // Keep the natural-language command narrow: "继续写一个..." remains a
     // new task, while an exact continuation phrase resumes the saved SDK state.
     if (isContinueRequest(text)) {
