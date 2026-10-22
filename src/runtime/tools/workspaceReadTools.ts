@@ -66,7 +66,10 @@ export function createWorkspaceReadTools(ctx: ToolBuildContext) {
     execute: ({ dir }) =>
       guard(
         async () => {
-          const target = await resolveWorkspacePath(dir ?? ".", { targetKind: "directory" });
+          // Models sometimes serialize an omitted optional string as "".
+          // Treat blank directory values the same as an omitted directory.
+          const requestedDir = typeof dir === "string" && dir.trim() ? dir : ".";
+          const target = await resolveWorkspacePath(requestedDir, { targetKind: "directory" });
           return contract(
             { files: await listFiles(target.root, target.relativePath) },
             "read",

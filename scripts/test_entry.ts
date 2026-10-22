@@ -71,6 +71,7 @@ export * from '../src/runtime/workflow/decisionService';
 export * from '../src/app/workflowRegistry';
 export * from '../src/app/toolRegistry';
 export * from '../src/runtime/tools/coreToolProvider';
+export * from '../src/runtime/tools/workspaceReadTools';
 export * from '../src/runtime/tools/toolInputNormalizer';
 export * from '../src/runtime/plugins/st/stToolProvider';
 export * from '../src/runtime/plugins/devuni/devuniCommandPort';

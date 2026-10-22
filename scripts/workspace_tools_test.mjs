@@ -3,7 +3,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileText, deleteFileText, searchText, runCommand, commandToolResult, parseToolResult } from './agent.testbundle.mjs';
+import { resolveInWorkspace, listFiles, readFileRange, writeFileText, editFileText, deleteFileText, searchText, runCommand, commandToolResult, parseToolResult, createWorkspaceReadTools, WorkspaceScope } from './agent.testbundle.mjs';
 
 const ws = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-ws-test-'));
 await fs.writeFile(path.join(ws, 'main.st'), 'PROGRAM Demo\n  x := 1;\nEND_PROGRAM\n');
@@ -12,6 +12,26 @@ await fs.mkdir(path.join(ws, 'sub'), { recursive: true });
 await fs.writeFile(path.join(ws, 'sub', 'util.txt'), 'Motor_Star := TON_Star.Q;\n');
 await fs.mkdir(path.join(ws, 'node_modules', 'foo'), { recursive: true });
 await fs.writeFile(path.join(ws, 'node_modules', 'foo', 'index.js'), 'PROGRAM ShouldNotBeSeen\n');
+
+// [0] list_files:省略、空字符串和纯空格都表示工作区根目录
+{
+  const scope = new WorkspaceScope([ws]);
+  const { listFilesTool } = createWorkspaceReadTools({
+    contract: (data) => ({ ok: true, data }),
+    failed: (error) => ({ ok: false, error: String(error) }),
+    guard: (fn) => fn(),
+    guardrails: { input: [], output: [] },
+    plc: { id: 'test' },
+    workspace: scope,
+    resolveWorkspacePath: async (input) => scope.resolve(input),
+  });
+  for (const input of [{}, { dir: '' }, { dir: '   ' }]) {
+    const result = await listFilesTool.invoke({}, JSON.stringify(input));
+    if (!result?.ok || !result.data?.files?.some((file) => file.startsWith('main.st'))) {
+      throw new Error(`list_files 未将空 dir 解析为工作区根目录: ${JSON.stringify({ input, result })}`);
+    }
+  }
+}
 
 // [1] list_files:能看到工作区文件,跳过 node_modules
 {
