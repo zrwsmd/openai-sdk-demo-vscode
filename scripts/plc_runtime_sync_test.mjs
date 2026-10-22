@@ -134,6 +134,113 @@ function clarification(select) {
   }
 }
 
+// Explicit cycle only: ask for the task, but keep the requested 5ms on every
+// new-task option instead of reintroducing model-suggested periods.
+{
+  const periodOnlyWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-period-only-test-'),
+  );
+  let taskRequest;
+  const fake = clarification((request) => {
+    taskRequest = request;
+    const option = request.options.find((item) => item.id === 'create:MainControlTask:5ms');
+    if (!option) throw new Error('explicit 5ms request did not produce a 5ms MainControlTask option');
+    return option.id;
+  });
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: periodOnlyWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序，任务周期是5ms',
+    taskSuggestionProvider: async () => [
+      { taskGroup: 'fast_control', periodMs: 5, reason: '快速控制' },
+      { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+      { taskGroup: 'slow_monitor', periodMs: 200, reason: '低频监视' },
+    ],
+    clarification: fake.service,
+  });
+  if (!plan || plan.periodMs !== 5) {
+    throw new Error('explicit task period was not preserved in the selected plan');
+  }
+  if (
+    !taskRequest?.question.includes('5 ms') ||
+    taskRequest.question.includes('请选择任务周期或绑定已有任务') ||
+    taskRequest.options
+      .filter((item) => item.id.startsWith('create:'))
+      .some((item) => !item.label.endsWith('5 ms'))
+  ) {
+    throw new Error('period-only request did not ask only for the task with a fixed 5ms period');
+  }
+}
+
+// Explicit task only: ask for the period, while keeping the requested task
+// name on every new-task option.
+{
+  const taskOnlyWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-task-only-test-'),
+  );
+  let periodRequest;
+  const fake = clarification((request) => {
+    periodRequest = request;
+    const option = request.options.find((item) => item.id === 'create:MainControlTask:20ms');
+    if (!option) throw new Error('explicit task request did not produce a MainControlTask period option');
+    return option.id;
+  });
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: taskOnlyWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序，绑定到 MainControlTask',
+    taskSuggestionProvider: async () => [
+      { taskGroup: 'fast_control', periodMs: 5, reason: '快速控制' },
+      { taskGroup: 'main_control', periodMs: 20, reason: '常规控制' },
+    ],
+    clarification: fake.service,
+  });
+  if (!plan || plan.taskName !== 'MainControlTask' || plan.periodMs !== 20) {
+    throw new Error('explicit task name was not preserved while asking for its period');
+  }
+  if (
+    !periodRequest?.question.includes('MainControlTask') ||
+    !periodRequest.question.includes('请选择任务周期') ||
+    periodRequest.options
+      .filter((item) => item.id.startsWith('create:'))
+      .some((item) => !item.label.startsWith('创建 MainControlTask'))
+  ) {
+    throw new Error('task-only request did not ask only for the requested task period');
+  }
+}
+
+// Both values are explicit: create the task directly without invoking either
+// the suggestion model or the clarification UI.
+{
+  const fullySpecifiedWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-fully-specified-test-'),
+  );
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: fullySpecifiedWorkspace,
+    source: 'StartStop.st',
+    content: 'PROGRAM StartStop\nEND_PROGRAM\n',
+    userRequest: '写一个启保停程序，绑定到 MainControlTask，任务周期是5ms',
+    taskSuggestionProvider: async () => {
+      throw new Error('fully specified task configuration should not call the suggestion model');
+    },
+    clarification: {
+      request: async () => {
+        throw new Error('fully specified task configuration should not open clarification');
+      },
+    },
+  });
+  if (
+    !plan ||
+    plan.action !== 'create_config' ||
+    plan.taskName !== 'MainControlTask' ||
+    plan.periodMs !== 5
+  ) {
+    throw new Error('fully specified task configuration was not applied directly');
+  }
+}
+
 {
   const otherWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-runtime-sync-bind-test-'));
   await fs.mkdir(path.join(otherWorkspace, 'src'), { recursive: true });

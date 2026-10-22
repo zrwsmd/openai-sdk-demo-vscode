@@ -203,6 +203,68 @@ type Selection =
       cpuCore: number;
     };
 
+interface RequestedTaskConfiguration {
+  taskName?: string;
+  periodMs?: number;
+}
+
+function parsePeriodMs(value: string): number | undefined {
+  const amount = Number(value);
+  if (!Number.isInteger(amount) || amount <= 0 || amount > 86_400_000) return undefined;
+  return amount;
+}
+
+function requestedPeriodMs(userRequest: string): number | undefined {
+  const patterns = [
+    /(?:任务|扫描|执行|循环)?\s*(?:周期|间隔|interval|cycle)\s*(?:是|为|设为|设置为|等于|=|:|：)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)(?=\s|[,，。；;.!?！？]|$)/iu,
+    /(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)\s*(?:的)?\s*(?:任务|扫描|执行|循环)?\s*周期(?=\s|[,，。；;.!?！？]|$)/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(userRequest);
+    if (!match) continue;
+    const milliseconds = /^(?:s|秒)$/iu.test(match[2])
+      ? Number(match[1]) * 1000
+      : Number(match[1]);
+    const parsed = parsePeriodMs(String(milliseconds));
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
+function requestedTaskName(userRequest: string): string | undefined {
+  const patterns = [
+    /(?:任务|task)\s*(?:名称|名|name)?\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu,
+    /(?:task)\s+([A-Za-z_][A-Za-z0-9_]*)/iu,
+    /(?:绑定|绑定到|绑定至|挂到|挂载到|运行在|调度到|使用|指定)[^A-Za-z0-9_]{0,12}(?:任务|task)?\s*[=:：]?\s*([A-Za-z_][A-Za-z0-9_]*)/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(userRequest);
+    if (
+      match &&
+      IEC_IDENTIFIER.test(match[1]) &&
+      !/^(?:PLC|TASK|PROGRAM)$/iu.test(match[1])
+    ) {
+      return match[1];
+    }
+  }
+  return undefined;
+}
+
+function requestedTaskConfiguration(userRequest: string | undefined): RequestedTaskConfiguration {
+  const text = userRequest?.trim() ?? '';
+  if (!text) return {};
+  const taskName = requestedTaskName(text);
+  const periodMs = requestedPeriodMs(text);
+  return {
+    ...(taskName ? { taskName } : {}),
+    ...(periodMs === undefined ? {} : { periodMs }),
+  };
+}
+
+function sameTaskName(left: string, right: string): boolean {
+  return left.toLocaleUpperCase() === right.toLocaleUpperCase();
+}
+
 function selectionValue(value: Selection): string {
   return JSON.stringify(value);
 }
@@ -397,6 +459,7 @@ export async function suggestPlcTaskOptions(
 function parseCustomSelection(
   text: string | undefined,
   fallback: Extract<Selection, { action: 'create_config' | 'create_task' }>,
+  periodFallback?: number,
 ): Extract<Selection, { action: 'create_config' | 'create_task' }> | undefined {
   const raw = String(text ?? '').trim();
   if (!raw) return undefined;
@@ -406,7 +469,7 @@ function parseCustomSelection(
     ? Number(ms[1])
     : seconds
       ? Number(seconds[1]) * 1000
-      : undefined;
+      : periodFallback;
   if (!periodMs || !Number.isFinite(periodMs) || periodMs <= 0) return undefined;
   const taskName = /(?:task|任务)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
     fallback.taskName;
@@ -731,6 +794,7 @@ async function optionsForState(
   state: PlcRuntimeConfigState,
   programName: string,
   syncOptions: PreparePlcRuntimeConfigSyncOptions,
+  requested: RequestedTaskConfiguration,
 ): Promise<{
   options: PlcClarificationOption[];
   createFallback: Extract<Selection, { action: 'create_config' | 'create_task' }>;
@@ -773,7 +837,12 @@ async function optionsForState(
       );
     }
   }
-  const firstSuggestion = suggestions[0] ?? fallbackSuggestions[0];
+  const effectiveSuggestions = suggestions.map((suggestion) => ({
+    ...suggestion,
+    ...(requested.taskName ? { taskName: requested.taskName } : {}),
+    ...(requested.periodMs === undefined ? {} : { periodMs: requested.periodMs }),
+  }));
+  const firstSuggestion = effectiveSuggestions[0] ?? fallbackSuggestions[0];
   const createFallback = {
     action: createAction,
     deviceId: device.id,
@@ -788,22 +857,30 @@ async function optionsForState(
 
   if (config) {
     for (const task of config.tasks) {
-        options.push({
-          id: `bind:${task.name}`,
-          label: `绑定到 ${taskLabel(task)}`,
-          description:
-            `设备 ${task.deviceId}` +
-            `；当前已绑定 ${task.instances.length} 个 PROGRAM`,
-          value: selectionValue({
-            action: 'bind_program',
-            taskName: task.name,
-          }),
-        });
+      if (requested.taskName && !sameTaskName(task.name, requested.taskName)) continue;
+      if (
+        requested.periodMs !== undefined &&
+        task.type === 'cyclic' &&
+        task.periodMs !== requested.periodMs
+      ) continue;
+      options.push({
+        id: `bind:${task.name}`,
+        label: `绑定到 ${taskLabel(task)}`,
+        description:
+          `设备 ${task.deviceId}` +
+          `；当前已绑定 ${task.instances.length} 个 PROGRAM`,
+        value: selectionValue({
+          action: 'bind_program',
+          taskName: task.name,
+        }),
+      });
     }
   }
 
-  for (const suggestion of suggestions) {
-    const defaultId = usingFallbackSuggestions
+  for (const suggestion of effectiveSuggestions) {
+    const defaultId = usingFallbackSuggestions &&
+      requested.taskName === undefined &&
+      requested.periodMs === undefined
       ? `create:${suggestion.periodMs}ms`
       : `create:${suggestion.taskName}:${suggestion.periodMs}ms`;
     options.push({
@@ -850,6 +927,7 @@ export async function preparePlcRuntimeConfigSync(
   );
   if (workspaceIndex.iecSources.length === 0 && state.status !== 'ready') return undefined;
   const synchronized = configWithWorkspaceIndex(state, workspaceIndex);
+  const requested = requestedTaskConfiguration(options.userRequest);
   const indexOnlyPlan = (): PlcRuntimeConfigSyncPlan => ({
     filePath: repository.filePath,
     action: 'sync_pous',
@@ -863,6 +941,21 @@ export async function preparePlcRuntimeConfigSync(
   }
 
   const programName = programs[0].name;
+  const planForSelection = (selection: Selection): PlcRuntimeConfigSyncPlan => {
+    const applied = applySelection(synchronized.config, selection, programName);
+    return {
+      filePath: repository.filePath,
+      action: applied.action,
+      pous: workspaceIndex.pous,
+      iecSources: workspaceIndex.iecSources,
+      programName,
+      source,
+      taskName: applied.taskName,
+      deviceId: applied.deviceId,
+      ...(applied.periodMs === undefined ? {} : { periodMs: applied.periodMs }),
+      commit: async () => (await repository.save(applied.config)).config,
+    };
+  };
   if (state.status === 'ready') {
     const inspection = inspectPlcProgramBindings(synchronized.config, {
       source,
@@ -876,21 +969,66 @@ export async function preparePlcRuntimeConfigSync(
       throw new PlcRuntimeConfigError(`PROGRAM ${programName} 的任务绑定重复，请先修复 plc-runtime.json。`);
     }
   }
+
+  const existingRequestedTask = requested.taskName
+    ? synchronized.config.tasks.find((task) => sameTaskName(task.name, requested.taskName!))
+    : undefined;
+  if (existingRequestedTask) {
+    if (
+      requested.periodMs !== undefined &&
+      existingRequestedTask.type === 'cyclic' &&
+      existingRequestedTask.periodMs !== requested.periodMs
+    ) {
+      throw new PlcRuntimeConfigError(
+        `任务 ${existingRequestedTask.name} 当前周期为 ${existingRequestedTask.periodMs} ms，` +
+          `与用户指定的 ${requested.periodMs} ms 不一致，请先明确是否要修改已有任务周期。`,
+      );
+    }
+    // An existing task already supplies the missing period from plc-runtime.json.
+    // Bind directly instead of asking the user to confirm information we already have.
+    return planForSelection({ action: 'bind_program', taskName: existingRequestedTask.name });
+  }
+
+  if (requested.taskName && requested.periodMs !== undefined) {
+    const device = firstLocalDevice(synchronized.config);
+    return planForSelection({
+      action: state.status === 'ready' ? 'create_task' : 'create_config',
+      deviceId: device.id,
+      deviceModel: device.model,
+      taskName: requested.taskName,
+      periodMs: requested.periodMs,
+      priority: 1,
+      cpuCore: 0,
+    });
+  }
   if (!options.clarification) return indexOnlyPlan();
 
   const { options: choices, createFallback } = await optionsForState(
     state,
     programName,
     options,
+    requested,
   );
+  const missingTask = requested.taskName === undefined;
+  const missingPeriod = requested.periodMs === undefined;
+  const question = missingTask && !missingPeriod
+    ? `已确认任务周期为 ${requested.periodMs} ms，请选择要绑定的 PLC 任务。`
+    : !missingTask && missingPeriod
+      ? `已确认绑定任务为 ${requested.taskName}，请选择任务周期。`
+      : `PROGRAM ${programName} 还没有明确的 PLC 任务绑定。请选择任务周期或绑定已有任务。`;
+  const customPlaceholder = missingTask && !missingPeriod
+    ? '新建任务可填写: task=MainControlTask'
+    : !missingTask && missingPeriod
+      ? '请输入任务周期，例如 20ms'
+      : '新建任务可填写: task=MainControlTask, 20ms';
   const response = await options.clarification.request({
     kind: 'plc_task_configuration',
     title: '任务组态确认',
-    question: `PROGRAM ${programName} 还没有明确的 PLC 任务绑定。请选择任务周期或绑定已有任务。`,
+    question,
     details: `源文件: ${source}。这只会更新 plc-runtime.json，不会向 ST 文件追加 CONFIGURATION。`,
     options: choices,
     allowCustom: true,
-    customPlaceholder: '新建任务可填写: task=MainControlTask, 20ms',
+    customPlaceholder,
     required: true,
     metadata: {
       source,
@@ -903,23 +1041,11 @@ export async function preparePlcRuntimeConfigSync(
   const selectedValue = response.value ?? selectedOption?.value;
   let selection = parseSelectionValue(selectedValue);
   if (!selection && response.customText) {
-    selection = parseCustomSelection(response.customText, createFallback);
+    selection = parseCustomSelection(response.customText, createFallback, requested.periodMs);
   }
   if (!selection) {
     throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写类似 "20ms, priority=1, cpu=1" 的答案。');
   }
 
-  const applied = applySelection(synchronized.config, selection, programName);
-  return {
-    filePath: repository.filePath,
-    action: applied.action,
-    pous: workspaceIndex.pous,
-    iecSources: workspaceIndex.iecSources,
-    programName,
-    source,
-    taskName: applied.taskName,
-    deviceId: applied.deviceId,
-    ...(applied.periodMs === undefined ? {} : { periodMs: applied.periodMs }),
-    commit: async () => (await repository.save(applied.config)).config,
-  };
+  return planForSelection(selection);
 }
