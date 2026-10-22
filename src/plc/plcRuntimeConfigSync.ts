@@ -469,7 +469,7 @@ function parseCustomSelection(
     ? Number(ms[1])
     : seconds
       ? Number(seconds[1]) * 1000
-      : periodFallback;
+      : periodFallback ?? fallback.periodMs;
   if (!periodMs || !Number.isFinite(periodMs) || periodMs <= 0) return undefined;
   const taskName = /(?:task|任务)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
     fallback.taskName;
@@ -1039,9 +1039,18 @@ export async function preparePlcRuntimeConfigSync(
 
   const selectedOption = choices.find((item) => item.id === response.selectedOptionId);
   const selectedValue = response.value ?? selectedOption?.value;
-  let selection = parseSelectionValue(selectedValue);
-  if (!selection && response.customText) {
-    selection = parseCustomSelection(response.customText, createFallback, requested.periodMs);
+  const selectedSelection = parseSelectionValue(selectedValue);
+  let selection = selectedSelection;
+  if (response.customText?.trim()) {
+    const customFallback = selectedSelection &&
+      (selectedSelection.action === 'create_config' || selectedSelection.action === 'create_task')
+      ? selectedSelection
+      : createFallback;
+    selection = parseCustomSelection(
+      response.customText,
+      customFallback,
+      requested.periodMs,
+    );
   }
   if (!selection) {
     throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写类似 "20ms, priority=1, cpu=1" 的答案。');

@@ -33,6 +33,27 @@ function clarification(select) {
   };
 }
 
+function clarificationWithCustomText(select, customText) {
+  const requests = [];
+  return {
+    requests,
+    service: {
+      request: async (request) => {
+        requests.push(request);
+        const choice = select(request);
+        const option = request.options.find((item) => item.id === choice);
+        return {
+          requestId: 'test',
+          cancelled: false,
+          selectedOptionId: choice,
+          customText,
+          value: option?.value,
+        };
+      },
+    },
+  };
+}
+
 {
   const fake = clarification(() => 'create:100ms');
   const plan = await preparePlcRuntimeConfigSync({
@@ -84,6 +105,41 @@ function clarification(select) {
   });
   if (bound !== undefined || fake.requests.length !== 1) {
     throw new Error('already-bound program should not ask for clarification again');
+  }
+}
+
+// A custom answer is authoritative even when the UI also reports the selected
+// recommendation. This mirrors the webview response when the user selects a
+// suggested row and fills the custom input in the same clarification card.
+{
+  const customWorkspace = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'plc-runtime-sync-custom-selection-test-'),
+  );
+  const fake = clarificationWithCustomText(
+    (request) => request.options.find((item) => item.id === 'create:SlowMonitorTask:500ms')?.id,
+    'task=test11,8ms',
+  );
+  const plan = await preparePlcRuntimeConfigSync({
+    workspaceRoot: customWorkspace,
+    source: 'StartHoldStop.st',
+    content: 'PROGRAM PRG_StartHoldStop\nEND_PROGRAM\n',
+    taskSuggestionProvider: async () => [{
+      taskGroup: 'slow_monitor',
+      periodMs: 500,
+      reason: '适合低频监视。',
+    }],
+    clarification: fake.service,
+  });
+  if (!plan || plan.taskName !== 'test11' || plan.periodMs !== 8) {
+    throw new Error(`custom task answer was ignored: ${JSON.stringify(plan)}`);
+  }
+  await plan.commit();
+  const config = await readPlcRuntimeConfig(
+    path.join(customWorkspace, PLC_RUNTIME_CONFIG_FILE_NAME),
+  );
+  const task = config?.tasks[0];
+  if (task?.name !== 'test11' || task.periodMs !== 8) {
+    throw new Error('custom task name/period did not persist over recommendation');
   }
 }
 
