@@ -128,6 +128,11 @@ import {
   type MutableTaskPlanRef,
 } from "./agentRuntimeTools";
 import {
+  describeEncodedToolArguments,
+  describeSchemaMismatches,
+  withToolInputNormalization,
+} from "./tools/toolInputNormalizer";
+import {
   composeToolSet,
   buildHistoricalExplanationContext,
   createNewTurnModelInputSession,
@@ -431,7 +436,11 @@ export async function runAgent(
     enabled: cfg.skillsEnabled !== false,
   });
   const modelAdapter = buildModelAdapter(cfg);
-  const model = withOneShotToolChoice(modelAdapter.model);
+  const model = withOneShotToolChoice(
+    typeof modelAdapter.model === "string"
+      ? modelAdapter.model
+      : withToolInputNormalization(modelAdapter.model),
+  );
   const promptCacheSettings = promptCacheModelSettings(cfg);
   if (cfg.promptCache?.enabled) {
     agentLog(
@@ -531,6 +540,11 @@ export async function runAgent(
     }
     const workflowReason = completedWorkflowToolRejection(toolName);
     if (workflowReason) return workflowReason;
+    const pipelineReason = pipelineStageRuntime.guardToolCall(
+      toolName,
+      [...historicalToolResults, ...toolResults.values()],
+    );
+    if (pipelineReason) return pipelineReason;
     return toolCallDeduper.guard(toolName, input);
   };
   const pipelineStageRuntime = new PipelineStageRuntime(workflowRuntime?.pipelinePlan);
@@ -937,6 +951,16 @@ export async function runAgent(
       parsedArguments = undefined;
     }
     const invalidInput = /(?:InvalidToolInputError|Invalid JSON input for tool|Invalid input for tool)/i.test(error);
+    const toolDefinition = tools.find(
+      (item): item is Extract<Tool, { type: "function" }> =>
+        item.type === "function" && toolNameOf(item) === name,
+    );
+    const shapeHint = toolDefinition
+      ? describeSchemaMismatches(args, toolDefinition.parameters)
+      : describeEncodedToolArguments(args);
+    const modelError = invalidInput && shapeHint
+      ? `${error} 字段类型提示：${shapeHint}。请直接传 JSON 数组/对象，不要把它们放在字符串中。`
+      : error;
     return createToolResult({
       ok: false,
       data: {
@@ -945,13 +969,13 @@ export async function runAgent(
         argumentsWereJson: parsedArguments !== undefined,
         source: "sdk_tool_completed",
       },
-      error,
+      error: modelError,
       diagnostics: [
         {
           code: invalidInput ? "invalid_tool_input" : "tool_failed",
-          message: invalidInput
-            ? `${name} 工具参数格式错误，工具实现未执行：${error}`
-            : error,
+            message: invalidInput
+              ? `${name} 工具参数格式错误，工具实现未执行：${modelError}`
+              : modelError,
           severity: "error",
           details: {
             rawArguments: args || null,

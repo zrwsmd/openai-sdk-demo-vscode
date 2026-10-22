@@ -26,6 +26,19 @@ import {
   if (decision?.toolName !== 'upload_binary') {
     throw new Error('generic pipeline transition did not choose upload_binary');
   }
+  const blocked = runtime.guardToolCall('upload_binary', [{
+    name: 'compile_draft',
+    result: { ok: false, error: 'compile failed', diagnostics: [], effect: 'none', risk: 'plan' },
+  }]);
+  if (!blocked || !blocked.includes('compile_draft')) {
+    throw new Error('generic pipeline should block a dependent tool after a failed prerequisite');
+  }
+  if (runtime.guardToolCall('upload_binary', [{
+    name: 'compile_draft',
+    result: { ok: true, data: { exitCode: 0 }, diagnostics: [], effect: 'none', risk: 'plan' },
+  }])) {
+    throw new Error('generic pipeline should allow a dependent tool after a successful prerequisite');
+  }
   const firstVisible = runtime.shouldSuppressStarted({
     toolName: 'compile_draft',
     args: '{"target":"plc"}',

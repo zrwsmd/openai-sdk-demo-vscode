@@ -4,6 +4,11 @@ import {
   type PipelineToolEventInput,
 } from "./stagePlan";
 
+type PipelineToolRecord = {
+  name: string;
+  result: ToolResult;
+};
+
 export type PipelineNextToolDecision = {
   toolName: string;
   reason: string;
@@ -30,6 +35,33 @@ export class PipelineStageRuntime {
         toolName: transition.toToolName,
         reason: transition.reason,
       };
+    }
+    return undefined;
+  }
+
+  guardToolCall(
+    toolName: string,
+    records: readonly PipelineToolRecord[],
+  ): string | undefined {
+    const transitions = (this.plan?.resultTransitions ?? [])
+      .filter((transition) => transition.toToolName === toolName);
+    for (const transition of transitions) {
+      const previous = [...records]
+        .reverse()
+        .find((record) => record.name === transition.fromToolName);
+      if (!previous) continue;
+      if (transition.canTransition(previous.result)) return undefined;
+      const retryTransition = transitions.find(
+        (candidate) =>
+          candidate.fromToolName === transition.fromToolName &&
+          candidate.canTransition(previous.result),
+      );
+      if (retryTransition) return undefined;
+      return (
+        `工作流要求先成功执行 ${transition.fromToolName}，` +
+        `当前最近一次结果未通过，不能直接调用 ${toolName}。` +
+        "请修正参数并重新完成前置步骤。"
+      );
     }
     return undefined;
   }
