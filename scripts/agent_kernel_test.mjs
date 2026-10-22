@@ -1277,6 +1277,12 @@ async function runTestTurn(
 // [3a2] 工具名有效但参数沿用了旧任务时,统一 guardrail 应在工具实现前拦截,
 //       把可恢复错误回传给模型,而不是让旧路径继续进入任意领域工具。
 {
+  const testToolRisk = (toolName) => {
+    if (['read_file', 'search_files', 'list_files'].includes(toolName)) return 'read';
+    if (toolName === 'st_dependency_map' || toolName === 'request_clarification') return 'plan';
+    if (['write_file', 'edit_file', 'delete_file', 'devuni_create_project'].includes(toolName)) return 'write';
+    return 'execute';
+  };
   const history = [
     { type: 'message', role: 'user', content: '上一轮读取 yy.txt' },
     {
@@ -1289,18 +1295,20 @@ async function runTestTurn(
   const guard = createHistoricalToolArgumentGuard(
     history,
     '分析当前工作区里这些 ST 文件之间的依赖关系',
+    testToolRisk,
   );
   const rejection = guard?.('st_dependency_map', { path: 'yy.txt' });
   if (!rejection?.includes('yy.txt') || !rejection.includes('已阻止工具')) {
     throw new Error('历史资源参数 guard 没有拦截跨工具旧参数');
   }
-  const explicitGuard = createHistoricalToolArgumentGuard(history, '读取 yy.txt');
+  const explicitGuard = createHistoricalToolArgumentGuard(history, '读取 yy.txt', testToolRisk);
   if (explicitGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
     throw new Error('当前用户明确指定的资源被错误拦截');
   }
   const continuationGuard = createHistoricalToolArgumentGuard(
     history,
     '继续分析刚才的文件',
+    testToolRisk,
   );
   if (continuationGuard?.('st_dependency_map', { path: 'yy.txt' }) !== undefined) {
     throw new Error('明确的历史上下文续接被错误拦截');
@@ -1319,6 +1327,7 @@ async function runTestTurn(
       },
     ],
     '新建另一个工程',
+    testToolRisk,
   );
   if (clarifiedGuard?.('request_clarification', { question: '父目录是否使用 D:\\？' }) !== undefined) {
     throw new Error('澄清工具被历史资源守卫错误拦截');
@@ -1338,12 +1347,61 @@ async function runTestTurn(
   const implicitFollowUpGuard = createHistoricalToolArgumentGuard(
     history,
     '周期分别是多少啊',
+    testToolRisk,
   );
   if (implicitFollowUpGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
     throw new Error('最近唯一文件的自然追问不应拦截 read_file');
   }
   if (implicitFollowUpGuard?.('st_dependency_map', { path: 'yy.txt' }) === undefined) {
     throw new Error('自然追问不应放行非只读工具');
+  }
+  const naturalReferenceGuard = createHistoricalToolArgumentGuard(
+    history,
+    '这个程序的周期是多少',
+    testToolRisk,
+  );
+  if (naturalReferenceGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
+    throw new Error('自然语言指代最近唯一程序时应允许只读工具承接');
+  }
+  const writeWithoutActionGuard = createHistoricalToolArgumentGuard(
+    history,
+    '继续处理刚才的文件',
+    testToolRisk,
+  );
+  if (writeWithoutActionGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
+    throw new Error('仅表达继续上下文不能授权写入');
+  }
+  const explicitWriteGuard = createHistoricalToolArgumentGuard(
+    history,
+    '继续修改刚才的文件',
+    testToolRisk,
+  );
+  if (explicitWriteGuard?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
+    throw new Error('当前请求明确继续修改唯一历史目标时不应拦截');
+  }
+  const negatedWriteGuard = createHistoricalToolArgumentGuard(
+    history,
+    '不要修改刚才的文件',
+    testToolRisk,
+  );
+  if (negatedWriteGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
+    throw new Error('否定写入意图不应被当作写入授权');
+  }
+  const historicalQuestionGuard = createHistoricalToolArgumentGuard(
+    history,
+    '为什么之前没写入这个文件？',
+    testToolRisk,
+  );
+  if (historicalQuestionGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
+    throw new Error('询问历史上为何没有写入，不应触发新的写入');
+  }
+  const politeHistoricalQuestionGuard = createHistoricalToolArgumentGuard(
+    history,
+    '请问为什么之前没写入这个文件？',
+    testToolRisk,
+  );
+  if (politeHistoricalQuestionGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
+    throw new Error('礼貌询问历史操作原因，不应触发新的写入');
   }
   // search_files 的 text 是“要搜什么字”，不是路径；glob 仍然是路径筛选。
   if (implicitFollowUpGuard?.('search_files', { text: 'yy.txt' }) !== undefined) {
@@ -1355,11 +1413,11 @@ async function runTestTurn(
 
   // 只认疑问或只读请求：“结果”“内容”这类名词、“吧”“啊”这类语气词都不能
   // 把一句命令变成追问。
-  const nounGuard = createHistoricalToolArgumentGuard(history, '结果不对，重新生成一版');
+  const nounGuard = createHistoricalToolArgumentGuard(history, '结果不对，重新生成一版', testToolRisk);
   if (nounGuard?.('read_file', { path: 'yy.txt' }) === undefined) {
     throw new Error('含名词的命令式请求被误判成自然追问');
   }
-  const modalGuard = createHistoricalToolArgumentGuard(history, '快点处理吧');
+  const modalGuard = createHistoricalToolArgumentGuard(history, '快点处理吧', testToolRisk);
   if (modalGuard?.('read_file', { path: 'yy.txt' }) === undefined) {
     throw new Error('语气词“吧”被误判成自然追问');
   }
@@ -1382,14 +1440,14 @@ async function runTestTurn(
       arguments: JSON.stringify({ path: '_du_d2.ps1', content: 'y' }),
     },
   ];
-  const deleteFollowUpGuard = createHistoricalToolArgumentGuard(twoFileHistory, '删掉吧');
+  const deleteFollowUpGuard = createHistoricalToolArgumentGuard(twoFileHistory, '删掉吧', testToolRisk);
   if (deleteFollowUpGuard?.('delete_file', { path: '_du_d.ps1' }) !== undefined) {
     throw new Error('“删掉吧”承接上一轮的文件时不应被拦');
   }
   if (deleteFollowUpGuard?.('delete_file', { path: '_du_d2.ps1' }) !== undefined) {
     throw new Error('“删掉吧”应当同时放行上一轮产出的多个文件');
   }
-  const nonDeleteGuard = createHistoricalToolArgumentGuard(twoFileHistory, '这两个脚本讲的是什么');
+  const nonDeleteGuard = createHistoricalToolArgumentGuard(twoFileHistory, '这两个脚本讲的是什么', testToolRisk);
   if (nonDeleteGuard?.('delete_file', { path: '_du_d.ps1' }) === undefined) {
     throw new Error('非删除请求不应放行删除类工具复用旧路径');
   }
@@ -1405,9 +1463,17 @@ async function runTestTurn(
     { type: 'message', role: 'user', content: '再看看' },
     { type: 'message', role: 'user', content: '还在吗' },
   ];
-  const staleDeleteGuard = createHistoricalToolArgumentGuard(staleDeleteHistory, '删掉吧');
+  const staleDeleteGuard = createHistoricalToolArgumentGuard(staleDeleteHistory, '删掉吧', testToolRisk);
   if (staleDeleteGuard?.('delete_file', { path: '_old.ps1' }) === undefined) {
     throw new Error('超过最近两轮的旧目标不应被“删掉吧”放行');
+  }
+  const staleContinuationGuard = createHistoricalToolArgumentGuard(
+    staleDeleteHistory,
+    '继续查看刚才的文件',
+    testToolRisk,
+  );
+  if (staleContinuationGuard?.('read_file', { path: '_old.ps1' }) === undefined) {
+    throw new Error('超过最近两轮的旧目标不应被“继续”重新激活');
   }
 
   const noisyHistory = [
@@ -1421,6 +1487,7 @@ async function runTestTurn(
   const noisyFollowUpGuard = createHistoricalToolArgumentGuard(
     noisyHistory,
     '周期分别是多少啊',
+    testToolRisk,
   );
   if (noisyFollowUpGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
     throw new Error('工具回执中的多个文件名不应让唯一活动目标变成歧义');
@@ -1445,14 +1512,20 @@ async function runTestTurn(
   const ambiguousGuard = createHistoricalToolArgumentGuard(
     ambiguousHistory,
     '周期分别是多少啊',
+    testToolRisk,
   );
   if (ambiguousGuard?.('read_file', { path: 'b.txt' }) === undefined) {
     throw new Error('存在多个近期文件时不应猜测自然追问的目标');
+  }
+  const ambiguousReason = ambiguousGuard?.('read_file', { path: 'b.txt' });
+  if (!ambiguousReason?.includes('request_clarification') || !ambiguousReason.includes('a.txt')) {
+    throw new Error('多目标追问应要求先澄清并给出候选资源');
   }
   // “继续”也不再一律放行：上一轮碰过两个文件时同样退回澄清。
   const ambiguousContinueGuard = createHistoricalToolArgumentGuard(
     ambiguousHistory,
     '继续处理刚才的文件',
+    testToolRisk,
   );
   if (ambiguousContinueGuard?.('read_file', { path: 'b.txt' }) === undefined) {
     throw new Error('多个近期目标时“继续”不应直接选定其中一个');
@@ -1472,6 +1545,7 @@ async function runTestTurn(
   const directoryGuard = createHistoricalToolArgumentGuard(
     directoryHistory,
     '分析当前工作区的 ST 依赖关系',
+    testToolRisk,
   );
   if (directoryGuard?.('list_files', { dir: 'src/runtime' }) === undefined) {
     throw new Error('相对目录路径没有被识别为历史资源');
@@ -1492,6 +1566,7 @@ async function runTestTurn(
   const gluedRejection = createHistoricalToolArgumentGuard(
     gluedHistory,
     '分析当前工作区的 ST 依赖关系',
+    testToolRisk,
   )?.('st_dependency_map', { path: 'yy.txt' });
   if (!gluedRejection?.includes('yy.txt')) {
     throw new Error('粘连中文的历史路径没有被识别');
@@ -1509,6 +1584,7 @@ async function runTestTurn(
       },
     ],
     '分析当前工作区的 ST 依赖关系',
+    testToolRisk,
   );
   for (const name of ['日志.st', '变量A.st', '项目1.st']) {
     const gluedName = `读取${name}`;
@@ -1536,6 +1612,7 @@ async function runTestTurn(
   const numericGuard = createHistoricalToolArgumentGuard(
     numericHistory,
     '分析当前工作区的 ST 依赖关系',
+    testToolRisk,
   );
   if (numericGuard?.('list_files', { dir: '123/456' }) === undefined) {
     throw new Error('纯数字目录路径没有被识别');

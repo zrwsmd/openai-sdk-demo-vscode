@@ -657,7 +657,7 @@ export async function runAgent(
   const isolateHistoricalToolChain =
     !options.initialState && !options.preserveToolHistory;
   const historicalToolArgumentGuard = isolateHistoricalToolChain
-    ? await loadHistoricalToolArgumentGuard(session, userText)
+    ? await loadHistoricalToolArgumentGuard(session, userText, toolRisk)
     : undefined;
   const workflowBusinessToolPolicy = workflowRuntime || workflowDescriptor
     ? resolveWorkflowBusinessToolPolicy(

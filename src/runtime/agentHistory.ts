@@ -2,6 +2,7 @@ import type { AgentInputItem, Session } from "@openai/agents";
 import {
   parseToolResult,
   type ToolResult,
+  type ToolRisk,
 } from "../protocol/results";
 import type { ToolCatalog } from "./toolCatalog";
 
@@ -281,8 +282,8 @@ const HISTORICAL_REFERENCE_PATTERN =
   /(?:继续|接着|续上|基于(?:上面|之前|前面|刚才|上述)|刚才|上一轮|上一次|之前|前面|上述|前述|该(?:文件|路径|结果|内容|对象|程序)|这个(?:文件|路径|结果|内容|对象|程序)|continue|previous|that file|this file)/iu;
 
 /**
- * 只读工具可以在“最近且唯一的目标”上承接自然语言追问；副作用工具仍
- * 需要当前请求明确表达继续处理历史目标 —— 唯一例外见下面的删除类承接。
+ * 只读工具可以在“最近且唯一的目标”上承接自然语言追问；写入/执行风险
+ * 工具还要求当前请求明确表达操作意图。删除的自然承接规则见下方。
  */
 const IMPLICIT_HISTORY_READ_TOOLS = new Set([
   "read_file",
@@ -299,12 +300,10 @@ const IGNORED_RESOURCE_ARGUMENT_FIELDS: Record<string, ReadonlySet<string>> = {
   search_files: new Set(["text"]),
 };
 /**
- * 只认疑问或明确的只读请求。“结果”“内容”“参数”这类名词太常见，
- * “结果不对，重新生成一版”会被误当成追问；“吧”“啊”既能收问句也能收命令
- * （“快点处理吧”），同样不算。
+ * 识别自然追问和明确只读请求；语气词本身不构成追问依据。
  */
 const IMPLICIT_FOLLOW_UP_PATTERN =
-  /(?:[?？]|吗|呢|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|请(?:查看|读取|检查|分析|确认|看看)|帮我(?:查看|读取|检查|分析|确认|看看))/iu;
+  /(?:[?？]|吗|呢|多少|哪些|哪个|哪一|分别|为什么|为何|如何|怎么|是否|有没有|能否|可否|是不是|是什么|有啥|请(?:查看|读取|检查|分析|确认|看看|读一下|打开)|帮我(?:查看|读取|检查|分析|确认|看看|读一下|打开)|(?:这个|该|刚才|上面|前面|上一轮)(?:文件|程序|结果|内容|工程|配置|代码)|(?:看看|读一下|分析一下|解释一下|说明一下))/iu;
 /**
  * “删掉吧”“清理掉”这种整句就是一个删除动作、没有带任何新资源名的说法，
  * 本身就是对上一轮目标的承接。要求用户把文件名再念一遍没有意义 —— 实际
@@ -313,6 +312,16 @@ const IMPLICIT_FOLLOW_UP_PATTERN =
  */
 const DESTRUCTIVE_FOLLOW_UP_PATTERN =
   /(?:删掉|删除|删了|清理掉|清理|清掉|移除|去掉|干掉)/u;
+const MUTATING_ACTION_SOURCE =
+  "(?:创建|新建|写入|保存|修改|编辑|改|修复|替换|更新|删除|删|清理|移除|运行|执行|测试|构建|编译|导出|部署|提交|create|write|save|modify|edit|fix|replace|update|delete|remove|run|execute|test|build|compile|export|deploy|commit)";
+const MUTATING_REQUEST_PATTERN = new RegExp(
+  `(?:^(?:(?:请(?!问)|帮我|麻烦|直接|现在|继续|接着|然后|再)\\s*)*${MUTATING_ACTION_SOURCE}|(?:请(?!问)|帮我|麻烦|直接|继续|接着|再|能不能|可以|可不可以).{0,8}${MUTATING_ACTION_SOURCE}|(?:把|将).{0,24}${MUTATING_ACTION_SOURCE}|${MUTATING_ACTION_SOURCE}(?:一下|一下吧|吧|成|为))`,
+  "iu",
+);
+const NEGATED_MUTATING_ACTION_PATTERN = new RegExp(
+  `(?:不要|不必|不需要|无需|别|不能|禁止|停止|不想|不(?:再|会|用|打算|准备|应|该|必|需|能|要)|没(?:有|必要|能|打算|准备)?|未(?:曾|能|打算|准备)?|无法|don't|do not|must not|cannot|stop).{0,8}${MUTATING_ACTION_SOURCE}`,
+  "iu",
+);
 const MAX_IMPLICIT_HISTORY_TURN_AGE = 2;
 
 /**
@@ -544,6 +553,7 @@ function resourceMentionedInText(
 export function createHistoricalToolArgumentGuard(
   historyItems: readonly AgentInputItem[],
   currentUserText: string,
+  getToolRisk: (toolName: string) => ToolRisk = () => "execute",
 ): HistoricalToolArgumentGuard | undefined {
   const { records: historicalReferences, activeRecords, currentTurnIndex } =
     historicalReferenceRecords(historyItems, currentUserText);
@@ -558,6 +568,8 @@ export function createHistoricalToolArgumentGuard(
       .map(([reference]) => reference),
   );
   const explicitContinuation = HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
+  const requestsMutation = MUTATING_REQUEST_PATTERN.test(currentUserText) &&
+    !NEGATED_MUTATING_ACTION_PATTERN.test(currentUserText);
   const confirmedReferences = new Set<string>();
 
   const guard: HistoricalToolArgumentGuard = (toolName, input) => {
@@ -577,13 +589,13 @@ export function createHistoricalToolArgumentGuard(
       );
     if (staleReferences.length === 0) return undefined;
 
-    // 明确说“继续/刚才/该文件”时，仍要求历史目标唯一；否则关键词本身
-    // 不能解决“刚才的两个文件到底是哪一个”的歧义。
-    const hasUniqueHistoricalTarget = activeRecords.size === 1;
+    // 承接只限最近两轮内唯一的资源；陈旧历史目标必须由本轮重新明确指定。
     const hasUniqueRecentTarget = recentReferences.size === 1;
+    const isSideEffectTool = ["write", "execute"].includes(getToolRisk(toolName));
     const canContinueExplicitly = explicitContinuation &&
-      (hasUniqueHistoricalTarget || hasUniqueRecentTarget) &&
-      staleReferences.every((reference) => recentReferences.has(reference) || hasUniqueHistoricalTarget);
+      hasUniqueRecentTarget &&
+      staleReferences.every((reference) => recentReferences.has(reference)) &&
+      (!isSideEffectTool || requestsMutation);
     const canContinueImplicitly = IMPLICIT_HISTORY_READ_TOOLS.has(toolName) &&
       currentUserReferences.size === 0 &&
       isImplicitFollowUp(currentUserText) &&
@@ -594,11 +606,27 @@ export function createHistoricalToolArgumentGuard(
     // 指的就是这两个。但每一个旧目标都必须在最近两轮里出现过。
     const canContinueDestructively =
       DESTRUCTIVE_FOLLOW_UP_PATTERN.test(currentUserText) &&
+      requestsMutation &&
       currentUserReferences.size === 0 &&
       staleReferences.length > 0 &&
       staleReferences.every((reference) => recentReferences.has(reference));
     if (canContinueExplicitly || canContinueImplicitly || canContinueDestructively) {
       return undefined;
+    }
+
+    const isFollowUp = explicitContinuation || isImplicitFollowUp(currentUserText);
+    const ambiguousRecentTargets = isFollowUp && recentReferences.size > 1
+      ? [...recentReferences]
+      : [];
+    if (ambiguousRecentTargets.length > 0) {
+      const choices = ambiguousRecentTargets
+        .slice(0, 5)
+        .map((reference) => activeRecords.get(reference)?.display ?? reference);
+      return (
+        `当前请求可能在承接历史上下文，但最近有多个候选资源（${choices.join("、")}），` +
+        `无法确定 ${toolName} 应使用哪一个。不要重试当前工具；请先调用 request_clarification，` +
+        "让用户选择目标，再使用本轮确认的资源参数继续。"
+      );
     }
 
     const displayReferences = staleReferences
@@ -607,8 +635,11 @@ export function createHistoricalToolArgumentGuard(
     return (
       `疑似沿用了历史对话中的资源参数（${displayReferences.join("、")}），` +
       `但当前用户请求没有明确引用或唯一承接它们；已阻止工具 ${toolName} 执行。` +
-      "请忽略旧工具参数，重新依据当前用户请求选择工具和参数；" +
-      "如果这是对最近唯一资源的追问，请明确写出文件或路径；写入、编辑和执行类工具还需要明确表达继续操作。"
+      "如果这是全新的目标，请忽略旧参数并按当前请求重新选择；" +
+      "如果这是对话追问但目标不唯一，请调用 request_clarification 让用户选择。" +
+      (isSideEffectTool
+        ? "写入、编辑和执行类工具还必须有当前请求明确表达的操作意图。"
+        : "")
     );
   };
   guard.allowConfirmedResources = (value) => {
@@ -622,11 +653,13 @@ export function createHistoricalToolArgumentGuard(
 export async function loadHistoricalToolArgumentGuard(
   session: Session,
   currentUserText: string,
+  getToolRisk?: (toolName: string) => ToolRisk,
 ): Promise<HistoricalToolArgumentGuard | undefined> {
   try {
     return createHistoricalToolArgumentGuard(
       await session.getItems(),
       currentUserText,
+      getToolRisk,
     );
   } catch {
     return undefined;
@@ -645,7 +678,7 @@ export const NEW_TURN_CONTEXT_PROMPT =
   "\n\n本轮上下文边界（仅适用于新的用户请求）：" +
   "最后一条 user 消息是本轮唯一的执行目标；更早的 user/assistant 消息仅作为历史参考，用于理解术语、已确认事实和用户偏好。" +
   "历史消息中的具体文件路径、文件名、符号名、变量值、命令参数、工具名称和待办动作，默认不属于本轮目标。" +
-  "除非当前 user 消息明确表达继续、接着、基于上面、刚才、该文件、这个结果等指代，且历史中的指代对象可以唯一确定，或者当前消息是在追问最近唯一的活动资源且只调用只读工具，否则不要把历史中的具体值复制到本轮工具参数，也不要因为历史动作再次调用工具。" +
+  "当前消息是在追问最近且唯一的活动资源时，只读工具可以承接该资源；写入、删除、执行类工具还必须同时有当前消息明确表达的操作意图和可唯一确定的历史目标。若有多个候选目标，先调用 request_clarification 让用户选择，不要反复重试旧参数。" +
   "当前 user 消息明确给出的路径、文件名、符号和参数优先；当前消息没有给出具体目标时，不要从历史猜测一个具体目标，需要时先澄清。" +
   "历史工具回执可以作为参考事实，但不代表本轮已经执行；本轮需要动作时，必须根据当前目标重新决定工具调用。" +
   "如果当前用户是在追问上一轮为什么这样处理、某个配置为什么没有变化或当前状态如何形成，可以引用历史对话中已经明确陈述的事实来解释原因；本轮没有工具调用不等于不能解释历史状态。" +
