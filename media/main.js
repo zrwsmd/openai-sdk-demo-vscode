@@ -1777,13 +1777,14 @@ function markToolActionLine(actionKey, ok, error) {
 }
 
 // 本轮 token 用量(部分网关流式响应不带 usage 字段,拿不到就不显示)
+// 调用次数只在日志里看,界面上不展示。
 function showUsage(usage) {
   if (!usage) return;
   const total = (usage.inputTokens || 0) + (usage.outputTokens || 0);
   if (!total) return;
   addNote(
     'usage-note',
-    `用量 · 输入 ${usage.inputTokens} / 输出 ${usage.outputTokens} · 模型调用 ${usage.requests} 次`,
+    `用量 · 输入 ${usage.inputTokens} / 输出 ${usage.outputTokens}`,
   );
 }
 
