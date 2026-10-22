@@ -2,8 +2,10 @@ import { tool } from '@openai/agents';
 import { z } from 'zod';
 import {
   CLARIFICATION_TOOL_NAME,
+  inferClarificationValidation,
   summarizeClarificationResponse,
 } from '../clarification';
+import type { ClarificationInputValidation } from '../clarification';
 import type { ToolBuildContext } from './toolBuildContext';
 
 const optionSchema = z.object({
@@ -48,6 +50,21 @@ const stepSchema = z.object({
   ),
   required: z.boolean().optional().describe('该步骤是否必须回答，默认是'),
 });
+
+type RawValidation = z.infer<typeof validationSchema>;
+
+/**
+ * 模型给了就用模型的，没给才按字段 id 补默认规则。
+ * 不这么做的话「工程名」「父目录」这两步全靠模型自觉，漏写一次弹窗就完全不校验。
+ */
+function resolveValidation(
+  validation: RawValidation | undefined,
+  fieldId: string | undefined,
+  question: string | undefined,
+): ClarificationInputValidation | undefined {
+  if (validation) return { ...validation } as ClarificationInputValidation;
+  return inferClarificationValidation(fieldId, question);
+}
 
 export function createClarificationTool(ctx: ToolBuildContext) {
   const { contract, failed, guardrails } = ctx;
@@ -100,6 +117,11 @@ export function createClarificationTool(ctx: ToolBuildContext) {
         return failed('澄清步骤 id 必须唯一。', 'plan');
       }
       try {
+        const topValidation = resolveValidation(
+          input.validation,
+          undefined,
+          input.question,
+        );
         const response = await service.request(
           {
             kind: input.kind ?? 'general',
@@ -109,20 +131,27 @@ export function createClarificationTool(ctx: ToolBuildContext) {
             ...(!steps.length && input.options?.length ? { options: input.options } : {}),
             allowCustom: input.allowCustom !== false,
             ...(input.customPlaceholder ? { customPlaceholder: input.customPlaceholder } : {}),
-            ...(input.validation ? { inputValidation: input.validation } : {}),
+            ...(topValidation ? { inputValidation: topValidation } : {}),
             required: input.required !== false,
             ...(steps.length ? {
-              steps: steps.map((step) => ({
-                id: step.id,
-                ...(step.title ? { title: step.title } : {}),
-                question: step.question,
-                ...(step.details ? { details: step.details } : {}),
-                ...(step.options?.length ? { options: step.options } : {}),
-                allowCustom: step.allowCustom !== false,
-                ...(step.customPlaceholder ? { customPlaceholder: step.customPlaceholder } : {}),
-                ...(step.validation ? { inputValidation: step.validation } : {}),
-                required: step.required !== false,
-              })),
+              steps: steps.map((step) => {
+                const stepValidation = resolveValidation(
+                  step.validation,
+                  step.id,
+                  step.question,
+                );
+                return {
+                  id: step.id,
+                  ...(step.title ? { title: step.title } : {}),
+                  question: step.question,
+                  ...(step.details ? { details: step.details } : {}),
+                  ...(step.options?.length ? { options: step.options } : {}),
+                  allowCustom: step.allowCustom !== false,
+                  ...(step.customPlaceholder ? { customPlaceholder: step.customPlaceholder } : {}),
+                  ...(stepValidation ? { inputValidation: stepValidation } : {}),
+                  required: step.required !== false,
+                };
+              }),
             } : {}),
           },
           details?.signal,

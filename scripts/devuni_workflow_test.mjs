@@ -13,6 +13,7 @@ import {
   createWorkflowRuntime,
   createWorkflowRuntimeState,
   composeToolSet,
+  inferClarificationValidation,
   resolveWorkflowBusinessToolPolicy,
 } from './agent.testbundle.mjs';
 
@@ -352,4 +353,57 @@ assert.deepEqual(
   '名单上的工具必须全部发出去,不能多也不能少',
 );
 
+/* ------------------------------------------------------------------ */
+/* [N] 弹窗校验兜底:模型不写 validation 时按字段 id 补                   */
+/* ------------------------------------------------------------------ */
+
+// 创建工程这几步是模型自己拼的 request_clarification,validation 全靠它自觉。
+// 漏写就等于弹窗不校验,用户填个空目录、带冒号的工程名也能提交。
+assert.deepEqual(
+  inferClarificationValidation('projectPath', '请选择工程父目录'),
+  { type: 'directoryPath', label: '目录' },
+  'projectPath 必须自动套上目录校验',
+);
+assert.deepEqual(
+  inferClarificationValidation('projectName', '工程叫什么名字'),
+  { type: 'projectName', label: '工程名' },
+  'projectName 必须自动套上工程名校验',
+);
+assert.deepEqual(
+  inferClarificationValidation('parentDirectory'),
+  { type: 'directoryPath', label: '目录' },
+);
+assert.deepEqual(
+  inferClarificationValidation('父目录'),
+  { type: 'directoryPath', label: '目录' },
+);
+assert.deepEqual(
+  inferClarificationValidation('工程名'),
+  { type: 'projectName', label: '工程名' },
+);
+// 只有一句话没有 id 时靠文案判断。
+assert.deepEqual(
+  inferClarificationValidation(undefined, '工程父目录填哪个盘?'),
+  { type: 'directoryPath', label: '目录' },
+);
+assert.deepEqual(
+  inferClarificationValidation(undefined, '新工程叫什么名字'),
+  { type: 'projectName', label: '工程名' },
+);
+// 一步里同时问两件事,猜哪条都不对,宁可不补。
+assert.equal(
+  inferClarificationValidation(undefined, '工程名和父目录分别是什么'),
+  undefined,
+  '一步问两件事时不能瞎猜校验类型',
+);
+// 别的字段不能被误判,否则会拦住合法输入。
+assert.equal(inferClarificationValidation('deviceModel'), undefined);
+assert.equal(inferClarificationValidation('projectType'), undefined);
+assert.equal(inferClarificationValidation('language', '用哪种编程语言'), undefined);
+
+// 指令里必须点名这两个 id,不然模型写的是别的名字,兜底也接不上。
+assert.match(runtime.instructions(), /projectPath/u, '工作流指令必须告诉模型父目录那一步的 id');
+assert.match(runtime.instructions(), /projectName/u, '工作流指令必须告诉模型工程名那一步的 id');
+
 console.log('devuni workflow tests passed');
+

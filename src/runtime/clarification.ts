@@ -77,6 +77,49 @@ export type ClarificationInputValidation =
       type: 'plcTaskConfiguration';
     };
 
+const PROJECT_NAME_HINT = /工程名|项目名|(?:工程|项目).{0,6}名|project\s*name|prj\s*name/iu;
+const DIRECTORY_PATH_HINT = /父目录|目录|路径|文件夹|directory|folder|parent\s*dir|\bpath\b/iu;
+
+function validationFromFieldId(
+  fieldId: string | undefined,
+): ClarificationInputValidation | undefined {
+  const id = String(fieldId ?? '').trim();
+  if (!id) return undefined;
+  if (/工程名|项目名/u.test(id)) return { type: 'projectName', label: '工程名' };
+  if (/父目录|目录|路径/u.test(id)) return { type: 'directoryPath', label: '目录' };
+  const normalized = id.replace(/[^a-z0-9]/giu, '').toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized.endsWith('projectname') || normalized.endsWith('prjname')) {
+    return { type: 'projectName', label: '工程名' };
+  }
+  if (/path|directory|folder|dir/u.test(normalized)) {
+    return { type: 'directoryPath', label: '目录' };
+  }
+  return undefined;
+}
+
+/**
+ * 模型经常忘记给自定义输入写 validation，而工程名、目录这类字段不校验的话
+ * 用户填什么都能提交，错误要到建目录那一刻才炸。这里按字段 id 补一层默认规则：
+ * 模型自己写了就用它的，没写才补。
+ * 只补这两类——它们有客观格式，猜错了最多多提示一句；别的类型猜错会误拦。
+ */
+export function inferClarificationValidation(
+  fieldId: string | undefined,
+  question?: string,
+): ClarificationInputValidation | undefined {
+  const fromId = validationFromFieldId(fieldId);
+  if (fromId) return fromId;
+  const text = String(question ?? '');
+  const mentionsName = PROJECT_NAME_HINT.test(text);
+  const mentionsPath = DIRECTORY_PATH_HINT.test(text);
+  // 一句话里两样都提了，说明这一步要同时问两件事，猜哪条都不对，宁可不补。
+  if (mentionsName === mentionsPath) return undefined;
+  return mentionsName
+    ? { type: 'projectName', label: '工程名' }
+    : { type: 'directoryPath', label: '目录' };
+}
+
 export interface ClarificationStep {
   id: string;
   title?: string;

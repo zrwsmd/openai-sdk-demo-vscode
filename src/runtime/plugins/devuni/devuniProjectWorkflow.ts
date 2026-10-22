@@ -162,6 +162,8 @@ export class DevuniProjectWorkflow implements WorkflowRuntime {
       " 向用户确认,不要臆造路径或直接采用第一个默认值。" +
       "如果有多个缺失参数,一次调用该工具的 steps 依次询问,不要把多个问题塞进同一个 question。" +
       "新建工程的推荐询问顺序是工程类型、工程语言、设备型号、父目录、工程名,共五步;" +
+      "父目录这一步的步骤 id 用 projectPath,工程名用 projectName——弹窗会按这两个 id " +
+      "自动套上目录路径和工程名的格式校验,id 写错就只剩一句文字提示,用户填什么都能提交;" +
       "设备型号是必填项,必须先用 devuni_project_options 查询候选项并让用户选择,不得默默采用第一个默认型号。" +
       "设备型号、父目录、工程名这三步必须由用户回答,required 保持默认,不要设为 false;" +
       "工程类型和工程语言允许用户不选(不选时运行时会取候选列表的第一个),这两步请把 required 显式设为 false。" +

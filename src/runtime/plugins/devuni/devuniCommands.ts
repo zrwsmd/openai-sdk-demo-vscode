@@ -224,6 +224,7 @@ const createProjectCommand = defineDevuniCommand<CreateProjectInput>({
     "当用户说新建工程、创建工程、建一个 PLC 工程、新建项目时使用。" +
     "projectPath 必须是已经存在的父目录。" +
     "工程类型、工程语言、设备型号、父目录或工程名不明确时,先用 request_clarification 逐项确认,不要依赖默认值。" +
+    "问父目录那一步的 id 用 projectPath,问工程名那一步的 id 用 projectName,弹窗会按这两个 id 套上格式校验。" +
     "设备型号是必填项,必须从 devuni_project_options 的候选中选择,不能使用插件默认型号代替用户确认。" +
     "创建成功后由运行时等待当前任务完整结束，再在新窗口打开工程并建立新的工程会话;" +
     "属于写操作,执行前需要用户在界面批准。",
