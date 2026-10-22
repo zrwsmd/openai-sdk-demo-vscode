@@ -539,6 +539,114 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+// 单信号定档的主导性矩阵：档位只能由"最突出的那个工具信号"决定，
+// 不能被一个把握更低、但恰好也是 yes 的信号抢走。
+// 实测来源：run_80ca32a9「校验一下所有 st 文件有没有语法错误」，Jev 给
+// read_file yes(0.94) / run_command yes(0.74) / write_file no(0.72)，
+// 旧门槛只看 run_command 是不是 yes，就把这单判成 command_query 了。
+{
+  const cases = [
+    {
+      name: 'read_file 主导时不判 command_query',
+      // noul 是"需要该工具的概率"，0.97 -> yes(conf 0.94)，0.14 -> no(conf 0.72)
+      answers: { readFile: 0.97, runCommand: 0.87, writeFile: 0.14 },
+      workflow: { choice: 'command_query', confidence: 0.64 },
+      expectMode: 'read_only',
+      forbidLog: '[workflow] Jev 命中 command_query',
+    },
+    {
+      name: 'write_file 主导时落到 file_edit',
+      answers: { readFile: 0.55, runCommand: 0.87, writeFile: 0.94 },
+      workflow: { choice: 'command_query', confidence: 0.64 },
+      expectMode: 'file_edit',
+      forbidLog: '[workflow] Jev 命中 command_query',
+    },
+    {
+      name: 'run_command 唯一主导且过线才判 command_query',
+      answers: { readFile: 0.55, runCommand: 0.95, writeFile: 0.10 },
+      workflow: { choice: 'command_query', confidence: 0.64 },
+      expectMode: 'command_query',
+      // 这一路必须留下命中日志，否则排查时看不出是谁定的档。
+      expectLog: '[workflow] Jev 命中 command_query',
+    },
+    {
+      name: '两个 yes 并列时不让任何一方定档',
+      answers: { readFile: 0.95, runCommand: 0.95, writeFile: 0.10 },
+      workflow: { choice: 'command_query', confidence: 0.64 },
+      expectMode: 'read_only',
+      forbidLog: '[workflow] Jev 命中 command_query',
+    },
+  ];
+
+  for (const item of cases) {
+    globalThis.fetch = async () => response({
+      model: 'jev-test',
+      answers: {
+        delivery: { type: 'noul', noul: 0.30 },
+        orchestration: {
+          type: 'choice',
+          choice: 'single',
+          probabilities: { single: 0.94, team: 0.06 },
+          confidence: 0.88,
+        },
+        workflow: {
+          type: 'choice',
+          choice: item.workflow.choice,
+          probabilities: {
+            file_edit: item.workflow.choice === 'file_edit' ? item.workflow.confidence : 0.18,
+            file_read: item.workflow.choice === 'file_read' ? item.workflow.confidence : 0.18,
+            command_query: item.workflow.choice === 'command_query' ? item.workflow.confidence : 0.18,
+          },
+          confidence: item.workflow.confidence,
+        },
+        needs_read_file: { type: 'noul', noul: item.answers.readFile },
+        needs_write_file: { type: 'noul', noul: item.answers.writeFile },
+        needs_run_command: { type: 'noul', noul: item.answers.runCommand },
+        needs_approval: { type: 'noul', noul: 0.34 },
+        risk_level: {
+          type: 'choice',
+          choice: 'low',
+          probabilities: { low: 0.41, medium: 0.4, high: 0.15, critical: 0.04 },
+          confidence: 0.41,
+        },
+      },
+      usage: { input_tokens: 17, output_tokens: 8 },
+    });
+    const logs = [];
+    try {
+      const decision = await new WorkflowDecisionService(
+        (line) => logs.push(line),
+        undefined,
+        undefined,
+        getDefaultToolRegistry().getToolCatalog(),
+      ).decide(
+        {
+          apiKey: 'unused',
+          baseUrl: '',
+          model: 'unused',
+          exportDir: '',
+          workspaceRoot: '',
+          jev: { apiKey: 'test-key', minConfidence: 0.78, maxRetries: 0 },
+        },
+        '校验一下所有 st 文件有没有语法错误',
+      );
+      if (decision.mode !== item.expectMode) {
+        throw new Error(
+          `${item.name}: 期望 ${item.expectMode}，实际 ${decision.kind}/${decision.source}/${decision.mode}`,
+        );
+      }
+      if (item.forbidLog && logs.some((line) => line.includes(item.forbidLog))) {
+        throw new Error(`${item.name}: 不该出现 ${item.forbidLog}`);
+      }
+      if (item.expectLog && !logs.some((line) => line.includes(item.expectLog))) {
+        throw new Error(`${item.name}: 缺少 ${item.expectLog}`);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+}
+
 {
   const workflowDecision = await new WorkflowDecisionService().decide(
     {
