@@ -2915,6 +2915,95 @@ function closeClarificationModal(requestId) {
   for (const modal of document.querySelectorAll(selector)) modal.remove();
 }
 
+/*
+ * 澄清弹窗里自定义输入的格式校验。
+ *
+ * 规则和 src/plc/plcRuntimeConfig.ts 的 checkIecIdentifier 必须保持一致：
+ * 任务名会被原样拼进生成的 IEC 源码（TASK / RESOURCE / PROGRAM 三处），
+ * 名字不合法不是风格问题，是编译不过。
+ *
+ * 前端这一份是为了"边打字边提示"，后端那份才是最终判定。前端漏掉的，
+ * 后端还会挡一次，所以这里宁可简单，不要为了覆盖所有边界写复杂逻辑。
+ */
+const IEC_KEYWORDS = new Set([
+  'BOOL', 'SINT', 'INT', 'DINT', 'LINT', 'USINT', 'UINT', 'UDINT', 'ULINT',
+  'REAL', 'LREAL', 'BYTE', 'WORD', 'DWORD', 'LWORD', 'TIME', 'LTIME',
+  'DATE', 'LDATE', 'TIME_OF_DAY', 'TOD', 'LTOD', 'DATE_AND_TIME', 'DT', 'LDT',
+  'STRING', 'WSTRING', 'CHAR', 'WCHAR', 'ARRAY', 'STRUCT', 'UNION', 'ENUM',
+  'SUBRANGE', 'POINTER', 'REFERENCE', 'ANY',
+  'VAR', 'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_GLOBAL', 'VAR_TEMP',
+  'VAR_EXTERNAL', 'VAR_ACCESS', 'VAR_CONFIG', 'VAR_STAT', 'VAR_INST',
+  'RETAIN', 'NON_RETAIN', 'CONSTANT', 'AT', 'END_VAR',
+  'FUNCTION', 'FUNCTION_BLOCK', 'PROGRAM', 'INTERFACE', 'METHOD', 'PROPERTY',
+  'ACTION', 'TRANSITION', 'STEP', 'INITIAL_STEP',
+  'END_FUNCTION', 'END_FUNCTION_BLOCK', 'END_PROGRAM', 'END_INTERFACE',
+  'END_METHOD', 'END_PROPERTY', 'END_ACTION', 'END_TRANSITION', 'END_STEP',
+  'CONFIGURATION', 'END_CONFIGURATION', 'RESOURCE', 'END_RESOURCE',
+  'TASK', 'END_TASK', 'ON', 'WITH', 'INTERVAL', 'PRIORITY', 'SINGLE', 'CYCLIC',
+  'IF', 'THEN', 'ELSIF', 'ELSE', 'END_IF', 'CASE', 'OF', 'END_CASE',
+  'FOR', 'TO', 'BY', 'DO', 'END_FOR', 'WHILE', 'END_WHILE',
+  'REPEAT', 'UNTIL', 'END_REPEAT', 'EXIT', 'RETURN', 'CONTINUE', 'JMP',
+  'AND', 'OR', 'XOR', 'NOT', 'MOD', 'TRUE', 'FALSE', 'NULL',
+  'READ_ONLY', 'READ_WRITE',
+]);
+
+function checkIecIdentifierInput(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '不能为空';
+  if (normalized.length > 128) return '不能超过 128 个字符';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(normalized)) {
+    return '必须字母或下划线开头，只能包含字母、数字和下划线';
+  }
+  const upper = normalized.toUpperCase();
+  if (IEC_KEYWORDS.has(upper)) return `不能使用 IEC 关键字 ${upper}`;
+  return '';
+}
+
+/**
+ * 任务组态那一行自由文本：可能只填周期（20ms），也可能连任务名一起填
+ * （task=MainControlTask, 20ms）。只校验填了的部分，没填的交给后端用候选值。
+ */
+function validateTaskConfigurationInput(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  // 抓到逗号为止：名字里带空格时要整段报错，不能只取第一段当名字，
+  // 否则 "task=has space" 会被当成合法的 "has"。
+  const taskMatch = /(?:task|任务)\s*[=:：]\s*([^,，;；\r\n]*)/iu.exec(raw);
+  if (taskMatch) {
+    const problem = checkIecIdentifierInput(taskMatch[1]);
+    if (problem) return `任务名${problem}`;
+  }
+  const unitMatch = /(\d+(?:\.\d+)?)\s*(ms|s)\b/iu.exec(raw);
+  if (unitMatch) {
+    const value = Number(unitMatch[1]);
+    const milliseconds = unitMatch[2].toLowerCase() === 's' ? value * 1000 : value;
+    if (!Number.isInteger(milliseconds)) return '任务周期必须是整数毫秒，例如 20ms';
+    if (milliseconds < 1 || milliseconds > 60000) return '任务周期必须在 1~60000 ms 之间';
+  }
+  return '';
+}
+
+function validateClarificationInput(rule, text) {
+  if (!rule) return '';
+  const raw = String(text || '').trim();
+  if (rule.type === 'plcTaskConfiguration') return validateTaskConfigurationInput(raw);
+  if (rule.type === 'iecIdentifier') {
+    const problem = checkIecIdentifierInput(raw);
+    return problem ? `${rule.label || '名称'}${problem}` : '';
+  }
+  if (rule.type === 'positiveInteger') {
+    if (!/^\d+$/.test(raw)) return `${rule.label || '数值'}只能是正整数`;
+    const value = Number(raw);
+    const min = Number.isInteger(rule.min) ? rule.min : 1;
+    const unit = rule.unit || '';
+    if (value < min) return `${rule.label || '数值'}不能小于 ${min}${unit}`;
+    if (Number.isInteger(rule.max) && value > rule.max) {
+      return `${rule.label || '数值'}不能大于 ${rule.max}${unit}`;
+    }
+  }
+  return '';
+}
+
 function showClarificationModal(runId, request) {
   const requestId = request?.requestId;
   if (!requestId || document.querySelector(`.clarification-modal[data-clarification-id="${CSS.escape(requestId)}"]`)) {
@@ -3009,6 +3098,12 @@ function showClarificationModal(runId, request) {
     panel.appendChild(skipHint);
   }
 
+  // 格式错误就地提示，别等提交后才由后端回一句"无法解析"——那时候弹窗已经关了。
+  const validationHint = document.createElement('div');
+  validationHint.className = 'clarification-validation-hint';
+  validationHint.hidden = true;
+  panel.appendChild(validationHint);
+
   const actions = document.createElement('div');
   actions.className = 'clarification-actions';
   const cancel = document.createElement('button');
@@ -3069,13 +3164,22 @@ function showClarificationModal(runId, request) {
     optionLabels.forEach((label, index) => {
       label.classList.toggle('selected', optionInputs[index].checked);
     });
+    const problem = customInput
+      ? validateClarificationInput(request.inputValidation, customInput.value)
+      : '';
+    validationHint.textContent = problem;
+    validationHint.hidden = !problem;
+    customInput?.classList.toggle('invalid', !!problem);
+    customInput?.parentElement?.classList.toggle('invalid', !!problem);
     if (!enforceAnswer) {
       confirm.disabled = false;
       return;
     }
     const picked = optionInputs.some((input) => input.checked);
     const typed = (customInput?.value ?? '').trim().length > 0;
-    confirm.disabled = !picked && !typed;
+    // 填了自定义内容就必须合法,哪怕同时选了候选:后端优先用 customText,
+    // 这里放过去的话,非法文本照样会覆盖掉合法选项。
+    confirm.disabled = !!problem || (!picked && !typed);
   };
   for (const input of optionInputs) input.addEventListener('change', syncClarificationState);
   customInput?.addEventListener('input', syncClarificationState);

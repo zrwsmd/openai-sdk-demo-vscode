@@ -132,6 +132,64 @@ export class PlcRuntimeConfigError extends Error {
 const IEC_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const MAX_NAME_LENGTH = 128;
 
+/**
+ * IEC 61131-3 关键字，统一按大写比较（标识符不区分大小写）。
+ *
+ * 任务名、资源名、实例名会被原样拼进生成的 IEC 源码：
+ *   RESOURCE resource_MainTask ON plc
+ *     TASK MainTask(INTERVAL := T#5ms, PRIORITY := 0);
+ *     PROGRAM instance_Main WITH MainTask : Main;
+ * 撞上任何一个关键字，生成的文件本身就是语法错的，matiec 连编译都进不去。
+ * 只收标准里的词，不把厂商扩展算进来，避免误伤合法名字。
+ */
+export const IEC_KEYWORDS: ReadonlySet<string> = new Set([
+  // 类型
+  'BOOL', 'SINT', 'INT', 'DINT', 'LINT', 'USINT', 'UINT', 'UDINT', 'ULINT',
+  'REAL', 'LREAL', 'BYTE', 'WORD', 'DWORD', 'LWORD', 'TIME', 'LTIME',
+  'DATE', 'LDATE', 'TIME_OF_DAY', 'TOD', 'LTOD', 'DATE_AND_TIME', 'DT', 'LDT',
+  'STRING', 'WSTRING', 'CHAR', 'WCHAR', 'ARRAY', 'STRUCT', 'UNION', 'ENUM',
+  'SUBRANGE', 'POINTER', 'REFERENCE', 'ANY',
+  // 声明
+  'VAR', 'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_GLOBAL', 'VAR_TEMP',
+  'VAR_EXTERNAL', 'VAR_ACCESS', 'VAR_CONFIG', 'VAR_STAT', 'VAR_INST',
+  'RETAIN', 'NON_RETAIN', 'CONSTANT', 'AT', 'END_VAR',
+  // POU 与组织单元
+  'FUNCTION', 'FUNCTION_BLOCK', 'PROGRAM', 'INTERFACE', 'METHOD', 'PROPERTY',
+  'ACTION', 'TRANSITION', 'STEP', 'INITIAL_STEP',
+  'END_FUNCTION', 'END_FUNCTION_BLOCK', 'END_PROGRAM', 'END_INTERFACE',
+  'END_METHOD', 'END_PROPERTY', 'END_ACTION', 'END_TRANSITION', 'END_STEP',
+  // 配置
+  'CONFIGURATION', 'END_CONFIGURATION', 'RESOURCE', 'END_RESOURCE',
+  'TASK', 'END_TASK', 'ON', 'WITH', 'INTERVAL', 'PRIORITY', 'SINGLE', 'CYCLIC',
+  // 语句
+  'IF', 'THEN', 'ELSIF', 'ELSE', 'END_IF', 'CASE', 'OF', 'END_CASE',
+  'FOR', 'TO', 'BY', 'DO', 'END_FOR', 'WHILE', 'END_WHILE',
+  'REPEAT', 'UNTIL', 'END_REPEAT', 'EXIT', 'RETURN', 'CONTINUE', 'JMP',
+  // 运算符与字面量
+  'AND', 'OR', 'XOR', 'NOT', 'MOD', 'TRUE', 'FALSE', 'NULL',
+  'READ_ONLY', 'READ_WRITE',
+]);
+
+/**
+ * 校验一个名字能否直接当 IEC 标识符用。返回 undefined 表示通过，
+ * 否则返回一句能直接展示给用户的原因。配置校验和任务组态弹窗共用这一份规则。
+ */
+export function checkIecIdentifier(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) return '不能为空';
+  if (normalized.length > MAX_NAME_LENGTH) {
+    return `不能超过 ${MAX_NAME_LENGTH} 个字符`;
+  }
+  if (!IEC_IDENTIFIER.test(normalized)) {
+    return '必须字母或下划线开头，只能包含字母、数字和下划线';
+  }
+  const upper = normalized.toUpperCase();
+  if (IEC_KEYWORDS.has(upper)) {
+    return `不能使用 IEC 关键字 ${upper}`;
+  }
+  return undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -155,9 +213,8 @@ function optionalString(value: unknown, pathName: string): string | undefined {
 }
 function identifier(value: unknown, pathName: string): string {
   const normalized = requiredString(value, pathName);
-  if (normalized.length > MAX_NAME_LENGTH || !IEC_IDENTIFIER.test(normalized)) {
-    fail(pathName, '必须是 IEC 标识符(A-Z/a-z/数字/下划线，且不能以数字开头)');
-  }
+  const problem = checkIecIdentifier(normalized);
+  if (problem) fail(pathName, problem);
   return normalized;
 }
 function finiteNumber(value: unknown, pathName: string): number {

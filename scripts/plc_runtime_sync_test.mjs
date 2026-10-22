@@ -501,4 +501,72 @@ function clarificationWithCustomText(select, customText) {
   }
 }
 
+// 任务组态自定义输入必须按规则校验：任务名是 IEC 标识符（含关键字黑名单），
+// 周期是 1~60000 的整数毫秒。旧实现里非法输入会静默回落到候选值，
+// 用户以为填的生效了，实际用的是默认任务名和默认周期。
+{
+  const rejected = [
+    { text: 'task=1abc, 20ms', expect: '任务名不合法' },
+    { text: 'task=TASK, 20ms', expect: '任务名不合法' },
+    { text: 'task=my-task, 20ms', expect: '任务名不合法' },
+    { text: 'task=has space, 20ms', expect: '任务名不合法' },
+    { text: '20.5ms', expect: '整数毫秒' },
+    { text: '0ms', expect: '1~60000' },
+    { text: '99999ms', expect: '1~60000' },
+  ];
+  for (const item of rejected) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-task-validation-'));
+    const fake = clarificationWithCustomText(
+      (request) => request.options.find((option) => option.id.startsWith('create:'))?.id,
+      item.text,
+    );
+    let message = '';
+    try {
+      await preparePlcRuntimeConfigSync({
+        workspaceRoot: dir,
+        source: 'Pump.st',
+        content: 'PROGRAM Pump\nEND_PROGRAM\n',
+        taskSuggestionProvider: async () => [
+          { taskGroup: 'main_control', periodMs: 20, reason: '常规控制。' },
+        ],
+        clarification: fake.service,
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    if (!message.includes(item.expect)) {
+      throw new Error(
+        `任务组态自定义输入「${item.text}」没有按规则拒绝: ${message || '未报错'}`,
+      );
+    }
+  }
+
+  // 正例：秒单位换算后仍是整数毫秒；裸数字按毫秒处理；下划线开头合法。
+  const accepted = [
+    { text: 'task=MainTask, 0.5s', taskName: 'MainTask', periodMs: 500 },
+    { text: 'task=_aux, 20', taskName: '_aux', periodMs: 20 },
+  ];
+  for (const item of accepted) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'plc-task-validation-ok-'));
+    const fake = clarificationWithCustomText(
+      (request) => request.options.find((option) => option.id.startsWith('create:'))?.id,
+      item.text,
+    );
+    const plan = await preparePlcRuntimeConfigSync({
+      workspaceRoot: dir,
+      source: 'Pump.st',
+      content: 'PROGRAM Pump\nEND_PROGRAM\n',
+      taskSuggestionProvider: async () => [
+        { taskGroup: 'main_control', periodMs: 20, reason: '常规控制。' },
+      ],
+      clarification: fake.service,
+    });
+    if (!plan || plan.taskName !== item.taskName || plan.periodMs !== item.periodMs) {
+      throw new Error(
+        `任务组态自定义输入「${item.text}」解析错误: ${JSON.stringify(plan)}`,
+      );
+    }
+  }
+}
+
 console.log('plc runtime sync tests passed');

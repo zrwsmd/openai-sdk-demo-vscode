@@ -4,10 +4,12 @@ import { z } from 'zod';
 import { agentLog, buildModelAdapter } from '../runtime/modelGateway';
 import type { AgentConfig } from '../runtime/agentConfig';
 import { collectWorkspaceStContext } from '../analysis/workspaceStContext';
+import type { ClarificationInputValidation } from '../runtime/clarification';
 import { WorkspaceScope } from '../workspace/workspaceScope';
 import {
   PLC_RUNTIME_CONFIG_SCHEMA_VERSION,
   PlcRuntimeConfigError,
+  checkIecIdentifier,
   type PlcIecSourceConfig,
   type PlcPouConfig,
   type PlcRuntimeConfig,
@@ -49,6 +51,8 @@ export interface PlcClarificationService {
       options?: readonly PlcClarificationOption[];
       allowCustom?: boolean;
       customPlaceholder?: string;
+      /** 自定义输入的格式规则，由弹窗就地校验；省略时只做非空检查。 */
+      inputValidation?: ClarificationInputValidation;
       required?: boolean;
       metadata?: Record<string, unknown>;
     },
@@ -456,34 +460,111 @@ export async function suggestPlcTaskOptions(
   }
 }
 
+/**
+ * 任务周期的合法区间。软 PLC 上 1ms 已经是宿主循环和 EtherCAT 周期的极限，
+ * 再小没有意义;60s 以上属于事件驱动场景,不该用周期任务表达。
+ */
+const TASK_PERIOD_MIN_MS = 1;
+const TASK_PERIOD_MAX_MS = 60_000;
+const TASK_PRIORITY_MAX = 31;
+
+type CustomSelectionResult =
+  | { selection: Extract<Selection, { action: 'create_config' | 'create_task' }> }
+  | { error: string }
+  | undefined;
+
+/**
+ * 解析弹窗里的一行自定义输入。和旧实现的区别是"错在哪"要说清楚:
+ * 以前非法输入会静默回落到 fallback,用户以为填生效了,实际用的是默认值。
+ */
 function parseCustomSelection(
   text: string | undefined,
   fallback: Extract<Selection, { action: 'create_config' | 'create_task' }>,
   periodFallback?: number,
-): Extract<Selection, { action: 'create_config' | 'create_task' }> | undefined {
+): CustomSelectionResult {
   const raw = String(text ?? '').trim();
   if (!raw) return undefined;
-  const ms = /(\d+(?:\.\d+)?)\s*ms\b/iu.exec(raw);
-  const seconds = /(\d+(?:\.\d+)?)\s*s\b/iu.exec(raw);
-  const periodMs = ms
-    ? Number(ms[1])
-    : seconds
-      ? Number(seconds[1]) * 1000
-      : periodFallback ?? fallback.periodMs;
-  if (!periodMs || !Number.isFinite(periodMs) || periodMs <= 0) return undefined;
-  const taskName = /(?:task|任务)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
-    fallback.taskName;
-  const deviceId = /(?:device|设备)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)/iu.exec(raw)?.[1] ??
-    fallback.deviceId;
-  const priority = /(?:priority|优先级)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
-  const cpuCore = /(?:cpu|core|核心)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
+
+  // 任务名先宽松抓出等号后面到分隔符为止的整段,再按标识符规则校验。用严格正则
+  // 直接抓会漏掉"task=1abc"这种写错的名字,然后静默用 fallback,用户完全不知道。
+  // 抓到逗号而不是空格:名字里带空格时要整段报错,不能只取第一段当名字。
+  const taskMatch = /(?:task|任务)\s*[=:：]\s*([^,，;；\r\n]*)/iu.exec(raw);
+  let taskName = fallback.taskName;
+  if (taskMatch) {
+    const candidate = taskMatch[1].trim();
+    const problem = checkIecIdentifier(candidate);
+    if (problem) return { error: `任务名不合法：${problem}。` };
+    taskName = candidate;
+  }
+
+  const deviceMatch = /(?:device|设备)\s*[=:：]\s*([^,，;；\r\n]*)/iu.exec(raw);
+  let deviceId = fallback.deviceId;
+  if (deviceMatch) {
+    const candidate = deviceMatch[1].trim();
+    const problem = checkIecIdentifier(candidate);
+    if (problem) return { error: `设备 id 不合法：${problem}。` };
+    deviceId = candidate;
+  }
+
+  // 周期:带单位的优先;没有单位时,从"去掉所有 key=value 片段"的剩余文本里
+  // 找唯一一个裸数字,避免把 priority=1 里的 1 当成周期。
+  const unitMatch = /(\d+(?:\.\d+)?)\s*(ms|s)\b/iu.exec(raw);
+  let periodMs = periodFallback ?? fallback.periodMs;
+  if (unitMatch) {
+    const value = Number(unitMatch[1]);
+    const unit = unitMatch[2].toLowerCase();
+    const milliseconds = unit === 's' ? value * 1000 : value;
+    if (!Number.isFinite(milliseconds) || !Number.isInteger(milliseconds)) {
+      return {
+        error: `任务周期必须是整数毫秒，收到 ${unitMatch[0].trim()}。`,
+      };
+    }
+    if (milliseconds < TASK_PERIOD_MIN_MS || milliseconds > TASK_PERIOD_MAX_MS) {
+      return {
+        error:
+          `任务周期必须在 ${TASK_PERIOD_MIN_MS}~${TASK_PERIOD_MAX_MS} ms 之间，` +
+          `收到 ${milliseconds} ms。`,
+      };
+    }
+    periodMs = milliseconds;
+  } else {
+    const withoutAssignments = raw.replace(
+      /[A-Za-z_\u4e00-\u9fa5]+\s*[=:：]\s*[^\s,，;；]*/gu,
+      ' ',
+    );
+    const bareMatch = /(?:^|[\s,，;；])(\d+)(?=$|[\s,，;；])/u.exec(withoutAssignments);
+    if (bareMatch) {
+      const milliseconds = Number(bareMatch[1]);
+      if (milliseconds < TASK_PERIOD_MIN_MS || milliseconds > TASK_PERIOD_MAX_MS) {
+        return {
+          error:
+            `任务周期必须在 ${TASK_PERIOD_MIN_MS}~${TASK_PERIOD_MAX_MS} ms 之间，` +
+            `收到 ${milliseconds} ms。`,
+        };
+      }
+      periodMs = milliseconds;
+    }
+  }
+
+  const priorityText = /(?:priority|优先级)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
+  if (priorityText !== undefined) {
+    const priority = Number(priorityText);
+    if (priority > TASK_PRIORITY_MAX) {
+      return { error: `任务优先级必须在 0~${TASK_PRIORITY_MAX} 之间，收到 ${priority}。` };
+    }
+  }
+  const cpuCoreText = /(?:cpu|core|核心)\s*[=:：]\s*(\d+)/iu.exec(raw)?.[1];
+  const priority = priorityText ? Number(priorityText) : fallback.priority;
+  const cpuCore = cpuCoreText ? Number(cpuCoreText) : fallback.cpuCore;
   return {
-    ...fallback,
-    taskName,
-    deviceId,
-    periodMs,
-    priority: priority ? Number(priority) : fallback.priority,
-    cpuCore: cpuCore ? Number(cpuCore) : fallback.cpuCore,
+    selection: {
+      ...fallback,
+      taskName,
+      deviceId,
+      periodMs,
+      priority,
+      cpuCore,
+    },
   };
 }
 
@@ -1029,6 +1110,9 @@ export async function preparePlcRuntimeConfigSync(
     options: choices,
     allowCustom: true,
     customPlaceholder,
+    // 弹窗按这条规则就地校验:任务名走 IEC 标识符(含关键字黑名单),周期只能是正整数毫秒。
+    // 只靠后端解析的话,用户填错要提交完才看到一句"无法解析",还得重来一遍。
+    inputValidation: { type: 'plcTaskConfiguration' },
     required: true,
     metadata: {
       source,
@@ -1046,11 +1130,13 @@ export async function preparePlcRuntimeConfigSync(
       (selectedSelection.action === 'create_config' || selectedSelection.action === 'create_task')
       ? selectedSelection
       : createFallback;
-    selection = parseCustomSelection(
+    const parsed = parseCustomSelection(
       response.customText,
       customFallback,
       requested.periodMs,
     );
+    if (parsed && 'error' in parsed) throw new PlcRuntimeConfigError(parsed.error);
+    selection = parsed?.selection;
   }
   if (!selection) {
     throw new PlcRuntimeConfigError('无法解析任务组态选择，请选择候选项或填写类似 "20ms, priority=1, cpu=1" 的答案。');

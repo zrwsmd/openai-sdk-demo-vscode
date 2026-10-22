@@ -1280,6 +1280,16 @@ body.settings-open { overflow: hidden; }
   font: inherit;
 }
 .clarification-custom:focus { outline: none; }
+/* 输入不合法时整行描红,配合下面的错误文案;只改输入框边框不够显眼。 */
+.clarification-custom-row.invalid {
+  border-color: var(--vscode-errorForeground, #f66);
+}
+.clarification-validation-hint {
+  margin-top: 6px;
+  color: var(--vscode-errorForeground, #f66);
+  font-size: 11px;
+  line-height: 1.45;
+}
 .clarification-actions {
   display: flex;
   justify-content: flex-end;

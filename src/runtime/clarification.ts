@@ -12,6 +12,27 @@ export interface ClarificationOption {
   value?: unknown;
 }
 
+/**
+ * 自定义输入的校验规则。只允许枚举类型，不让调用方传正则：
+ * 规则要在前端和后端保持一致，正则字符串在 JSON 里转义一次就走样了。
+ */
+export type ClarificationInputValidation =
+  | {
+      type: 'iecIdentifier';
+      label?: string;
+    }
+  | {
+      type: 'positiveInteger';
+      label?: string;
+      min?: number;
+      max?: number;
+      unit?: string;
+    }
+  | {
+      /** 任务组态那一行自由文本:里面可能同时有 task=xxx 和 20ms。 */
+      type: 'plcTaskConfiguration';
+    };
+
 export interface ClarificationStep {
   id: string;
   title?: string;
@@ -20,6 +41,7 @@ export interface ClarificationStep {
   options?: readonly ClarificationOption[];
   allowCustom?: boolean;
   customPlaceholder?: string;
+  inputValidation?: ClarificationInputValidation;
   required?: boolean;
 }
 
@@ -32,6 +54,7 @@ export interface ClarificationRequest {
   options?: readonly ClarificationOption[];
   allowCustom?: boolean;
   customPlaceholder?: string;
+  inputValidation?: ClarificationInputValidation;
   required?: boolean;
   metadata?: Record<string, unknown>;
   /** 多步骤澄清；省略时保持原有单步骤行为。 */

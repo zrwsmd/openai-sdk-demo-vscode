@@ -741,6 +741,7 @@ export class RunCoordinator {
       options: [...(request.options ?? [])],
       allowCustom: request.allowCustom !== false,
       ...(request.customPlaceholder ? { customPlaceholder: request.customPlaceholder } : {}),
+      ...(request.inputValidation ? { inputValidation: request.inputValidation } : {}),
       required: request.required !== false,
       ...(request.metadata ? { metadata: request.metadata } : {}),
       ...(sequence

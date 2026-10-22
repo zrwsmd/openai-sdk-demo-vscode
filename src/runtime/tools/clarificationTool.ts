@@ -13,6 +13,19 @@ const optionSchema = z.object({
   value: z.string().optional().describe('选项对应的结构化值；复杂值请用 JSON 字符串'),
 });
 
+const validationSchema = z.object({
+  type: z
+    .enum(['iecIdentifier', 'positiveInteger', 'plcTaskConfiguration'])
+    .describe(
+      '输入校验类型。iecIdentifier: 字母或下划线开头、只含字母数字下划线、不能是 IEC 关键字；' +
+        'positiveInteger: 正整数；plcTaskConfiguration: 任务组态那一行自由文本。',
+    ),
+  label: z.string().optional().describe('字段名，用在错误提示里，例如“任务名”'),
+  min: z.number().int().optional().describe('positiveInteger 的最小值'),
+  max: z.number().int().optional().describe('positiveInteger 的最大值'),
+  unit: z.string().optional().describe('positiveInteger 的单位，例如 ms'),
+});
+
 const stepSchema = z.object({
   id: z.string().min(1).describe('步骤答案的稳定字段名，例如 projectType 或 projectName'),
   title: z.string().optional().describe('该步骤的标题，可省略并沿用总标题'),
@@ -21,6 +34,9 @@ const stepSchema = z.object({
   options: z.array(optionSchema).max(8).optional().describe('该步骤的候选选项'),
   allowCustom: z.boolean().optional().describe('该步骤是否允许自定义输入，默认允许'),
   customPlaceholder: z.string().optional().describe('该步骤自定义输入框提示'),
+  validation: validationSchema.optional().describe(
+    '自定义输入的格式要求。用户填错时弹窗会就地提示并禁用提交，不要用文字描述规则代替它。',
+  ),
   required: z.boolean().optional().describe('该步骤是否必须回答，默认是'),
 });
 
@@ -44,6 +60,9 @@ export function createClarificationTool(ctx: ToolBuildContext) {
       options: z.array(optionSchema).max(8).optional().describe('给用户的候选选项，可省略'),
       allowCustom: z.boolean().optional().describe('是否允许用户填写自定义答案，默认允许'),
       customPlaceholder: z.string().optional().describe('自定义输入框提示文字'),
+      validation: validationSchema.optional().describe(
+        '单步骤自定义输入的格式要求；使用 steps 时请放到对应步骤内。',
+      ),
       required: z.boolean().optional().describe('是否必须回答才能继续，默认是'),
       steps: z.array(stepSchema).min(1).max(16).optional().describe(
         '多个需要依次确认的步骤；每个步骤必须有唯一 id 和 question。已经明确的字段不要放进来。',
@@ -79,6 +98,7 @@ export function createClarificationTool(ctx: ToolBuildContext) {
             ...(!steps.length && input.options?.length ? { options: input.options } : {}),
             allowCustom: input.allowCustom !== false,
             ...(input.customPlaceholder ? { customPlaceholder: input.customPlaceholder } : {}),
+            ...(input.validation ? { inputValidation: input.validation } : {}),
             required: input.required !== false,
             ...(steps.length ? {
               steps: steps.map((step) => ({
@@ -89,6 +109,7 @@ export function createClarificationTool(ctx: ToolBuildContext) {
                 ...(step.options?.length ? { options: step.options } : {}),
                 allowCustom: step.allowCustom !== false,
                 ...(step.customPlaceholder ? { customPlaceholder: step.customPlaceholder } : {}),
+                ...(step.validation ? { inputValidation: step.validation } : {}),
                 required: step.required !== false,
               })),
             } : {}),
