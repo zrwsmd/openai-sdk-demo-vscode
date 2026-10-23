@@ -103,6 +103,12 @@ import {
  *                   {type:'mcpStatus', name, status, error?, toolCount?}
  *                   {type:'pluginCommandResult', actionKey, ok, error?}(工具动作执行回执)
  */
+/** 日志里只留够分辨是哪一段的信息，不把代码全文写进输出通道。 */
+function describeClipboardText(value: string): string {
+  const head = value.replace(/\s+/gu, ' ').trim().slice(0, 24);
+  return `${value.length} 字符「${head}${value.trim().length > 24 ? '…' : ''}」`;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private coordinator?: RunCoordinator;
@@ -130,6 +136,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Session-specific roots restored from persisted chat or project handoff state. */
   private readonly sessionWorkspaceRoots = new Map<string, string[]>();
   private mcpProbeGeneration = 0;
+  /**
+   * 剪贴板写入必须排队。
+   *
+   * 用户连着点两个代码块的复制时，两次 writeText 会并发。内容长的那个可能后完成，
+   * 于是最后落进剪贴板的是先点的那份——界面上最新那个按钮已经打勾，粘出来却是旧内容。
+   * 这里把写入串成一条链，并且只保留最新一次：排队中被更新的一次取代，直接跳过。
+   */
+  private clipboardWriteChain: Promise<void> = Promise.resolve();
+  private clipboardLatestToken = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     // Keep run/session/effect state isolated per workspace. A no-folder chat
@@ -236,6 +251,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * 复制走宿主：webview 的 navigator.clipboard 受 iframe 焦点和权限限制，
    * execCommand 失败时又只返回 false 不报错，只有 vscode.env.clipboard 是可靠的。
    * 回执直接发给发请求的那个 webview，避免多实例时发错对象。
+   *
+   * 写入按请求顺序串行执行，排队期间被更新的一次取代：用户连点两个代码块时，
+   * 最终落在剪贴板里的必须是他最后点的那份，不能是内容更长、写得更慢的前一份。
    */
   private async copyTextToClipboard(
     target: vscode.Webview,
@@ -244,15 +262,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     const id = typeof requestId === 'number' ? requestId : undefined;
     const value = typeof text === 'string' ? text : '';
-    try {
-      await vscode.env.clipboard.writeText(value);
-      this.log.appendLine(`[clipboard] 已复制 ${value.length} 字符`);
-      void target.postMessage({ type: 'copyTextResult', requestId: id, ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.log.appendLine(`[clipboard] 写入剪贴板失败: ${message}`);
-      void target.postMessage({ type: 'copyTextResult', requestId: id, ok: false, error: message });
-    }
+    const token = ++this.clipboardLatestToken;
+    const run = this.clipboardWriteChain.then(async () => {
+      if (token !== this.clipboardLatestToken) {
+        this.log.appendLine(
+          `[clipboard] #${id ?? '-'} 跳过 ${describeClipboardText(value)}：已有更新的一次复制`,
+        );
+        void target.postMessage({ type: 'copyTextResult', requestId: id, ok: true });
+        return;
+      }
+      try {
+        await vscode.env.clipboard.writeText(value);
+        this.log.appendLine(`[clipboard] #${id ?? '-'} 已复制 ${describeClipboardText(value)}`);
+        void target.postMessage({ type: 'copyTextResult', requestId: id, ok: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.appendLine(`[clipboard] 写入剪贴板失败: ${message}`);
+        void target.postMessage({ type: 'copyTextResult', requestId: id, ok: false, error: message });
+      }
+    });
+    this.clipboardWriteChain = run.catch(() => {});
+    await run;
   }
 
   async clear(): Promise<void> {

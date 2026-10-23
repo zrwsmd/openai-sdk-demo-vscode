@@ -1843,10 +1843,12 @@ function copyTextToClipboard(text) {
   const value = String(text ?? '');
   const requestId = ++copyRequestSeq;
   return new Promise((resolve, reject) => {
+    // 宿主那边写入是排队的：连点两个代码块时，第二次要等第一次写完。
+    // 超时给短了，大代码块排在后面还没轮到就被判失败。
     const timer = setTimeout(() => {
       pendingCopyRequests.delete(requestId);
       reject(new Error('复制超时'));
-    }, 3000);
+    }, 8000);
     pendingCopyRequests.set(requestId, { resolve, reject, timer });
     vscode.postMessage({ type: 'copyText', text: value, requestId });
   });
@@ -2036,6 +2038,8 @@ function renderMarkdownBlock(block) {
       button.classList.toggle('active', wrapper.classList.contains('soft-wrap'));
     });
     const copyButton = createCodeAction('⧉', '复制代码', async (button) => {
+      if (copyButton.dataset.copying === '1') return;
+      copyButton.dataset.copying = '1';
       try {
         await copyTextToClipboard(block.text);
         button.textContent = '✓';
@@ -2051,6 +2055,8 @@ function renderMarkdownBlock(block) {
           button.textContent = '⧉';
           button.classList.remove('failed');
         }, 1200);
+      } finally {
+        delete copyButton.dataset.copying;
       }
     });
     actions.append(wrapButton, copyButton);
