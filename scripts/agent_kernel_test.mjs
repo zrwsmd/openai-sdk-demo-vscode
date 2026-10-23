@@ -1148,11 +1148,57 @@ async function runTestTurn(
   if (!r.output.includes('语法错误 0 个')) {
     throw new Error('收尾轮的正文没有直接作为最终输出');
   }
-  if (!fresh.some((line) => line.includes('交付收尾轮按正文收下'))) {
+  if (!fresh.some((line) => line.includes('按正文收下'))) {
     throw new Error('收尾轮没有走正文直收分支');
   }
   if (fresh.some((line) => line.includes('收尾请求失败'))) {
     throw new Error('收尾轮不该再触发结构化重写');
+  }
+}
+
+// [3h] 通用交付（有交付契约、没有工作流）的最后一轮写普通正文时，
+// 正文就是给用户的结论，同样不该再被结构化收尾器重写一遍。
+{
+  const asked = [];
+  const before = diagLines.length;
+  const plainContract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码并保存到工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
+    }],
+  });
+  const r = await runTestTurn(
+    '通用交付正文回归',
+    async (name) => {
+      asked.push(name);
+      return true;
+    },
+    { deliveryContract: plainContract },
+    new JsonFileSession(path.join(dir, 'generic-plain-delivery-session.json')),
+  );
+  const fresh = diagLines.slice(before);
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3h] 通用交付收尾:工具链 =', toolCalls.join(','), '| 正文 =', r.output.split('\n')[0]);
+  if (toolCalls.join(',') !== 'validate_st_code,commit_st_delivery,write_file') {
+    throw new Error('通用交付没有走完校验、提交、落盘');
+  }
+  if (!r.output.includes('语法错误 0 个')) {
+    throw new Error('通用交付的正文没有直接作为最终输出');
+  }
+  if (!fresh.some((line) => line.includes('按正文收下'))) {
+    throw new Error('通用交付没有走正文直收分支');
+  }
+  if (fresh.some((line) => line.includes('收尾请求失败'))) {
+    throw new Error('通用交付不该再触发结构化重写');
   }
 }
 

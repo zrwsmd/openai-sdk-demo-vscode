@@ -2057,6 +2057,12 @@ export async function runAgent(
     },
   });
 
+  // 交付轮次（工作流已交付完，或这轮带交付契约）里模型写的那段正文就是给用户看的结论。
+  // 交付是否成立由完成门控按工具证据判定，不需要再让它把同一段话改写成 JSON；
+  // 真缺东西的时候门控会带着修复指令让它续跑，所以这里放宽不会漏掉未完成的交付。
+  const deliveryBodyIsFinal = (): boolean =>
+    workflowCompleted || options.deliveryContract?.requiresDeliverable === true;
+
   const pump = async (
     stream: StreamedRunResult<any, any>,
   ): Promise<"done" | "empty-bailed" | "cancelled"> => {
@@ -2078,7 +2084,8 @@ export async function runAgent(
         bailed = true;
       } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
         salvagedInvalidFinalOutput = true;
-        finalizerRequired = true;
+        // 交付轮的正文已经是结论，别再逼它改写一次 JSON。
+        finalizerRequired = !deliveryBodyIsFinal();
       } else {
         throw e;
       }
@@ -2099,8 +2106,8 @@ export async function runAgent(
           bailed = true;
         } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
           salvagedInvalidFinalOutput = true;
-          // 交付收尾轮不重写：这一轮只是总结，SDK 的 schema 校验失败照收正文。
-          finalizerRequired = !workflowCompleted;
+          // 交付轮不重写：这一轮只是总结，SDK 的 schema 校验失败照收正文。
+          finalizerRequired = !deliveryBodyIsFinal();
         } else {
           throw e;
         }
@@ -2128,14 +2135,15 @@ export async function runAgent(
           structuredOutput = sanitizeAssistantOutput(
             parsed.data as IndustrialAgentOutput,
           );
-        } else if (workflowCompleted) {
-          // 交付收尾轮：交付物已经齐了、工具已经收起，这一轮模型只是在写总结。
-          // 它不会再产生诊断和产物，按 schema 重写一次什么也拿不到，只会把模型
-          // 自己写的总结换成账本拼出来的话。所以这里不做 schema 校验，正文照收。
+        } else if (deliveryBodyIsFinal()) {
+          // 交付轮：交付物已经齐了（工作流跑完），或者这轮本来就带着交付契约。
+          // 这一轮模型只是在写总结，不会再产生诊断和产物，按 schema 重写一次
+          // 什么也拿不到，只会把模型自己写的总结换成账本拼出来的话。
+          // 所以这里不做 schema 校验，正文照收；交付成不成立交给完成门控判。
           const coerced = coerceIndustrialAgentOutput(finalOutput);
           if (coerced) {
             structuredOutput = sanitizeAssistantOutput(coerced);
-            agentLog("[output] 交付收尾轮按正文收下，不再要求结构化输出");
+            agentLog("[output] 交付轮按正文收下，不再要求结构化输出");
           } else {
             finalizerRequired = true;
           }
@@ -2174,7 +2182,7 @@ export async function runAgent(
       !structuredOutput &&
       output.trim()
     ) {
-      finalizerRequired = !workflowCompleted;
+      finalizerRequired = !deliveryBodyIsFinal();
       const invalidStructuredText = isInvalidStructuredOutputText(output);
       if (!invalidStructuredText) {
         structuredOutput = coerceIndustrialAgentOutput(output) ?? {

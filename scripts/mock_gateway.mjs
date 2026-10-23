@@ -513,6 +513,17 @@ const server = http.createServer((req, res) => {
     ) {
       // 交付已完成、工具已收起，这一轮只写一段正文总结，不包 JSON。
       await streamText(res, model, '已校验并保存 PumpControl.st，语法错误 0 个。');
+    } else if (userText.includes('通用交付正文回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('通用交付正文回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      // 有交付契约、没有工作流：最后一轮同样只写正文，不包 JSON。
+      await streamText(res, model, '已校验并保存 PumpControl.st，语法错误 0 个。');
     } else if (
       userText.includes('ST草稿修正回归') &&
       hasAssistantToolCall('write_file')
