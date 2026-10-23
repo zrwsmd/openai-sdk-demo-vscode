@@ -1834,27 +1834,31 @@ function appendInlineMarkdown(parent, text) {
   inlineTextNode(parent, source.slice(cursor));
 }
 
+// 剪贴板交给宿主写。webview 是 iframe，navigator.clipboard 要看焦点和权限，
+// execCommand('copy') 失败时只返回 false 不抛错，两条路都会出现「点了变 ✓、粘出来是空」。
+let copyRequestSeq = 0;
+const pendingCopyRequests = new Map();
+
 function copyTextToClipboard(text) {
   const value = String(text ?? '');
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(value);
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = value;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  textarea.style.pointerEvents = 'none';
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    document.execCommand('copy');
-    return Promise.resolve();
-  } catch (error) {
-    return Promise.reject(error);
-  } finally {
-    textarea.remove();
-  }
+  const requestId = ++copyRequestSeq;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingCopyRequests.delete(requestId);
+      reject(new Error('复制超时'));
+    }, 3000);
+    pendingCopyRequests.set(requestId, { resolve, reject, timer });
+    vscode.postMessage({ type: 'copyText', text: value, requestId });
+  });
+}
+
+function resolveCopyRequest(msg) {
+  const pending = pendingCopyRequests.get(msg.requestId);
+  if (!pending) return;
+  pendingCopyRequests.delete(msg.requestId);
+  clearTimeout(pending.timer);
+  if (msg.ok) pending.resolve();
+  else pending.reject(new Error(typeof msg.error === 'string' ? msg.error : '复制失败'));
 }
 
 function createCodeAction(label, title, onClick) {
@@ -3857,6 +3861,9 @@ window.addEventListener('message', (event) => {
     return;
   }
   switch (msg.type) {
+    case 'copyTextResult':
+      resolveCopyRequest(msg);
+      break;
     case 'preflight':
       showPreflightStage(msg);
       setRuntimeMode('running');

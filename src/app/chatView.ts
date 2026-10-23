@@ -216,6 +216,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           Array.isArray(msg.args) ? msg.args : [],
           typeof msg.actionKey === 'string' ? msg.actionKey : '',
         );
+      } else if (msg.type === 'copyText') {
+        void this.copyTextToClipboard(msg.text, msg.requestId);
       }
     });
 
@@ -225,6 +227,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.log.appendLine(`[recovery] ${message}`);
         this.post({ type: 'error', message });
       });
+  }
+
+  /**
+   * 复制走宿主：webview 的 navigator.clipboard 受 iframe 焦点和权限限制，
+   * execCommand 失败时又只返回 false 不报错，只有 vscode.env.clipboard 是可靠的。
+   */
+  private async copyTextToClipboard(text: unknown, requestId: unknown): Promise<void> {
+    const id = typeof requestId === 'number' ? requestId : undefined;
+    try {
+      await vscode.env.clipboard.writeText(typeof text === 'string' ? text : '');
+      this.post({ type: 'copyTextResult', requestId: id, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.appendLine(`[clipboard] 写入剪贴板失败: ${message}`);
+      this.post({ type: 'copyTextResult', requestId: id, ok: false, error: message });
+    }
   }
 
   async clear(): Promise<void> {
