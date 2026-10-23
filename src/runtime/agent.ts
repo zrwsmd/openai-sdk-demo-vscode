@@ -668,8 +668,7 @@ export async function runAgent(
   let workflowCompleted = false;
   let workflowCompletionLogged = false;
   // 工作流完成之后模型仍会反复尝试调用已经被拦的业务工具，每次都是一整轮模型往返。
-  // 完成的那一刻掐断当前 run，剩下的结果按工具账本合成，不再把控制权交回模型。
-  let completionCutController: AbortController | undefined;
+  // 完成的那一刻把工具从 agent 上摘掉，模型下一轮没有工具可调，只能写总结。
   let completionCut = false;
   const workflowToolNames =
     workflowBusinessToolPolicy?.mode === "allow_list"
@@ -1506,16 +1505,14 @@ export async function runAgent(
         `[workflow] ${workflowRuntime.title} 已完成，后续 workflow 工具调用将被阻止以避免重复执行`,
       );
     }
-    // 只在有 run 正在进行时掐断；跑完之后的调用（恢复、完成判定）不受影响。
-    if (completionCutController && !completionCut) {
+    // 摘掉工具而不是掐断这一轮：模型还会被叫一次，但它没有工具可调，
+    // 只能把这一轮写成总结，用户看到的就是模型自己写的话，不是工作流自带的完成语。
+    if (!completionCut) {
       completionCut = true;
       agentLog(
-        `[workflow] ${workflowRuntime.title} 已交付完成，结束本轮模型往返，直接按工具账本收尾`,
+        `[workflow] ${workflowRuntime.title} 已交付完成，收起工具，让模型直接写总结`,
       );
-      // 推到下一轮事件循环再掐：此刻还在这条工具调用的栈里，
-      // 立刻 abort 会把工具回执的落盘一起打断，断点恢复就丢了。
-      const controller = completionCutController;
-      setTimeout(() => controller.abort(), 0);
+      agent.tools = [];
     }
   };
 
@@ -2028,9 +2025,7 @@ export async function runAgent(
     try {
       await protocolAdapter.consume(stream);
     } catch (e) {
-      if (completionCut && !options.signal?.aborted) {
-        // 运行时主动掐断：工作流已经交付完成，不再让模型继续试被拦的工具。
-      } else if (
+      if (
         isAgentCancellationError(e) ||
         options.signal?.aborted ||
         stream.cancelled
@@ -2051,9 +2046,7 @@ export async function runAgent(
       try {
         await stream.completed;
       } catch (e) {
-        if (completionCut && !options.signal?.aborted) {
-          // 同上：掐断造成的错误不算取消。
-        } else if (
+        if (
           isAgentCancellationError(e) ||
           options.signal?.aborted ||
           stream.cancelled
@@ -2325,17 +2318,12 @@ export async function runAgent(
 
     const turnInput = state ?? runtimeReminderInput ?? userText;
     runtimeReminderInput = undefined;
-    // 独立的中断开关：用户取消走 options.signal，工作流收尾走这里，两者不能混。
-    const cutController = new AbortController();
-    const forwardUserAbort = (): void => cutController.abort();
-    options.signal?.addEventListener("abort", forwardUserAbort, { once: true });
-    completionCutController = cutController;
     const stream = await runner.run(agent, turnInput, {
       stream: true,
       maxTurns: modelTurnLimit,
       session: runnerSession,
       ...(sessionInputCallback ? { sessionInputCallback } : {}),
-      signal: cutController.signal,
+      signal: options.signal,
     });
     let outcome: "done" | "empty-bailed" | "cancelled";
     try {
@@ -2447,10 +2435,9 @@ export async function runAgent(
     }
 
     if (
-      !completionCut &&
-      (outcome === "cancelled" ||
-        options.signal?.aborted ||
-        stream.cancelled)
+      outcome === "cancelled" ||
+      options.signal?.aborted ||
+      stream.cancelled
     ) {
       let resumableState: string | undefined;
       try {
@@ -2469,12 +2456,6 @@ export async function runAgent(
         status: "cancelled",
         state: resumableState,
       };
-    }
-    if (completionCut && workflowCompleted && !structuredOutput) {
-      // 掐断的那一轮本来就没有最终输出，直接用工具账本合成，
-      // 不再多花一次收尾调用去问模型要 JSON。
-      structuredOutput = synthesizeStructuredOutputFromEvidence();
-      if (structuredOutput) outcome = "done";
     }
     if (
       requiredActionTool &&
