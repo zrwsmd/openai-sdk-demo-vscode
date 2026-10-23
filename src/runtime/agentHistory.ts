@@ -543,6 +543,38 @@ function resourceMentionedInText(
   return Boolean(basename && basename.length > 2 && normalizedText.includes(basename));
 }
 
+function isAbsoluteReference(reference: string): boolean {
+  return /^[a-z]:\//u.test(reference) || reference.startsWith("//");
+}
+
+/**
+ * 同一个文件会有两种写法：工作区相对路径和绝对路径。
+ *
+ * 历史里一处记成相对路径、一处记成绝对路径，其实是同一个文件，不能算成两个候选。
+ * 判据是短的必须不是绝对路径，且长的以「/短」结尾——相对路径都是相对工作区根写的，
+ * 这个关系成立。
+ */
+function isSameFileReference(left: string, right: string): boolean {
+  if (left === right) return true;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = shorter === left ? right : left;
+  if (isAbsoluteReference(shorter)) return false;
+  return longer.endsWith(`/${shorter}`);
+}
+
+/** 把指向同一文件的写法归成一组，每组保留原始写法。 */
+function groupSameFileReferences(references: readonly string[]): string[][] {
+  const groups: string[][] = [];
+  for (const reference of references) {
+    const group = groups.find((items) =>
+      items.some((item) => isSameFileReference(item, reference)),
+    );
+    if (group) group.push(reference);
+    else groups.push([reference]);
+  }
+  return groups;
+}
+
 /**
  * Reject only a conservative class of stale tool arguments:
  * a file/path-like value appeared in older turns, is copied into the new
@@ -567,6 +599,8 @@ export function createHistoricalToolArgumentGuard(
       .filter(([, record]) => currentTurnIndex - record.turnIndex <= MAX_IMPLICIT_HISTORY_TURN_AGE)
       .map(([reference]) => reference),
   );
+  // 同一个文件的相对写法和绝对写法算一个候选，否则会被当成"目标不唯一"。
+  const recentReferenceGroups = groupSameFileReferences([...recentReferences]);
   const explicitContinuation = HISTORICAL_REFERENCE_PATTERN.test(currentUserText);
   const requestsMutation = MUTATING_REQUEST_PATTERN.test(currentUserText) &&
     !NEGATED_MUTATING_ACTION_PATTERN.test(currentUserText);
@@ -590,7 +624,8 @@ export function createHistoricalToolArgumentGuard(
     if (staleReferences.length === 0) return undefined;
 
     // 承接只限最近两轮内唯一的资源；陈旧历史目标必须由本轮重新明确指定。
-    const hasUniqueRecentTarget = recentReferences.size === 1;
+    // "唯一"按文件算：相对写法和绝对写法指向同一个文件时算一个。
+    const hasUniqueRecentTarget = recentReferenceGroups.length === 1;
     const isSideEffectTool = ["write", "execute"].includes(getToolRisk(toolName));
     const canContinueExplicitly = explicitContinuation &&
       hasUniqueRecentTarget &&
@@ -615,12 +650,14 @@ export function createHistoricalToolArgumentGuard(
     }
 
     const isFollowUp = explicitContinuation || isImplicitFollowUp(currentUserText);
-    const ambiguousRecentTargets = isFollowUp && recentReferences.size > 1
-      ? [...recentReferences]
+    // 按文件分组之后再判歧义：两种写法指向同一个文件时不该打扰用户。
+    const ambiguousRecentTargets = isFollowUp && recentReferenceGroups.length > 1
+      ? recentReferenceGroups
+        .map((group) => group.reduce((longest, item) => (item.length > longest.length ? item : longest)))
+        .slice(0, 5)
       : [];
     if (ambiguousRecentTargets.length > 0) {
       const choices = ambiguousRecentTargets
-        .slice(0, 5)
         .map((reference) => activeRecords.get(reference)?.display ?? reference);
       return (
         `当前请求可能在承接历史上下文，但最近有多个候选资源（${choices.join("、")}），` +
@@ -636,7 +673,11 @@ export function createHistoricalToolArgumentGuard(
       `疑似沿用了历史对话中的资源参数（${displayReferences.join("、")}），` +
       `但当前用户请求没有明确引用或唯一承接它们；已阻止工具 ${toolName} 执行。` +
       "如果这是全新的目标，请忽略旧参数并按当前请求重新选择；" +
-      "如果这是对话追问但目标不唯一，请调用 request_clarification 让用户选择。" +
+      (hasUniqueRecentTarget
+        // 只有一个候选时让模型自己重新取参数，别把用户拉进弹窗：
+        // 用户会看到"选哪个路径"，而实际上根本没有第二个可选的东西。
+        ? "本轮请按当前请求重新确定目标（例如先列出目录里的文件），不要调用 request_clarification 询问用户。"
+        : "如果这是对话追问但目标不唯一，请调用 request_clarification 让用户选择。") +
       (isSideEffectTool
         ? "写入、编辑和执行类工具还必须有当前请求明确表达的操作意图。"
         : "")

@@ -1301,6 +1301,36 @@ async function runTestTurn(
   if (!rejection?.includes('yy.txt') || !rejection.includes('已阻止工具')) {
     throw new Error('历史资源参数 guard 没有拦截跨工具旧参数');
   }
+  // 同一个文件用相对路径和绝对路径各记过一次，不算两个候选：
+  // 用户只有一个文件，不该被问"用哪个路径"。
+  const sameFileHistory = [
+    { type: 'message', role: 'user', content: '校验 MainProgram.st' },
+    {
+      type: 'function_call',
+      name: 'validate_st_code',
+      callId: 'same-1',
+      arguments: JSON.stringify({ path: 'MainProgram.st' }),
+    },
+    { type: 'message', role: 'user', content: '再看 d:\\e\\SC5100\\MainProgram.st 这个' },
+    {
+      type: 'function_call',
+      name: 'validate_st_code',
+      callId: 'same-2',
+      arguments: JSON.stringify({ path: 'd:\\e\\SC5100\\MainProgram.st' }),
+    },
+  ];
+  const sameFileGuard = createHistoricalToolArgumentGuard(
+    sameFileHistory,
+    '校验一下项目所有的st文件有没有错误了',
+    testToolRisk,
+  );
+  const sameFileReason = sameFileGuard?.('validate_st_code', { path: 'MainProgram.st' });
+  if (sameFileReason?.includes('多个候选资源')) {
+    throw new Error('同一文件的相对/绝对写法不应被当成两个候选资源');
+  }
+  if (!sameFileReason?.includes('不要调用 request_clarification')) {
+    throw new Error('候选唯一时应让模型重新取参数，而不是弹窗问用户');
+  }
   const explicitGuard = createHistoricalToolArgumentGuard(history, '读取 yy.txt', testToolRisk);
   if (explicitGuard?.('read_file', { path: 'yy.txt' }) !== undefined) {
     throw new Error('当前用户明确指定的资源被错误拦截');
