@@ -1863,6 +1863,46 @@ function resolveCopyRequest(msg) {
   else pending.reject(new Error(typeof msg.error === 'string' ? msg.error : '复制失败'));
 }
 
+document.addEventListener('copy', (event) => {
+  const selection = window.getSelection();
+  if (
+    !selection ||
+    selection.isCollapsed ||
+    !messagesEl?.contains(selection.anchorNode) ||
+    !messagesEl.contains(selection.focusNode)
+  ) {
+    return;
+  }
+  const text = selection.toString();
+  if (!text) return;
+
+  // Populate the native copy event so paragraph and table selections work even
+  // when the host's Webview context-menu command does not copy its selection.
+  let plainTextWritten = false;
+  try {
+    event.clipboardData?.setData('text/plain', text);
+    plainTextWritten = !!event.clipboardData;
+  } catch (_error) {
+    // Fall back to the host clipboard bridge below.
+  }
+  if (plainTextWritten && event.clipboardData) {
+    try {
+      const wrapper = document.createElement('div');
+      for (let index = 0; index < selection.rangeCount; index += 1) {
+        wrapper.appendChild(selection.getRangeAt(index).cloneContents());
+      }
+      event.clipboardData.setData('text/html', wrapper.innerHTML);
+    } catch (_error) {
+      // Plain text is still available if rich clipboard data is unsupported.
+    }
+    event.preventDefault();
+    return;
+  }
+
+  event.preventDefault();
+  void copyTextToClipboard(text).catch(() => {});
+});
+
 function createCodeAction(label, title, onClick) {
   const button = document.createElement('button');
   button.type = 'button';

@@ -268,7 +268,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.log.appendLine(
           `[clipboard] #${id ?? '-'} 跳过 ${describeClipboardText(value)}：已有更新的一次复制`,
         );
-        void target.postMessage({ type: 'copyTextResult', requestId: id, ok: true });
+        void target.postMessage({
+          type: 'copyTextResult',
+          requestId: id,
+          ok: false,
+          error: '已由后续复制替代',
+        });
         return;
       }
       try {
