@@ -3038,6 +3038,10 @@ function validateTaskConfigurationInput(text) {
 function validateClarificationInput(rule, text) {
   if (!rule) return '';
   const raw = String(text || '').trim();
+  // 空值不报格式错，和 validateClarificationField 保持一致。
+  // 选推荐卡会清空自定义框，不短路的话会立刻弹一句"目录不能为空"——
+  // 用户明明已经选了卡片，却被自己没填的自定义框判错。
+  if (!raw) return '';
   if (rule.type === 'plcTaskConfiguration') return validateTaskConfigurationInput(raw);
   if (rule.type === 'iecIdentifier') {
     const problem = checkIecIdentifierInput(raw);
