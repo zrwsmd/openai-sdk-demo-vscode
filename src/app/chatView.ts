@@ -217,7 +217,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           typeof msg.actionKey === 'string' ? msg.actionKey : '',
         );
       } else if (msg.type === 'copyText') {
-        void this.copyTextToClipboard(msg.text, msg.requestId);
+        // 回执发给发请求的那个 webview，而不是 this.view：
+        // 视图被挪到别的面板时会重建，this.view 可能已经指向另一个实例，
+        // 那样回执发错地方，前端只能等到超时，按钮就一直是失败。
+        void this.copyTextToClipboard(view.webview, msg.text, msg.requestId);
       }
     });
 
@@ -232,16 +235,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /**
    * 复制走宿主：webview 的 navigator.clipboard 受 iframe 焦点和权限限制，
    * execCommand 失败时又只返回 false 不报错，只有 vscode.env.clipboard 是可靠的。
+   * 回执直接发给发请求的那个 webview，避免多实例时发错对象。
    */
-  private async copyTextToClipboard(text: unknown, requestId: unknown): Promise<void> {
+  private async copyTextToClipboard(
+    target: vscode.Webview,
+    text: unknown,
+    requestId: unknown,
+  ): Promise<void> {
     const id = typeof requestId === 'number' ? requestId : undefined;
+    const value = typeof text === 'string' ? text : '';
     try {
-      await vscode.env.clipboard.writeText(typeof text === 'string' ? text : '');
-      this.post({ type: 'copyTextResult', requestId: id, ok: true });
+      await vscode.env.clipboard.writeText(value);
+      this.log.appendLine(`[clipboard] 已复制 ${value.length} 字符`);
+      void target.postMessage({ type: 'copyTextResult', requestId: id, ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.appendLine(`[clipboard] 写入剪贴板失败: ${message}`);
-      this.post({ type: 'copyTextResult', requestId: id, ok: false, error: message });
+      void target.postMessage({ type: 'copyTextResult', requestId: id, ok: false, error: message });
     }
   }
 
@@ -1191,8 +1201,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildHtml(webview: vscode.Webview): string {
-    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js'));
-    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css'));
+    // 带上本次激活的时间戳：扩展更新后 webview 仍可能拿缓存里的旧脚本，
+    // 表现就是「刚装好能用、过一会儿又变回旧行为」。
+    const assetVersion = String(Date.now());
+    const js = webview
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js'))
+      .with({ query: `v=${assetVersion}` });
+    const css = webview
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css'))
+      .with({ query: `v=${assetVersion}` });
     const nonce = Array.from({ length: 16 }, () => Math.random().toString(36)[2] ?? '0').join('');
 
     return /* html */ `<!DOCTYPE html>
