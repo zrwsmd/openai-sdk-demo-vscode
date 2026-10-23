@@ -567,6 +567,49 @@ export function composeFinalMessage(
     : model;
 }
 
+/**
+ * 模型偶尔会把整段结构化 JSON 当成 message 返回，收尾器有时也只是原样转述。
+ * 这种内容绝不能直接展示给用户：能解析出内层 message 就用内层的；JSON 断了
+ * （模型中途停、被网关截断）就尝试把第一个 message 字段抠出来；再不行就当没有正文。
+ */
+export function unwrapStructuredMessage(value: string): string {
+  let text = String(value ?? "").trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!text.startsWith("{") && !text.startsWith("[")) return text;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      const salvaged = salvageMessageField(text);
+      return salvaged ?? "";
+    }
+    if (typeof parsed === "string") {
+      text = parsed.trim();
+      continue;
+    }
+    const inner =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>).message
+        : undefined;
+    if (typeof inner !== "string" || !inner.trim()) return "";
+    text = inner.trim();
+  }
+  // 套了三层还是 JSON，说明这不是一段话。
+  return text.startsWith("{") || text.startsWith("[") ? "" : text;
+}
+
+/** 从被截断的 JSON 里抠第一个 message 字段，只用于兜底展示，不做结构修复。 */
+function salvageMessageField(text: string): string | undefined {
+  const match = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/u.exec(text);
+  if (!match) return undefined;
+  try {
+    const decoded = JSON.parse(`"${match[1]}"`) as unknown;
+    return typeof decoded === "string" && decoded.trim() ? decoded.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runAgent(
   cfg: AgentConfig,
   session: Session,
@@ -1066,7 +1109,7 @@ export async function runAgent(
     value: IndustrialAgentOutput,
   ): IndustrialAgentOutput => ({
     ...value,
-    message: stripHistoricalContextMarker(value.message),
+    message: stripHistoricalContextMarker(unwrapStructuredMessage(value.message)),
   });
 
   // callId → 工具名:tool_call_output_item 在 chat_completions 转换下不一定带 name,靠调用时的映射回填

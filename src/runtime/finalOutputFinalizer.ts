@@ -124,6 +124,7 @@ export async function runFinalOutputFinalizer(
         "你负责把运行时提供的证据序列化为 IndustrialAgentOutput。",
         "本轮没有可用工具，不能发起工具调用；必须严格返回 schema JSON。",
         "不要把推测当成证据，不要因为用户请求了某件事就声称它已经完成。",
+        "message 必须是一段给用户看的中文说明，不能是 JSON，不能复述证据原文，也不能只贴诊断内容。",
         "可以使用历史解释参考回答过去状态或配置变化的原因，但不能把历史事实当成本轮工具执行证据。",
       ].join("\n"),
       tools: [],
