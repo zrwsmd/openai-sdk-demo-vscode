@@ -90,10 +90,12 @@ import {
 } from './mcp/mcpConnectionPool';
 import type {
   ClarificationAnswer,
+  ClarificationOption,
   ClarificationRequest,
   ClarificationResponse,
   ClarificationService,
 } from './clarification';
+import { bindClarificationOptionValue } from './clarification';
 import { SandboxCommandRunner } from '../tools/sandboxCommandRunner';
 import {
   applyTeamPlannerReport,
@@ -155,6 +157,7 @@ const REPLAYABLE_PROTOCOL_EVENT_TYPES = new Set<AgentProtocolEvent['type']>([
 interface PendingClarification {
   runId: string;
   complete: (response: ClarificationResponse) => void;
+  options: readonly ClarificationOption[];
   sequenceId?: string;
   stepId?: string;
   stepIndex?: number;
@@ -622,13 +625,14 @@ export class RunCoordinator {
       );
       return;
     }
+    const boundResponse = bindClarificationOptionValue(pending.options, response as ClarificationResponse);
     const resolved: ClarificationResponse = {
       requestId,
-      cancelled: response.cancelled === true,
-      ...(response.selectedOptionId ? { selectedOptionId: response.selectedOptionId } : {}),
-      ...(typeof response.customText === 'string' ? { customText: response.customText } : {}),
-      ...(response.value !== undefined ? { value: response.value } : {}),
-      ...(response.fields ? { fields: response.fields } : {}),
+      cancelled: boundResponse.cancelled === true,
+      ...(boundResponse.selectedOptionId ? { selectedOptionId: boundResponse.selectedOptionId } : {}),
+      ...(typeof boundResponse.customText === 'string' ? { customText: boundResponse.customText } : {}),
+      ...(boundResponse.value !== undefined ? { value: boundResponse.value } : {}),
+      ...(boundResponse.fields ? { fields: boundResponse.fields } : {}),
     };
     // 选择题打选项名,填空题打用户输入的原文。少了后半截,日志看起来像"用户没填"。
     const answer: string[] = [];
@@ -797,6 +801,7 @@ export class RunCoordinator {
       this.pendingClarifications.set(requestId, {
         runId: active.id,
         complete: finish,
+        options: [...(request.options ?? [])],
         ...(sequence ? sequence : {}),
       });
       signal?.addEventListener('abort', onAbort, { once: true });

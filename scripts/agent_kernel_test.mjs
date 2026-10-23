@@ -32,7 +32,36 @@ import {
   renderFallbackModeInstructions,
   composeFinalMessage,
   createAppWorkflowRegistry,
+  bindClarificationOptionValue,
 } from './agent.testbundle.mjs';
+
+// A clarification choice is resolved against the host-owned option list. The
+// webview may echo a value for display, but it cannot replace the canonical ID.
+{
+  const bound = bindClarificationOptionValue(
+    [{ id: 'record-a', label: 'Record A', value: JSON.stringify({ recordId: 'case-42' }) }],
+    {
+      requestId: 'clarification-1',
+      cancelled: false,
+      selectedOptionId: 'record-a',
+      value: JSON.stringify({ recordId: 'forged' }),
+    },
+  );
+  if (bound.value !== JSON.stringify({ recordId: 'case-42' })) {
+    throw new Error('澄清选项值没有绑定到宿主提供的候选目标');
+  }
+  const unknown = bindClarificationOptionValue(
+    [{ id: 'record-a', label: 'Record A', value: 'case-42' }],
+    {
+      requestId: 'clarification-2',
+      cancelled: false,
+      selectedOptionId: 'not-offered',
+      value: 'forged',
+    },
+  );
+  if ('value' in unknown) throw new Error('未提供的澄清选项保留了客户端伪造值');
+  console.log('[clarification] 候选 ID 与规范值绑定:通过');
+}
 
 // 最终消息合成：泛化收尾不能遮住工具证据；失败模型文本不能和成功证据并列；
 // 同一文件的不同字节数/措辞不能重复展示。
@@ -1495,13 +1524,87 @@ async function runTestTurn(
   if (writeWithoutActionGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
     throw new Error('仅表达继续上下文不能授权写入');
   }
+  const verifiedReadHistory = [
+    ...history,
+    {
+      type: 'function_call_result',
+      callId: 'old-read',
+      output: JSON.stringify({ ok: true, data: { path: 'yy.txt' } }),
+    },
+  ];
   const explicitWriteGuard = createHistoricalToolArgumentGuard(
-    history,
+    verifiedReadHistory,
     '继续修改刚才的文件',
     testToolRisk,
   );
   if (explicitWriteGuard?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
-    throw new Error('当前请求明确继续修改唯一历史目标时不应拦截');
+    throw new Error('当前请求明确继续修改已被工具确认的唯一目标时不应拦截');
+  }
+  const naturalRenameGuard = createHistoricalToolArgumentGuard(
+    verifiedReadHistory,
+    '改名并把文件一起重命名',
+    testToolRisk,
+  );
+  if (naturalRenameGuard?.('write_file', { path: 'yy.txt', content: 'new' }) !== undefined) {
+    throw new Error('自然语言重命名未能承接唯一且已确认的历史目标');
+  }
+  const unverifiedMutationGuard = createHistoricalToolArgumentGuard(
+    history,
+    '继续修改刚才的文件',
+    testToolRisk,
+  );
+  if (unverifiedMutationGuard?.('write_file', { path: 'yy.txt', content: 'new' }) === undefined) {
+    throw new Error('只有历史工具调用、没有成功回执时不应放行副作用');
+  }
+  if (!unverifiedMutationGuard?.('write_file', { path: 'yy.txt', content: 'new' }).includes('成功工具回执')) {
+    throw new Error('未验证目标的拦截结果没有说明证据不足');
+  }
+
+  // Generic resource IDs use the same continuation policy as paths.
+  const recordHistory = [
+    { type: 'message', role: 'user', content: '读取记录 case-42' },
+    {
+      type: 'function_call',
+      name: 'read_record',
+      callId: 'read-record-1',
+      arguments: JSON.stringify({ recordId: 'case-42' }),
+    },
+    {
+      type: 'function_call_result',
+      callId: 'read-record-1',
+      output: JSON.stringify({ ok: true, data: { recordId: 'case-42', status: 'open' } }),
+    },
+  ];
+  const recordRenameGuard = createHistoricalToolArgumentGuard(
+    recordHistory,
+    'Rename it',
+    testToolRisk,
+  );
+  if (recordRenameGuard?.('update_record', { recordId: 'case-42', name: 'Renamed' }) !== undefined) {
+    throw new Error('非文件资源的稳定 ID 未能承接唯一且已确认的历史目标');
+  }
+  const unrelatedRenameGuard = createHistoricalToolArgumentGuard(
+    recordHistory,
+    'Rename the new dashboard',
+    testToolRisk,
+  );
+  if (unrelatedRenameGuard?.('update_record', { recordId: 'case-42', name: 'Dashboard' }) === undefined) {
+    throw new Error('新目标请求不应因为历史里只有一个 ID 就继承旧目标');
+  }
+  const selectedRecordGuard = createHistoricalToolArgumentGuard(
+    recordHistory.slice(0, 2),
+    'update this record',
+    testToolRisk,
+  );
+  if (selectedRecordGuard?.('update_record', { recordId: 'case-42', name: 'Renamed' }) === undefined) {
+    throw new Error('澄清前的历史目标不应直接进入副作用工具');
+  }
+  selectedRecordGuard?.allowConfirmedResources({
+    selectedOptionId: 'record-case-42',
+    value: JSON.stringify({ recordId: 'case-42' }),
+  });
+  if (selectedRecordGuard?.('update_record', { recordId: 'case-42', name: 'Renamed' }) !== undefined) {
+    throw new Error('用户在本轮澄清中选择的通用资源 ID 仍被拦截');
   }
   const negatedWriteGuard = createHistoricalToolArgumentGuard(
     history,
@@ -1562,6 +1665,16 @@ async function runTestTurn(
       name: 'write_file',
       callId: 'w2',
       arguments: JSON.stringify({ path: '_du_d2.ps1', content: 'y' }),
+    },
+    {
+      type: 'function_call_result',
+      callId: 'w1',
+      output: JSON.stringify({ ok: true, data: { path: '_du_d.ps1' } }),
+    },
+    {
+      type: 'function_call_result',
+      callId: 'w2',
+      output: JSON.stringify({ ok: true, data: { path: '_du_d2.ps1' } }),
     },
   ];
   const deleteFollowUpGuard = createHistoricalToolArgumentGuard(twoFileHistory, '删掉吧', testToolRisk);

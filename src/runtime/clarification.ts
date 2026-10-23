@@ -194,6 +194,20 @@ export interface ClarificationResponse {
   sequenceCompleted?: boolean;
 }
 
+/** Bind a submitted option ID to the value that the host originally offered. */
+export function bindClarificationOptionValue<T extends ClarificationResponse>(
+  options: readonly ClarificationOption[],
+  response: T,
+): T {
+  if (!response.selectedOptionId) return response;
+  const selected = options.find((option) => option.id === response.selectedOptionId);
+  const { value: _submittedValue, ...rest } = response;
+  return {
+    ...rest,
+    ...(selected?.value !== undefined ? { value: selected.value } : {}),
+  } as T;
+}
+
 export interface ClarificationService {
   request(
     request: ClarificationRequest,
