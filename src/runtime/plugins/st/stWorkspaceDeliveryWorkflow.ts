@@ -236,9 +236,11 @@ export const ST_WORKSPACE_DELIVERY_WORKFLOW: WorkflowDescriptor = {
   id: "st_workspace_delivery",
   title: "ST 代码交付",
   description:
-    "生成完整 ST 程序、修改 PLC 控制逻辑或修复 ST 语法，并通过校验后正式保存。" +
+    "生成完整 ST 程序、修改 PLC 控制逻辑，或修复语法错误——这些都要改动代码并保存到工作区。" +
+    "只做只读校验、检查现有 ST 有没有语法错误、不要求改动代码的请求不属于本工作流。" +
     "仅修改注释、格式、缩进、空白或换行等不改变程序语义的操作应使用 file_edit。",
   runtimeManaged: true,
+  requiresCodeChange: true,
   workflowRoute: "st_delivery",
   businessToolNames: ST_WORKSPACE_DELIVERY_TOOL_NAMES,
   pipelinePlan: ST_WORKSPACE_DELIVERY_PIPELINE_PLAN,

@@ -260,6 +260,11 @@ export interface WorkflowDescriptor {
   runtimeManaged: boolean;
   /** Current-turn action intents this workflow can own, when constrained. */
   actionIntents?: readonly CurrentActionIntent[];
+  /**
+   * 这个工作流会改动代码或文件。
+   * 用户话里只有校验、检查这类只读动词、没有任何写改生成动词时，不允许它接。
+   */
+  requiresCodeChange?: boolean;
   workflowRoute?: string;
   businessToolNames?: readonly string[];
   resolveBusinessToolPolicy?: WorkflowBusinessToolPolicyResolver;

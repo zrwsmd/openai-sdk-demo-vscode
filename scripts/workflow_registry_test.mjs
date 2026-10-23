@@ -13,6 +13,7 @@ import {
   createAppWorkflowRegistry,
   createAppToolRegistry,
   WorkflowDecisionService,
+  isReadOnlyInspectionRequest,
 } from './agent.testbundle.mjs';
 
 const generic = {
@@ -144,6 +145,84 @@ const logicEditDecision = await stRouting.decide(
 );
 assert.equal(logicEditDecision.kind, 'workflow');
 assert.equal(logicEditDecision.workflow.id, 'st_workspace_delivery');
+
+// 只读校验不属于改动类工作流。Jev 即使把 st_delivery 报上来，也不能接。
+const readOnlyHint = {
+  delivery: 'not_required',
+  deliveryConfidence: 0.58,
+  orchestration: 'single',
+  orchestrationConfidence: 0.98,
+  workflow: 'st_delivery',
+  workflowConfidence: 0.85,
+  toolNeeds: {
+    readFile: { value: 'yes', confidence: 0.78 },
+    writeFile: { value: 'no', confidence: 0.66 },
+    runCommand: { value: 'uncertain', confidence: 0.36 },
+  },
+  riskLevel: 'unknown',
+  riskConfidence: 0.51,
+  needsApproval: { value: 'no', confidence: 0.58 },
+  evaluation: {},
+};
+const routingLogs = [];
+const readOnlyRouting = new WorkflowDecisionService(
+  (line) => routingLogs.push(line),
+  { taskHint: async () => readOnlyHint },
+  appRegistry,
+  createAppToolRegistry().getToolCatalog(),
+);
+let readOnlyClassifierCalls = 0;
+const inspectionDecision = await readOnlyRouting.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: process.cwd(),
+    workspaceRoot: process.cwd(),
+  },
+  '校验项目的st有没有语法错误',
+  undefined,
+  [],
+  {
+    modelClassifier: async () => {
+      readOnlyClassifierCalls += 1;
+      return {
+        kind: 'workflow',
+        workflowId: 'st_workspace_delivery',
+        confidence: 0.99,
+        reason: 'intentionally overbroad classifier result',
+      };
+    },
+  },
+);
+assert.notEqual(inspectionDecision.kind, 'workflow', '只读校验不能被改动类工作流接住');
+assert.equal(inspectionDecision.mode, 'read_only');
+assert.equal(readOnlyClassifierCalls, 1, 'Jev 报的改动类工作流被挡下后应继续往下判');
+assert(
+  routingLogs.some((line) => line.includes('用户只要求校验/检查')),
+  '被只读判定挡下的工作流必须说明原因',
+);
+
+// 同一句话只要出现写、改、生成的动词，就不该被只读判定挡掉。
+const repairDecision = await readOnlyRouting.decide(
+  {
+    baseUrl: '',
+    apiKey: 'test',
+    model: 'test',
+    exportDir: process.cwd(),
+    workspaceRoot: process.cwd(),
+  },
+  '校验项目的st有没有语法错误，有的话修复',
+);
+assert.equal(repairDecision.kind, 'workflow');
+assert.equal(repairDecision.workflow.id, 'st_workspace_delivery');
+
+assert.equal(isReadOnlyInspectionRequest('校验项目的st有没有语法错误'), true);
+assert.equal(isReadOnlyInspectionRequest('看看这个 ST 文件有没有问题'), true);
+assert.equal(isReadOnlyInspectionRequest('检查一下语法，然后生成一个报告'), false);
+assert.equal(isReadOnlyInspectionRequest('把这段逻辑改一下'), false);
+assert.equal(isReadOnlyInspectionRequest('项目的 st 在哪'), false, '没有只读动词时不拦');
+
 assert.deepEqual([...ST_WORKSPACE_DELIVERY_PRIMARY_TOOL_NAMES], [
   'validate_st_code',
   'commit_st_delivery',

@@ -130,6 +130,25 @@ function hasNegation(text: string, action: RegExp): boolean {
   return new RegExp(`(?:不要|无需|不需要|别|勿)[^。！？\\r\\n]{0,8}${action.source}`, action.flags).test(text);
 }
 
+/**
+ * 只看不改的请求：出现校验、检查这类只读动词，同时没有任何写、改、生成的动词。
+ *
+ * 这个判定只服务于声明了 requiresCodeChange 的工作流。那种工作流会一路走到
+ * 提交和写盘，一句「校验一下有没有语法错误」被它接住，等于替用户做了一次改动。
+ * 两边都不确定的时候按"不改"处理：只读动词没出现，或者写动词出现了，都不拦。
+ */
+const READ_ONLY_INSPECTION_PATTERN =
+  /(?:校验|验证|检查|检测|查看|看看|看下|看一下|查一下|查查|扫描|分析|核对|确认|诊断|排查|定位|有没有|是否有|是否|报错|错误|问题|validate|check|lint|inspect|verify|scan|analy[sz]e|diagnose)/iu;
+const CODE_CHANGE_PATTERN =
+  /(?:写|改|修|生成|创建|新建|建立|搭建|输出|保存|落盘|覆盖|添加|增加|追加|插入|删除|移除|替换|重构|实现|补全|优化|调整|格式化|重写|write|save|create|fix|modify|refactor|implement|generate|add|delete|remove|replace|update|format|edit)/iu;
+
+export function isReadOnlyInspectionRequest(userText: string): boolean {
+  const text = userText.trim();
+  if (!text) return false;
+  if (!READ_ONLY_INSPECTION_PATTERN.test(text)) return false;
+  return !CODE_CHANGE_PATTERN.test(text);
+}
+
 function isInformationalActionQuery(text: string): boolean {
   const hasQuestionMarker =
     /[?？]|(?:吗|么|哪个|哪些|什么|哪里|是否|有没有|有无|怎么|为何|为什么|谁|多少)/u.test(text);

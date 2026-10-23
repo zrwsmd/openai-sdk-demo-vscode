@@ -11,6 +11,7 @@ import {
 } from "./registry";
 import type { ToolCatalog } from "../toolCatalog";
 import { inferCurrentActionIntent } from "../../policy/actionPolicy";
+import { isReadOnlyInspectionRequest } from "../../policy/actionPolicy";
 import type { CurrentActionIntent } from "../../policy/actionPolicy";
 import { createWorkflowContract } from "./types";
 import type {
@@ -70,6 +71,7 @@ export class WorkflowDecisionService {
     const registeredWorkflowDecision = this.workflowFromRegisteredJevHint(
       jevHint,
       actionIntent,
+      userText,
     );
     if (registeredWorkflowDecision) return registeredWorkflowDecision;
 
@@ -112,9 +114,10 @@ export class WorkflowDecisionService {
   private workflowFromRegisteredJevHint(
     hint: TaskDecisionHint,
     actionIntent: CurrentActionIntent,
+    userText: string,
   ): WorkflowDecision | undefined {
     const workflow = this.registry.getByRoute(hint.workflow) ?? this.registry.get(hint.workflow);
-    if (workflow && isWorkflowCompatibleWithAction(workflow, actionIntent)) {
+    if (workflow && isWorkflowCompatibleWithAction(workflow, actionIntent, userText)) {
       const contract = createWorkflowContract(workflow, {
         source: "jev",
         reason: `Jev 高置信度识别为 ${workflow.title}(${hint.workflowConfidence.toFixed(2)})`,
@@ -134,7 +137,9 @@ export class WorkflowDecisionService {
     }
     if (workflow) {
       this.log(
-        `[workflow] 忽略 ${workflow.id}: 当前动作 ${actionIntent} 不在该 workflow 的兼容范围内`,
+        isReadOnlyBlockedWorkflow(workflow, userText)
+          ? `[workflow] 忽略 ${workflow.id}: 用户只要求校验/检查，不需要改动代码`
+          : `[workflow] 忽略 ${workflow.id}: 当前动作 ${actionIntent} 不在该 workflow 的兼容范围内`,
       );
     }
     return undefined;
@@ -241,6 +246,12 @@ export class WorkflowDecisionService {
     actionIntent: CurrentActionIntent,
   ): WorkflowDecision | undefined {
     for (const workflow of workflows) {
+      if (isReadOnlyBlockedWorkflow(workflow, userText)) {
+        this.log(
+          `[workflow] 忽略 local ${workflow.id}: 用户只要求校验/检查，不需要改动代码`,
+        );
+        continue;
+      }
       const match = workflow.localMatch?.({ userText, history, actionIntent });
       if (!match?.matched) continue;
       const contract = createWorkflowContract(workflow, {
@@ -286,9 +297,11 @@ export class WorkflowDecisionService {
     if (decision.kind === "workflow") {
       const workflow = this.registry.get(decision.workflowId);
       if (!workflow) return undefined;
-      if (!isWorkflowCompatibleWithAction(workflow, actionIntent)) {
+      if (!isWorkflowCompatibleWithAction(workflow, actionIntent, userText)) {
         this.log(
-          `[workflow] 忽略模型 workflow ${workflow.id}: 当前动作 ${actionIntent} 不在兼容范围内`,
+          isReadOnlyBlockedWorkflow(workflow, userText)
+            ? `[workflow] 忽略模型 workflow ${workflow.id}: 用户只要求校验/检查，不需要改动代码`
+            : `[workflow] 忽略模型 workflow ${workflow.id}: 当前动作 ${actionIntent} 不在兼容范围内`,
         );
         return undefined;
       }
@@ -370,9 +383,22 @@ export class WorkflowDecisionService {
 function isWorkflowCompatibleWithAction(
   workflow: WorkflowDescriptor,
   actionIntent: CurrentActionIntent,
+  userText: string,
 ): boolean {
+  // 改动类工作流不接纯只读请求：用户只想校验、检查，不需要走提交和写盘。
+  if (workflow.requiresCodeChange && isReadOnlyInspectionRequest(userText)) {
+    return false;
+  }
   const allowed = workflow.actionIntents;
   return !allowed || allowed.length === 0 || allowed.includes(actionIntent);
+}
+
+/** 被 requiresCodeChange 挡下来的工作流要单独说清楚原因，别混进"动作不兼容"。 */
+function isReadOnlyBlockedWorkflow(
+  workflow: WorkflowDescriptor,
+  userText: string,
+): boolean {
+  return workflow.requiresCodeChange === true && isReadOnlyInspectionRequest(userText);
 }
 
 function signalsFromHint(hint: TaskDecisionHint): WorkflowDecisionSignals {
