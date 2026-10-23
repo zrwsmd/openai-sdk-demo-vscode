@@ -31,6 +31,7 @@ import {
   isRetryableAgentError,
   renderFallbackModeInstructions,
   composeFinalMessage,
+  createAppWorkflowRegistry,
 } from './agent.testbundle.mjs';
 
 // 最终消息合成：泛化收尾不能遮住工具证据；失败模型文本不能和成功证据并列；
@@ -1105,6 +1106,53 @@ async function runTestTurn(
   }
   if (!r.output.includes('PumpControl.st')) {
     throw new Error('普通正文兜底后的最终确认不正确');
+  }
+}
+
+// [3g] 工作流交付完成后的收尾轮：模型只写一段正文总结，不该再被要求补 JSON。
+// 这一轮工具已经收起、不会再产生诊断和产物，重写一次只会把模型写的总结换成账本话。
+{
+  const asked = [];
+  const before = diagLines.length;
+  const tailContract = normalizeWorkflowContract({
+    requiresDeliverable: true,
+    reason: '生成 ST 代码并保存到工作区',
+    deliverables: [{
+      kind: 'code',
+      title: 'ST 程序',
+      description: '完整 ST 控制程序',
+      required: true,
+      acceptableEvidence: ['final_artifact'],
+      workspaceFileExtension: '.st',
+      requiredVerificationTools: ['validate_st_code'],
+    }],
+  });
+  const r = await runTestTurn(
+    '收尾正文回归',
+    async (name) => {
+      asked.push(name);
+      return true;
+    },
+    {
+      workflowId: 'st_workspace_delivery',
+      workflowRegistry: createAppWorkflowRegistry(),
+      deliveryContract: tailContract,
+    },
+    new JsonFileSession(path.join(dir, 'tail-plain-text-session.json')),
+  );
+  const fresh = diagLines.slice(before);
+  const toolCalls = r.events
+    .filter((event) => event.type === 'tool.started')
+    .map((event) => event.payload.toolName);
+  console.log('[3g] 交付收尾轮:工具链 =', toolCalls.join(','), '| 正文 =', r.output.split('\n')[0]);
+  if (!r.output.includes('语法错误 0 个')) {
+    throw new Error('收尾轮的正文没有直接作为最终输出');
+  }
+  if (!fresh.some((line) => line.includes('交付收尾轮按正文收下'))) {
+    throw new Error('收尾轮没有走正文直收分支');
+  }
+  if (fresh.some((line) => line.includes('收尾请求失败'))) {
+    throw new Error('收尾轮不该再触发结构化重写');
   }
 }
 

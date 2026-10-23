@@ -502,6 +502,17 @@ const server = http.createServer((req, res) => {
         path: 'PumpControl.st',
         content: ST_CODE,
       }));
+    } else if (userText.includes('收尾正文回归') && last.role !== 'tool') {
+      endWithNamedToolCall(res, model, 'validate_st_code', JSON.stringify({
+        code: ST_CODE,
+        loadWorkspaceContext: false,
+      }));
+    } else if (
+      userText.includes('收尾正文回归') &&
+      hasAssistantToolCall('write_file')
+    ) {
+      // 交付已完成、工具已收起，这一轮只写一段正文总结，不包 JSON。
+      await streamText(res, model, '已校验并保存 PumpControl.st，语法错误 0 个。');
     } else if (
       userText.includes('ST草稿修正回归') &&
       hasAssistantToolCall('write_file')

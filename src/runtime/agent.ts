@@ -2099,7 +2099,8 @@ export async function runAgent(
           bailed = true;
         } else if (structuredMode && isInvalidFinalOutputTypeError(e)) {
           salvagedInvalidFinalOutput = true;
-          finalizerRequired = true;
+          // 交付收尾轮不重写：这一轮只是总结，SDK 的 schema 校验失败照收正文。
+          finalizerRequired = !workflowCompleted;
         } else {
           throw e;
         }
@@ -2127,6 +2128,17 @@ export async function runAgent(
           structuredOutput = sanitizeAssistantOutput(
             parsed.data as IndustrialAgentOutput,
           );
+        } else if (workflowCompleted) {
+          // 交付收尾轮：交付物已经齐了、工具已经收起，这一轮模型只是在写总结。
+          // 它不会再产生诊断和产物，按 schema 重写一次什么也拿不到，只会把模型
+          // 自己写的总结换成账本拼出来的话。所以这里不做 schema 校验，正文照收。
+          const coerced = coerceIndustrialAgentOutput(finalOutput);
+          if (coerced) {
+            structuredOutput = sanitizeAssistantOutput(coerced);
+            agentLog("[output] 交付收尾轮按正文收下，不再要求结构化输出");
+          } else {
+            finalizerRequired = true;
+          }
         } else {
           finalizerRequired = true;
           structuredOutput =
@@ -2162,7 +2174,7 @@ export async function runAgent(
       !structuredOutput &&
       output.trim()
     ) {
-      finalizerRequired = true;
+      finalizerRequired = !workflowCompleted;
       const invalidStructuredText = isInvalidStructuredOutputText(output);
       if (!invalidStructuredText) {
         structuredOutput = coerceIndustrialAgentOutput(output) ?? {
