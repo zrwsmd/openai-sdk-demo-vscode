@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   CLARIFICATION_TOOL_NAME,
   inferClarificationValidation,
+  isClosedOptionField,
   summarizeClarificationResponse,
 } from '../clarification';
 import type { ClarificationInputValidation } from '../clarification';
@@ -146,7 +147,9 @@ export function createClarificationTool(ctx: ToolBuildContext) {
                   question: step.question,
                   ...(step.details ? { details: step.details } : {}),
                   ...(step.options?.length ? { options: step.options } : {}),
-                  allowCustom: step.allowCustom !== false,
+                  // 固定候选的字段（工程类型、工程语言、设备型号）不给自定义入口：
+                  // 用户填什么都进不了对方插件的枚举，只会白填一遍。
+                  allowCustom: !isClosedOptionField(step.id) && step.allowCustom !== false,
                   ...(step.customPlaceholder ? { customPlaceholder: step.customPlaceholder } : {}),
                   ...(stepValidation ? { inputValidation: stepValidation } : {}),
                   required: step.required !== false,

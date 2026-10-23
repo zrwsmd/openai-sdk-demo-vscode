@@ -14,6 +14,7 @@ import {
   createWorkflowRuntimeState,
   composeToolSet,
   inferClarificationValidation,
+  isClosedOptionField,
   resolveWorkflowBusinessToolPolicy,
 } from './agent.testbundle.mjs';
 
@@ -404,6 +405,19 @@ assert.equal(inferClarificationValidation('language', '用哪种编程语言'), 
 // 指令里必须点名这两个 id,不然模型写的是别的名字,兜底也接不上。
 assert.match(runtime.instructions(), /projectPath/u, '工作流指令必须告诉模型父目录那一步的 id');
 assert.match(runtime.instructions(), /projectName/u, '工作流指令必须告诉模型工程名那一步的 id');
+
+// 固定候选的字段不给自定义入口,否则用户填的内容进不了对方插件的枚举。
+assert.equal(isClosedOptionField('projectType'), true);
+assert.equal(isClosedOptionField('language'), true);
+assert.equal(isClosedOptionField('lan'), true);
+assert.equal(isClosedOptionField('deviceModel'), true);
+assert.equal(isClosedOptionField('工程类型'), true);
+assert.equal(isClosedOptionField('设备型号'), true);
+// 这些字段的候选只是建议值,必须保留自定义。
+assert.equal(isClosedOptionField('projectPath'), false);
+assert.equal(isClosedOptionField('projectName'), false);
+assert.equal(isClosedOptionField('taskName'), false);
+assert.equal(isClosedOptionField(undefined), false);
 
 console.log('devuni workflow tests passed');
 

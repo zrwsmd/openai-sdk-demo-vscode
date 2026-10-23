@@ -167,6 +167,8 @@ export class DevuniProjectWorkflow implements WorkflowRuntime {
       "设备型号是必填项,必须先用 devuni_project_options 查询候选项并让用户选择,不得默默采用第一个默认型号。" +
       "设备型号、父目录、工程名这三步必须由用户回答,required 保持默认,不要设为 false;" +
       "工程类型和工程语言允许用户不选(不选时运行时会取候选列表的第一个),这两步请把 required 显式设为 false。" +
+      "工程类型、工程语言、设备型号这三步的取值只有 devuni_project_options 给出的固定候选," +
+      "弹窗不会给自定义输入框,也不要给这三步编造候选之外的值。" +
       "语言、工程类型或设备型号不确定时,先用 devuni_project_options 查询候选项。" +
       "devuni_create_project 是写操作,必须等用户在界面批准后才会真正执行;" +
       "完成后说明工程已创建即可;不要把 .code-workspace 工作区文件当作工程根目录,也不要主动读取它。" +

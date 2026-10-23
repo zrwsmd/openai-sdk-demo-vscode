@@ -120,6 +120,25 @@ export function inferClarificationValidation(
     : { type: 'directoryPath', label: '目录' };
 }
 
+/**
+ * 这几个字段的取值来自插件给出的固定清单，没有自由填写的余地。
+ * 弹窗上再给一个「或自定义」输入框，用户填了也用不了，所以直接关掉。
+ */
+export function isClosedOptionField(fieldId: string | undefined): boolean {
+  const id = String(fieldId ?? '').trim();
+  if (!id) return false;
+  if (/工程类型|工程语言|设备型号/u.test(id)) return true;
+  const normalized = id.replace(/[^a-z0-9]/giu, '').toLowerCase();
+  return (
+    normalized === 'projecttype' ||
+    normalized === 'prjtype' ||
+    normalized === 'language' ||
+    normalized === 'lan' ||
+    normalized === 'devicemodel' ||
+    normalized === 'device'
+  );
+}
+
 export interface ClarificationStep {
   id: string;
   title?: string;
